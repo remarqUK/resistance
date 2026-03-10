@@ -1,0 +1,17 @@
+﻿# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local Codex/Claude workspace state
+.claude/
+
+# Generated strategy artifacts
+fx_data.db
+viz_data.json
+backups/
+
+# Virtual environments
+.venv/
+venv/
+env/

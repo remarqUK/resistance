@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FX S/R Strategy Backtest Viewer</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0e17; color: #d1d5db; }
+
+  #header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 20px; background: #111827; border-bottom: 1px solid #1f2937;
+  }
+  #header h1 { font-size: 16px; color: #f9fafb; white-space: nowrap; }
+  #header select {
+    background: #1f2937; color: #f9fafb; border: 1px solid #374151;
+    padding: 6px 12px; border-radius: 6px; font-size: 14px; cursor: pointer;
+  }
+  #stats {
+    display: flex; gap: 20px; font-size: 13px; margin-left: auto;
+  }
+  .stat { display: flex; gap: 4px; }
+  .stat-label { color: #6b7280; }
+  .stat-value { color: #f9fafb; font-weight: 600; }
+  .stat-value.positive { color: #10b981; }
+  .stat-value.negative { color: #ef4444; }
+
+  #main { display: flex; flex-direction: column; height: calc(100vh - 46px); }
+  #chart-container { flex: 1; min-height: 0; }
+
+  #trade-panel {
+    height: 220px; overflow-y: auto; background: #111827;
+    border-top: 1px solid #1f2937;
+  }
+  #trade-panel table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  #trade-panel th {
+    position: sticky; top: 0; background: #1f2937; color: #9ca3af;
+    padding: 6px 10px; text-align: left; font-weight: 500;
+  }
+  #trade-panel td { padding: 5px 10px; border-bottom: 1px solid #1f2937; cursor: pointer; }
+  #trade-panel tr:hover td { background: #1e293b; }
+  #trade-panel tr.selected td { background: #1e3a5f; }
+  .win { color: #10b981; }
+  .loss { color: #ef4444; }
+  .tag {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+  }
+  .tag-long { background: #064e3b; color: #34d399; }
+  .tag-short { background: #7f1d1d; color: #fca5a5; }
+  .tag-tp { background: #064e3b; color: #6ee7b7; }
+  .tag-sl { background: #7f1d1d; color: #fca5a5; }
+  .tag-early { background: #78350f; color: #fcd34d; }
+  .tag-other { background: #1e3a5f; color: #93c5fd; }
+
+  #legend {
+    display: flex; gap: 16px; padding: 4px 20px; background: #111827;
+    font-size: 11px; color: #6b7280; border-top: 1px solid #1f2937;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>FX S/R Backtest</h1>
+  <select id="pair-select"></select>
+  <div id="stats"></div>
+</div>
+
+<div id="main">
+  <div id="chart-container"></div>
+  <div id="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(59,130,246,0.25);border:1px solid #3b82f6"></div> Support zone</div>
+    <div class="legend-item"><div class="legend-dot" style="background:rgba(249,115,22,0.25);border:1px solid #f97316"></div> Resistance zone</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div> LONG entry</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div> SHORT entry</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#8b5cf6"></div> Exit</div>
+  </div>
+  <div id="trade-panel">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>Entry Time</th><th>Dir</th><th>Entry</th><th>Exit</th>
+          <th>SL</th><th>TP</th><th>Exit Reason</th><th>R-Mult</th>
+          <th>Pips</th><th>Bars</th><th>Zone</th>
+        </tr>
+      </thead>
+      <tbody id="trade-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let DATA = {};
+let chart = null;
+let candleSeries = null;
+let markersList = [];
+let zoneLines = [];
+let currentPair = null;
+
+// Load data
+fetch('viz_data.json')
+  .then(r => r.json())
+  .then(data => {
+    DATA = data;
+    initPairSelect();
+    const first = Object.keys(DATA)[0];
+    if (first) loadPair(first);
+  })
+  .catch(err => {
+    document.getElementById('chart-container').innerHTML =
+      '<div style="padding:40px;color:#ef4444;font-size:18px">Failed to load viz_data.json. Run: python run.py viz</div>';
+  });
+
+function initPairSelect() {
+  const sel = document.getElementById('pair-select');
+  for (const [key, val] of Object.entries(DATA)) {
+    const opt = document.createElement('option');
+    opt.value = key;
+    const blocked = val.blocked_directions || [];
+    let suffix = '';
+    if (blocked.length === 1) suffix = ` - ${blocked[0] === 'LONG' ? 'SHORT' : 'LONG'} only`;
+    opt.textContent = `${val.name} (${val.stats.total_trades} trades)${suffix}`;
+    sel.appendChild(opt);
+  }
+  sel.addEventListener('change', () => loadPair(sel.value));
+}
+
+function loadPair(pair) {
+  currentPair = pair;
+  document.getElementById('pair-select').value = pair;
+  const d = DATA[pair];
+
+  // Stats bar
+  const pnlClass = d.stats.total_pnl_pips >= 0 ? 'positive' : 'negative';
+  const blocked = d.blocked_directions || [];
+  let filterHtml = '';
+  if (blocked.length > 0) {
+    const allowed = blocked[0] === 'LONG' ? 'SHORT' : 'LONG';
+    filterHtml = `<div class="stat"><span class="tag" style="background:#78350f;color:#fcd34d;font-size:12px">${allowed} ONLY</span></div>`;
+  }
+  document.getElementById('stats').innerHTML = `
+    ${filterHtml}
+    <div class="stat"><span class="stat-label">Trades:</span><span class="stat-value">${d.stats.total_trades}</span></div>
+    <div class="stat"><span class="stat-label">Win Rate:</span><span class="stat-value">${d.stats.win_rate}%</span></div>
+    <div class="stat"><span class="stat-label">P&L:</span><span class="stat-value ${pnlClass}">${d.stats.total_pnl_pips > 0 ? '+' : ''}${d.stats.total_pnl_pips} pips</span></div>
+    <div class="stat"><span class="stat-label">PF:</span><span class="stat-value">${d.stats.profit_factor}</span></div>
+    <div class="stat"><span class="stat-label">Avg W:</span><span class="stat-value positive">+${d.stats.avg_win_r}R</span></div>
+    <div class="stat"><span class="stat-label">Avg L:</span><span class="stat-value negative">${d.stats.avg_loss_r}R</span></div>
+  `;
+
+  // Create chart
+  const container = document.getElementById('chart-container');
+  container.innerHTML = '';
+
+  chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: {
+      background: { color: '#0a0e17' },
+      textColor: '#9ca3af',
+    },
+    grid: {
+      vertLines: { color: '#1f2937' },
+      horzLines: { color: '#1f2937' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    timeScale: {
+      timeVisible: true,
+      secondsVisible: false,
+      borderColor: '#1f2937',
+    },
+    rightPriceScale: {
+      borderColor: '#1f2937',
+      scaleMargins: { top: 0.05, bottom: 0.05 },
+    },
+  });
+
+  // Candlestick series
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#10b981',
+    downColor: '#ef4444',
+    borderUpColor: '#10b981',
+    borderDownColor: '#ef4444',
+    wickUpColor: '#10b981',
+    wickDownColor: '#ef4444',
+  });
+  candleSeries.setData(d.ohlc);
+
+  // Draw S/R zones as price lines
+  zoneLines = [];
+  for (const z of d.zones) {
+    if (z.strength !== 'major') continue;
+    const color = z.type === 'support' ? 'rgba(59,130,246,0.4)' : 'rgba(249,115,22,0.4)';
+    const lineColor = z.type === 'support' ? '#3b82f6' : '#f97316';
+
+    // Upper line
+    const upper = candleSeries.createPriceLine({
+      price: z.upper,
+      color: lineColor,
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      axisLabelVisible: false,
+    });
+    // Lower line
+    const lower = candleSeries.createPriceLine({
+      price: z.lower,
+      color: lineColor,
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      axisLabelVisible: false,
+    });
+    zoneLines.push(upper, lower);
+  }
+
+  // Trade markers
+  const markers = [];
+  for (let i = 0; i < d.trades.length; i++) {
+    const t = d.trades[i];
+    // Entry marker
+    markers.push({
+      time: t.entry_time,
+      position: t.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+      color: t.direction === 'LONG' ? '#10b981' : '#ef4444',
+      shape: t.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+      text: `#${i + 1} ${t.direction}`,
+    });
+    // Exit marker
+    if (t.exit_time) {
+      const exitColor = t.pnl_r > 0 ? '#10b981' : t.pnl_r < -0.5 ? '#ef4444' : '#f59e0b';
+      markers.push({
+        time: t.exit_time,
+        position: t.direction === 'LONG' ? 'aboveBar' : 'belowBar',
+        color: '#8b5cf6',
+        shape: 'circle',
+        text: `${t.exit_reason} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R`,
+      });
+    }
+  }
+  // Sort markers by time (required by lightweight-charts)
+  markers.sort((a, b) => a.time - b.time);
+  candleSeries.setMarkers(markers);
+
+  // Trade table
+  renderTradeTable(d.trades, d.decimals);
+
+  // Resize handler
+  const ro = new ResizeObserver(() => {
+    chart.resize(container.clientWidth, container.clientHeight);
+  });
+  ro.observe(container);
+}
+
+function renderTradeTable(trades, decimals) {
+  const tbody = document.getElementById('trade-tbody');
+  tbody.innerHTML = '';
+
+  for (let i = 0; i < trades.length; i++) {
+    const t = trades[i];
+    const tr = document.createElement('tr');
+    const pnlClass = t.pnl_r > 0 ? 'win' : 'loss';
+    const dirTag = t.direction === 'LONG' ? 'tag-long' : 'tag-short';
+    let exitTag = 'tag-other';
+    if (t.exit_reason === 'TP') exitTag = 'tag-tp';
+    else if (t.exit_reason === 'SL') exitTag = 'tag-sl';
+    else if (['EARLY_EXIT', 'SIDEWAYS', 'TIME'].includes(t.exit_reason)) exitTag = 'tag-early';
+
+    const entryDate = new Date(t.entry_time * 1000).toISOString().replace('T', ' ').slice(0, 16);
+    const zoneStr = `${t.zone_lower.toFixed(decimals)} - ${t.zone_upper.toFixed(decimals)}`;
+
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td>${entryDate}</td>
+      <td><span class="tag ${dirTag}">${t.direction}</span></td>
+      <td>${t.entry_price.toFixed(decimals)}</td>
+      <td>${t.exit_price ? t.exit_price.toFixed(decimals) : '-'}</td>
+      <td>${t.sl_price.toFixed(decimals)}</td>
+      <td>${t.tp_price.toFixed(decimals)}</td>
+      <td><span class="tag ${exitTag}">${t.exit_reason || '-'}</span></td>
+      <td class="${pnlClass}">${t.pnl_r > 0 ? '+' : ''}${t.pnl_r.toFixed(2)}R</td>
+      <td class="${pnlClass}">${t.pnl_pips > 0 ? '+' : ''}${t.pnl_pips.toFixed(1)}</td>
+      <td>${t.bars_held}h</td>
+      <td style="font-size:11px">${zoneStr}</td>
+    `;
+
+    tr.addEventListener('click', () => {
+      // Highlight selected row
+      document.querySelectorAll('#trade-tbody tr').forEach(r => r.classList.remove('selected'));
+      tr.classList.add('selected');
+      scrollToTrade(t);
+    });
+
+    tbody.appendChild(tr);
+  }
+}
+
+function scrollToTrade(trade) {
+  if (!chart) return;
+  // Show a window around the trade: 24 bars before entry, 24 bars after exit
+  const padding = 24 * 3600; // 24 hours in seconds
+  const from = trade.entry_time - padding;
+  const to = (trade.exit_time || trade.entry_time) + padding;
+  chart.timeScale().setVisibleRange({ from, to });
+
+  // Draw trade's SL/TP lines temporarily
+  // Remove previous trade-specific lines
+  if (window._tradeLines) {
+    window._tradeLines.forEach(l => {
+      try { candleSeries.removePriceLine(l); } catch(e) {}
+    });
+  }
+  window._tradeLines = [];
+
+  // SL line
+  const slLine = candleSeries.createPriceLine({
+    price: trade.sl_price,
+    color: '#ef4444',
+    lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title: 'SL',
+  });
+  // TP line
+  const tpLine = candleSeries.createPriceLine({
+    price: trade.tp_price,
+    color: '#10b981',
+    lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title: 'TP',
+  });
+  // Entry line
+  const entryLine = candleSeries.createPriceLine({
+    price: trade.entry_price,
+    color: '#f59e0b',
+    lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Solid,
+    axisLabelVisible: true,
+    title: 'Entry',
+  });
+  // Zone band
+  const zoneUpper = candleSeries.createPriceLine({
+    price: trade.zone_upper,
+    color: '#6366f1',
+    lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Solid,
+    axisLabelVisible: false,
+  });
+  const zoneLower = candleSeries.createPriceLine({
+    price: trade.zone_lower,
+    color: '#6366f1',
+    lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Solid,
+    axisLabelVisible: false,
+  });
+
+  window._tradeLines = [slLine, tpLine, entryLine, zoneUpper, zoneLower];
+}
+</script>
+</body>
+</html>

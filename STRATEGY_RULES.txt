@@ -1,0 +1,310 @@
+NOTE:
+- This file captures the raw source playbook from the videos.
+- The executable defaults in this repo are documented in STRATEGY.md.
+
+FX SUPPORT/RESISTANCE ZONE TRADING STRATEGY
+============================================
+(Compiled from all 30 NickShawnFX videos)
+
+Overview: Mean reversion strategy trading bounces at major support and
+resistance ZONES identified on the weekly/daily chart, with entries
+confirmed on the 1-hour chart. Applies to forex, crypto, stocks, and
+any liquid market. Designed to take 15-30 minutes per day.
+
+
+================================================================================
+STEP 1: IDENTIFY ZONES ON THE WEEKLY & DAILY CHART
+================================================================================
+
+- Start on the WEEKLY chart to find major zones, then use the DAILY
+  chart for additional detail and confirmation. Both timeframes are used.
+- Look at the last 3-6 months of price data. Do NOT use zones from
+  years ago that are far from current price - they are not relevant.
+- Zones should be "painfully obvious" - if you have to squint or guess,
+  it is not a valid zone. Clear, consistent bounces = tradeable zone.
+- A zone is a RANGE (upper and lower boundary), not a single price line.
+  The zone covers the area where wicks have reversed (the rejection area).
+  However, a single horizontal ray/line with breathing room in the stop
+  is also acceptable as a simpler alternative.
+- Look for at least 3 clear bounces/touches at the zone to confirm it
+  as a major zone.
+- Only draw ONE major zone above price (resistance) and ONE below price
+  (support). Ignore zones further away. If no clear zone exists in one
+  direction, do NOT force one - just wait.
+- Avoid "hairy" zones with lots of messy spike-through wicks. Prefer
+  clean, decisive bounces at the zone.
+- A "break and retest" is also a valid zone: if price breaks through
+  resistance and comes back to test it as support (or vice versa), this
+  is a tradeable setup using the same mechanics.
+- Use a clean chart: black background, all-white candles, NO indicators.
+
+ZONE QUALITY WARNING:
+- The more a zone is tested in SHORT SUCCESSION without a clean bounce,
+  the LESS likely it is to hold. If price tests the same zone 4-5+ times
+  in quick succession with no strong bounce away, the zone is weakening
+  and a breakout becomes more likely than a bounce. Consider skipping
+  the trade or trading the breakout instead.
+
+
+================================================================================
+STEP 2: WAIT FOR PRICE TO ENTER THE ZONE
+================================================================================
+
+- Set a TradingView price alert at approximately the MIDDLE of the zone
+  (or use the horizontal ray tool -> right-click -> add alert). Your
+  phone will notify you when price enters the zone.
+- On Sunday, spend 15-20 minutes going through all pairs (~24-26 FX
+  majors/minors) and set alerts at all major zones near current price.
+- When the alert fires, switch to the 1-HOUR chart.
+- Price must penetrate at least HALFWAY into the zone (target the
+  midpoint) before considering an entry.
+- Do NOT enter just because price is near a zone. It must be INSIDE it.
+- If price has already bounced away from the zone before you see it
+  (e.g. you were asleep), do NOT chase. Wait for the next setup.
+- Entry must be while price is currently inside the zone. If price has
+  left the zone by the time you check, skip or wait for a return.
+
+SKIP THE ENTRY IF:
+- Price is approaching the zone with very strong momentum / large candles
+  in the direction of the zone (high break-through probability).
+- There is a major scheduled news event (NFP, FOMC) about to occur.
+- The stop loss location is ambiguous or unclear.
+- Price has already moved significantly away from the zone.
+
+
+================================================================================
+STEP 3: WAIT FOR A REVERSAL CANDLE
+================================================================================
+
+- Once price is inside the zone (at least halfway), wait for a reversal
+  candle on the 1-hour chart:
+    * At a SUPPORT zone: wait for a BULLISH candle (close > open) -> LONG
+    * At a RESISTANCE zone: wait for a BEARISH candle (close < open) -> SHORT
+- The entry price is the close of the reversal candle.
+- If price blows straight through the zone on the 1H with no
+  hesitation or reversal candle, SKIP the trade entirely.
+- If no alert/news issues and the zone looks valid, entering immediately
+  when the alert fires is acceptable for experienced traders.
+- The best winning trades start moving into profit IMMEDIATELY after
+  entry. They do not fight back and forth.
+
+
+================================================================================
+STEP 4: SET STOP LOSS AND TAKE PROFIT
+================================================================================
+
+STOP LOSS:
+- Place beyond the zone boundary AND beyond all recent wicks/extreme
+  highs at the zone. The stop must clear everything.
+- Give enough room that spread or liquidity spikes will not clip it
+  (~0.15% buffer beyond the most extreme point is a guideline).
+    * LONG at support: SL below the zone's lower boundary + all recent lows
+    * SHORT at resistance: SL above the zone's upper boundary + all recent highs
+- If the required stop is too tight (would be clipped by spread) or too
+  wide (unreasonable risk), skip the trade.
+
+TAKE PROFIT:
+- Use a 1:1 risk-to-reward ratio. TP distance = entry-to-SL distance.
+    * LONG: TP = entry + (entry - SL)
+    * SHORT: TP = entry - (SL - entry)
+- Do NOT use higher R:R ratios like 1.5:1 or 2:1. The strategy is
+  built around 1:1 with active trade management.
+
+WHY 1:1 (not higher R:R):
+- Higher R:R = tighter stops OR further targets = lower win rate (~35-40%)
+- 1:1 achieves ~50% win rate, shorter losing streaks, easier psychology
+- With wider stops at 1:1, you have room to exit early and manage risk
+- Higher R:R targets are often "almost hit" then reverse - 1:1 avoids this
+
+
+================================================================================
+STEP 5: MANAGE THE TRADE - CUT LOSSES EARLY
+================================================================================
+
+This is the MOST IMPORTANT rule. The full stop loss is only for
+emergencies (~1 in 4-5 losing trades actually hits the full SL).
+
+EARLY EXIT TRIGGERS (escalating severity):
+
+1. SIDEWAYS ACTION (first warning): Price enters the zone, you enter,
+   and price goes nowhere - just consolidates sideways. This means
+   there are not enough buyers/sellers at the zone. Consider closing
+   at break-even or a small loss.
+
+2. SLOW DRIFT AGAINST YOU (second warning): Price starts making lower
+   highs (for a long) or higher lows (for a short). It is slowly
+   trending toward your stop. Exit for a partial loss (~0.3-0.5R).
+
+3. ZONE BOUNDARY BREAK: A 1-hour candle CLOSES beyond the zone boundary
+   (not just a wick - a wick that closes back inside is NOT a trigger).
+   Exit immediately.
+   * LONG: 1H candle closes below support zone's lower bound -> exit
+   * SHORT: 1H candle closes above resistance zone's upper bound -> exit
+
+4. STRUCTURE BREAK: A 1H candle closes above a recent swing high (for a
+   short) or below a recent swing low (for a long). Exit for a partial loss.
+
+5. TIME LIMIT: If the trade goes nowhere for ~2-3 days (daily chart
+   setup) or ~1 week maximum, close at whatever the current P&L is.
+
+TYPICAL EARLY EXIT RANGE: 0R (break-even) to -0.5R loss.
+   - Most early exits fall between -0.2R and -0.5R
+   - Average loss across all losing trades should be well below -1R
+   - This asymmetry (small losses, full 1R wins) is the core edge
+
+EXCEPTION: If there is a prior significant structural level (a clear
+previous low/high) just beyond the zone, you may hold slightly longer
+and only exit if THAT structural level also breaks.
+
+
+================================================================================
+STEP 6: MANAGE THE TRADE - HOLD WINNERS
+================================================================================
+
+- Do NOT close winning trades early. Let them run to the full TP.
+- IGNORE intermediate lower-timeframe support/resistance zones between
+  your entry and TP. Do not close just because price approaches a
+  minor zone on the way.
+- Hold approximately 80% of winning trades to the full 1:1 TP target.
+
+EXCEPTIONS (close a winner early ~10-20% of the time):
+- FRIDAY/WEEKEND: If price is 70-90% of the way to TP and the market
+  is about to close for the weekend, close to avoid weekend gaps and
+  spread widening.
+- MAJOR NEWS: If a major scheduled news event (NFP, FOMC) is imminent
+  and price is close to TP, consider closing.
+
+
+================================================================================
+RE-ENTRY RULES
+================================================================================
+
+- After an early exit or break-even close, you CAN re-enter the same
+  trade at the same zone if the setup is still valid and price returns
+  to the zone.
+- After a stop-out, you CAN re-enter at the same zone if price returns.
+  Consider risking a similar or larger amount on the re-entry to recoup
+  the loss.
+- Trading the same zone multiple times is valid - same zone, new trade.
+- After completing any trade, prefer switching to a DIFFERENT pair
+  rather than immediately re-trading the same one.
+
+
+================================================================================
+ADVANCED: COUNTER-DIRECTION (BREAKOUT) TRADES
+================================================================================
+
+When a zone has been tested many times in quick succession with:
+- Multiple lower highs on 1H (at support) or higher lows (at resistance)
+- No strong bounce away - just weak, failed attempts to reverse
+- Daily candles closing inside the zone instead of bouncing away
+
+...it may be appropriate to trade the BREAKDOWN/BREAKOUT instead of
+the bounce (sell at support expecting it to break, or buy at resistance).
+
+Stop loss for a breakout trade: above/below the most recent swing
+high/low within the congestion area, not beyond the zone itself.
+
+
+================================================================================
+POSITION SIZING
+================================================================================
+
+- Risk a BASE percentage of your account per trade (default ~5%).
+- Calculate position size so that if the full stop loss is hit, you
+  lose exactly that percentage.
+- As your account grows, position sizes grow with it (compounding).
+
+ADJUSTMENTS:
+- Risk can be varied by setup quality/conviction. Higher quality setups
+  warrant higher risk; lower confidence setups warrant lower risk.
+- Capital-tier scaling (reduce % as account grows):
+    * Under £10K:  Higher risk (10-20%) acceptable for experienced traders
+    * £10K-£100K:  Moderate risk (5-10%)
+    * Over £100K:  Lower risk (2-5%) to preserve capital
+- Adding to positions (scaling in) at the same zone is valid when price
+  pushes deeper into the zone. Tighten stops on all entries when adding.
+
+
+================================================================================
+CORRELATION RISK MANAGEMENT
+================================================================================
+
+- Never hold more than 1-2 correlated pairs at the same time.
+- Pairs with the same quote currency are correlated:
+    * All XXX/JPY pairs (USDJPY, EURJPY, GBPJPY, etc.)
+    * All XXX/USD pairs (EURUSD, GBPUSD, AUDUSD, etc.)
+    * EUR/USD and GBP/USD are correlated
+- When two correlated pairs both have valid setups:
+    1. BEST: Pick the one with the better setup (more zone touches,
+       bigger prior bounces, wider range, cleaner structure)
+    2. ALTERNATIVE: Trade both but SPLIT the risk so the combined
+       total = one normal unit of risk (e.g. half-size on each)
+- Already in a trade on one correlated pair = skip similar setups on
+  other correlated pairs unless you reduce position size.
+
+
+================================================================================
+WORKFLOW & PRACTICAL NOTES
+================================================================================
+
+- Trade ~24-26 FX major and minor pairs for a broad opportunity set.
+- Sunday setup: 15-20 minutes reviewing all pairs, setting zone alerts.
+- Daily routine: Check charts 2-4 times per day, ~15 minutes each session.
+  Total chart time: 30 minutes to 1 hour per day maximum.
+- Expected frequency: 3-10 setups per week, averaging ~5.
+- Average trade duration: approximately 1-3 days (rarely more than a week).
+- Some months you will have no trades on certain pairs - that is normal.
+- Track all trades using R-multiples (e.g. +1R, -0.3R) not £ amounts,
+  so P&L tracking is transferable across account sizes.
+- Use a private Discord server or journal: screenshot entry + exit for
+  every trade.
+- Beginners: demo account for 6 months minimum (ideally 1 year) before
+  live trading. Need 50-100 trades for meaningful statistical assessment.
+
+
+================================================================================
+PERFORMANCE EXPECTATIONS
+================================================================================
+
+- Win rate: ~40-50% (sufficient because losses are small, wins are full)
+- Monthly expectancy: ~1-2R net profit over ~10 trades
+- Annual target: ~15-30R cumulative
+- Full stop-loss hits only ~1 in 4-5 losing trades (most exits are early)
+- Losing streaks of 5-6+ trades in a row will happen - this is normal
+- Some months will be breakeven or slightly negative - this is normal
+
+
+================================================================================
+SUMMARY OF THE EDGE
+================================================================================
+
+The strategy works because:
+1. Zones are obvious areas where price consistently reverses
+2. Entry is confirmed by price action (reversal candle inside the zone)
+3. Losses are cut early (~0.3-0.5R avg) instead of taking full SL (-1R)
+4. Winners are held to full 1R target
+5. Average loss < average win, even with a modest win rate
+6. 1:1 R:R gives ~50% win rate and short losing streaks
+7. Correlation management prevents overexposure
+
+With ~50% win rate, winners pay +1R and losers cost only ~0.3-0.5R on
+average, producing consistent positive expectancy over time.
+
+
+================================================================================
+QUICK REFERENCE
+================================================================================
+
+Timeframes:     Weekly/Daily (zones) + 1-Hour (entries)
+Entry:          Reversal candle inside zone, at least halfway in
+Stop Loss:      Beyond zone boundary + all recent wicks + breathing room
+Take Profit:    1:1 risk-to-reward
+Early Exit:     Sideways action, drift against, zone break, or time limit
+Hold Winners:   To full TP (exceptions: Friday close, major news)
+Re-entry:       Valid at same zone after early exit or stop-out
+Position Size:  Base ~5% of account (adjust by conviction & capital tier)
+Correlation:    Max 1-2 correlated pairs at once, split risk if both taken
+Min Touches:    Zone must have 3+ clean bounces to qualify
+Chart Setup:    Clean chart, no indicators, white candles on black
+Workflow:       Alerts on zones, check charts 2-4x/day, ~15 min each

@@ -100,10 +100,10 @@ BLOCKED_PAIR_DIRECTIONS = {
 }
 
 """Default hours with historically poor win rates (<25%)."""
-DEFAULT_BLOCKED_HOURS: FrozenSet[int] = frozenset({21, 2, 3, 4})  # 21:00, 02:00-04:00
+DEFAULT_BLOCKED_HOURS: FrozenSet[int] = frozenset({2, 3})  # 02:00-03:00 UTC
 
 """Default days with historically poor win rates."""
-DEFAULT_BLOCKED_DAYS: FrozenSet[int] = frozenset({0})  # Monday = 0
+DEFAULT_BLOCKED_DAYS: FrozenSet[int] = frozenset()  # none blocked (Monday unblocked for optimized preset)
 
 # Keep module-level aliases for backward compatibility with imports
 BLOCKED_HOURS = DEFAULT_BLOCKED_HOURS
@@ -118,7 +118,8 @@ class StrategyParams:
     early_exit_r: float = DEFAULT_EARLY_EXIT_R   # close losers at this R-multiple
     spread_pips: float = DEFAULT_EXECUTION_SPREAD_PIPS  # explicit spread on midpoint bars
     stop_slippage_pips: float = DEFAULT_STOP_SLIPPAGE_PIPS  # extra adverse stop fill
-    min_zone_touches: int = 3                    # minimum touches for a tradeable zone
+    min_zone_touches: int = 2                    # minimum touches for a tradeable zone
+    zone_penetration_pct: float = 0.50            # fraction of zone price must penetrate (0.5=halfway)
     cooldown_bars: int = DEFAULT_COOLDOWN_BARS  # 1H bars between trades
     max_hold_bars: int = 72                      # ~3 days max hold without progress
     sideways_bars: int = 15                      # ~15 hours of sideways = exit
@@ -205,8 +206,8 @@ def generate_signal(
     if not is_price_in_zone(bar_close, zone):
         return None
 
-    # Price must be at least halfway into the zone
-    if not is_price_halfway_in_zone(bar_close, zone):
+    # Price must penetrate sufficiently into the zone
+    if not is_price_halfway_in_zone(bar_close, zone, params.zone_penetration_pct):
         return None
 
     # Entry candle quality: body must be meaningful relative to range

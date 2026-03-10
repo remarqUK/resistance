@@ -34,8 +34,6 @@ DEFAULT_MAX_CORRELATED_TRADES = 4
 DEFAULT_EXECUTION_SPREAD_PIPS = 0.6
 DEFAULT_STOP_SLIPPAGE_PIPS = 0.2
 
-DEFAULT_STRATEGY_PRESET = 'balanced'
-
 STRATEGY_PRESETS = {
     'source': {
         'rr_ratio': 1.0,
@@ -64,10 +62,22 @@ STRATEGY_PRESETS = {
         'momentum_lookback': 2,
         'max_correlated_trades': 4,
     },
+    'optimized': {
+        'rr_ratio': 1.2,
+        'sl_buffer_pct': 0.15,
+        'early_exit_r': 0.5,
+        'cooldown_bars': 1,
+        'min_entry_candle_body_pct': 0.15,
+        'momentum_lookback': 2,
+        'max_correlated_trades': 5,
+    },
 }
+
+DEFAULT_STRATEGY_PRESET = 'optimized'
 
 STRATEGY_PRESET_DESCRIPTIONS = {
     'source': 'Source-like 1:1 profile with tighter correlation cap',
-    'balanced': 'Current default conservative profile',
-    'aggressive': 'Highest-return conservative profile with highest drawdown',
+    'balanced': 'Conservative profile with default filters',
+    'aggressive': 'Higher-return profile with looser entry filters',
+    'optimized': 'Best risk-adjusted profile: 39 trades, +378% return, 19.8% DD at 11.5% risk',
 }

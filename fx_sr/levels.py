@@ -328,15 +328,21 @@ def is_price_in_zone(price: float, zone: SRZone) -> bool:
     return zone.lower <= price <= zone.upper
 
 
-def is_price_halfway_in_zone(price: float, zone: SRZone) -> bool:
-    """Check if price has penetrated at least halfway into a zone.
+def is_price_halfway_in_zone(price: float, zone: SRZone, penetration_pct: float = 0.5) -> bool:
+    """Check if price has penetrated sufficiently into a zone.
 
-    Per the video: 'Price needs to get at least halfway into the zone.'
+    Args:
+        price: current price
+        zone: S/R zone
+        penetration_pct: fraction of zone width price must penetrate (0.5 = halfway)
 
-    For a support zone: price should be at or below the midpoint
-    For a resistance zone: price should be at or above the midpoint
+    For a support zone: price should be at or below the penetration threshold
+    For a resistance zone: price should be at or above the penetration threshold
     """
+    zone_width = zone.upper - zone.lower
     if zone.zone_type == 'support':
-        return price <= zone.midpoint and price >= zone.lower
+        threshold = zone.upper - zone_width * penetration_pct
+        return price <= threshold and price >= zone.lower
     else:  # resistance
-        return price >= zone.midpoint and price <= zone.upper
+        threshold = zone.lower + zone_width * penetration_pct
+        return price >= threshold and price <= zone.upper

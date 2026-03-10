@@ -29,6 +29,24 @@ from fx_sr.backtest import (
     format_compounding_results,
 )
 from fx_sr.live import scan_opportunities, format_signals, live_monitor, show_zones
+from fx_sr import ibkr
+
+
+def _configure_ibkr(args) -> int:
+    """Apply optional CLI IBKR connection overrides."""
+    client_id = getattr(args, 'ibkr_client_id', None)
+    if client_id is not None:
+        ibkr.configure_connection(client_id=client_id)
+    return ibkr.TWS_CLIENT_ID
+
+
+def _add_ibkr_args(parser):
+    parser.add_argument(
+        '--ibkr-client-id',
+        type=int,
+        default=None,
+        help='Override IBKR/TWS client ID (default: env IBKR_CLIENT_ID or 60)',
+    )
 
 
 def _resolve_pairs(pair_arg: str | None) -> dict:
@@ -163,11 +181,13 @@ def _add_strategy_args(parser):
 
 def cmd_backtest(args):
     """Run backtesting mode."""
+    active_client_id = _configure_ibkr(args)
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
     zone_days = args.zone_history
 
-    print(f"\n  Strategy preset: {_format_preset_label(args.preset)}")
+    print(f"\n  IBKR client ID: {active_client_id}")
+    print(f"  Strategy preset: {_format_preset_label(args.preset)}")
     print(f"  Active params: {_format_param_summary(params)}")
     print(
         f"  Backtest: {len(pairs)} pair(s), {args.days} days hourly, "
@@ -183,6 +203,7 @@ def cmd_backtest(args):
         zone_history_days=zone_days,
         pairs=pairs,
         force_refresh=args.no_cache,
+        base_client_id=active_client_id,
     )
 
     elapsed = time.time() - t0
@@ -239,12 +260,14 @@ def cmd_download(args):
     from fx_sr.data import download_all_data
     from fx_sr.db import get_cache_summary, get_db_path
 
+    active_client_id = _configure_ibkr(args)
     pairs = _resolve_pairs(args.pair)
 
     import time
     t0 = time.time()
 
     print(f'\n  Database: {get_db_path()}')
+    print(f'  IBKR client ID: {active_client_id}')
     download_all_data(pairs, hourly_days=args.days, daily_days=args.days)
 
     elapsed = time.time() - t0
@@ -264,6 +287,7 @@ def cmd_download(args):
 
 def cmd_viz(args):
     """Export backtest data and open interactive chart via local HTTP server."""
+    active_client_id = _configure_ibkr(args)
     import http.server
     import threading
     import webbrowser
@@ -274,6 +298,7 @@ def cmd_viz(args):
     if args.refresh or not os.path.exists(viz_path):
         from export_viz import export_backtest_data
         print(f'\n  Generating visualization data ({args.days} days)...')
+        print(f'  IBKR client ID: {active_client_id}')
         export_backtest_data(hourly_days=args.days)
     else:
         import time
@@ -300,6 +325,7 @@ def cmd_viz(args):
 
 def cmd_live(args):
     """Run live monitoring mode."""
+    active_client_id = _configure_ibkr(args)
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
     zone_days = args.zone_history
@@ -309,12 +335,22 @@ def cmd_live(args):
             print(show_zones(pair_id, pair_info, zone_history_days=zone_days))
         return
 
-    print(f"\n  Strategy preset: {_format_preset_label(args.preset)}")
+    print(f"\n  IBKR client ID: {active_client_id}")
+    print(f"  Strategy preset: {_format_preset_label(args.preset)}")
     print(f"  Active params: {_format_param_summary(params)}")
 
     if args.once:
         print(f'  Scanning {len(pairs)} pairs for opportunities...')
-        signals = scan_opportunities(pairs, params, zone_history_days=zone_days)
+        tracked = {}
+        if not args.no_positions:
+            from fx_sr.positions import sync_positions
+            tracked = sync_positions(params, zone_days)
+        signals = scan_opportunities(
+            pairs,
+            params,
+            zone_history_days=zone_days,
+            tracked_positions=tracked,
+        )
         print(format_signals(signals))
         return
 
@@ -361,6 +397,7 @@ def main():
     dl.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all 10')
     dl.add_argument('--days', type=int, default=730,
                     help='Days of data to download (default: 730, max for hourly)')
+    _add_ibkr_args(dl)
 
     bt = subparsers.add_parser('backtest', help='Backtest using daily zones + hourly execution')
     bt.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all 10')
@@ -368,6 +405,7 @@ def main():
                     help='Days of hourly data for execution (default: 30)')
     bt.add_argument('--zone-history', type=int, default=DEFAULT_ZONE_HISTORY_DAYS,
                     help=f'Days of daily data for zone detection (default: {DEFAULT_ZONE_HISTORY_DAYS})')
+    _add_ibkr_args(bt)
     _add_strategy_args(bt)
     bt.add_argument('--balance', type=float, default=None,
                     help='Starting balance for compounding P&L (for example 10000)')
@@ -383,15 +421,17 @@ def main():
                     help='Scan interval in seconds (default: 60)')
     lv.add_argument('--zone-history', type=int, default=DEFAULT_ZONE_HISTORY_DAYS,
                     help=f'Days of daily data for zones (default: {DEFAULT_ZONE_HISTORY_DAYS})')
+    _add_ibkr_args(lv)
     _add_strategy_args(lv)
     lv.add_argument('--once', action='store_true', help='Single scan then exit')
     lv.add_argument('--zones', action='store_true', help='Show current S/R zones and exit')
     lv.add_argument('--no-positions', action='store_true',
-                    help='Disable IBKR position tracking (scanner only)')
+                    help='Disable IBKR position tracking and duplicate-position filtering')
 
     vz = subparsers.add_parser('viz', help='Export backtest data and open interactive chart')
     vz.add_argument('--days', type=int, default=365,
                     help='Days of hourly data for backtest (default: 365)')
+    _add_ibkr_args(vz)
     vz.add_argument('--port', type=int, default=8080, help='Local server port (default: 8080)')
     vz.add_argument('--refresh', action='store_true',
                     help='Force regenerate viz_data.json (default: reuse if exists)')
@@ -414,3 +454,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+

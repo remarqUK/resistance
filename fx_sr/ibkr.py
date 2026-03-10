@@ -3,6 +3,9 @@
 Primary data source for historical and live FX data used by the strategy.
 """
 
+import os
+import threading
+
 import pandas as pd
 from typing import Optional
 
@@ -36,41 +39,102 @@ TICKER_TO_PAIR = {
 }
 
 # TWS connection settings
-TWS_HOST = '127.0.0.1'
-TWS_PORT = 7497  # paper trading; 7496 for live
-TWS_CLIENT_ID = 60  # dedicated client ID for data fetching (50=RossCameron)
-
-# Connection singleton
-_ib = None
-_connected = False
+DEFAULT_TWS_HOST = '127.0.0.1'
+DEFAULT_TWS_PORT = 7497  # paper trading; 7496 for live
+DEFAULT_TWS_CLIENT_ID = 60  # dedicated client ID for data fetching (50=RossCameron)
 
 
-def _get_connection():
+def _get_env_int(name: str, default: int) -> int:
+    """Read an integer env var, falling back to default on empty/invalid values."""
+    raw = os.getenv(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+TWS_HOST = os.getenv('IBKR_HOST', DEFAULT_TWS_HOST)
+TWS_PORT = _get_env_int('IBKR_PORT', DEFAULT_TWS_PORT)
+TWS_CLIENT_ID = _get_env_int('IBKR_CLIENT_ID', DEFAULT_TWS_CLIENT_ID)
+
+# Thread-local connection state so each backtest worker can use its own
+# IBKR client ID without clobbering peers in other threads.
+_THREAD_STATE = threading.local()
+_IBKR_LOCK = threading.RLock()
+
+
+def _resolve_client_id(client_id: Optional[int] = None) -> int:
+    """Return an explicit client ID or the configured default."""
+    return TWS_CLIENT_ID if client_id is None else int(client_id)
+
+
+def _get_thread_connection_state() -> tuple[object | None, bool, int | None]:
+    """Return the current thread's cached IBKR connection state."""
+    return (
+        getattr(_THREAD_STATE, 'ib', None),
+        getattr(_THREAD_STATE, 'connected', False),
+        getattr(_THREAD_STATE, 'client_id', None),
+    )
+
+
+def _set_thread_connection_state(ib, connected: bool, client_id: Optional[int]) -> None:
+    """Persist the current thread's IBKR connection state."""
+    _THREAD_STATE.ib = ib
+    _THREAD_STATE.connected = connected
+    _THREAD_STATE.client_id = client_id
+
+
+def configure_connection(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    client_id: Optional[int] = None,
+) -> None:
+    """Override IBKR connection defaults and reset this thread if changed."""
+    global TWS_HOST, TWS_PORT, TWS_CLIENT_ID
+
+    with _IBKR_LOCK:
+        new_host = TWS_HOST if host is None else host
+        new_port = TWS_PORT if port is None else int(port)
+        new_client_id = TWS_CLIENT_ID if client_id is None else int(client_id)
+
+        changed = (new_host, new_port, new_client_id) != (TWS_HOST, TWS_PORT, TWS_CLIENT_ID)
+        TWS_HOST = new_host
+        TWS_PORT = new_port
+        TWS_CLIENT_ID = new_client_id
+
+    if changed:
+        disconnect()
+
+
+def _get_connection(client_id: Optional[int] = None):
     """Get or create a TWS connection. Returns (ib, connected) tuple."""
-    global _ib, _connected
+    resolved_client_id = _resolve_client_id(client_id)
+    ib, connected, active_client_id = _get_thread_connection_state()
 
-    if _connected and _ib and _ib.isConnected():
-        return _ib, True
+    if connected and ib and ib.isConnected() and active_client_id == resolved_client_id:
+        return ib, True
 
     try:
         from ib_async import IB
-        if _ib is None:
-            _ib = IB()
-        if not _ib.isConnected():
-            _ib.connect(TWS_HOST, TWS_PORT, clientId=TWS_CLIENT_ID, timeout=5)
-            _connected = True
-        return _ib, True
+        if ib and ib.isConnected():
+            ib.disconnect()
+        ib = IB()
+        ib.connect(TWS_HOST, TWS_PORT, clientId=resolved_client_id, timeout=5)
+        _set_thread_connection_state(ib, True, resolved_client_id)
+        return ib, True
     except Exception:
-        _connected = False
+        _set_thread_connection_state(None, False, resolved_client_id)
         return None, False
 
 
 def disconnect():
-    """Cleanly disconnect from TWS."""
-    global _ib, _connected
-    if _ib and _ib.isConnected():
-        _ib.disconnect()
-    _connected = False
+    """Cleanly disconnect the current thread from TWS."""
+    ib, _, _ = _get_thread_connection_state()
+    if ib and ib.isConnected():
+        ib.disconnect()
+    _set_thread_connection_state(None, False, None)
 
 
 def is_available() -> bool:
@@ -94,6 +158,7 @@ def fetch_historical(
     ticker_symbol: str,
     interval: str,
     days: int,
+    client_id: Optional[int] = None,
 ) -> Optional[pd.DataFrame]:
     """Fetch historical OHLC data from TWS.
 
@@ -109,7 +174,7 @@ def fetch_historical(
     if not pair:
         return None
 
-    ib, connected = _get_connection()
+    ib, connected = _get_connection(client_id=client_id)
     if not connected:
         return None
 
@@ -240,40 +305,41 @@ def fetch_positions() -> list:
         avg_cost: float (average entry price)
     Only returns FX positions matching our tracked pairs.
     """
-    ib, connected = _get_connection()
-    if not connected:
-        return []
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return []
 
-    try:
-        positions = ib.positions()
-        # Build reverse map: 'EUR.USD' -> 'EURUSD', etc.
-        local_to_pair = {}
-        for pair_id in PAIR_TO_IB:
-            local_sym = pair_id[:3] + '.' + pair_id[3:]
-            local_to_pair[local_sym] = pair_id
+        try:
+            positions = ib.positions()
+            # Build reverse map: 'EUR.USD' -> 'EURUSD', etc.
+            local_to_pair = {}
+            for pair_id in PAIR_TO_IB:
+                local_sym = pair_id[:3] + '.' + pair_id[3:]
+                local_to_pair[local_sym] = pair_id
 
-        result = []
-        for pos in positions:
-            contract = pos.contract
-            if contract.secType != 'CASH':
-                continue
+            result = []
+            for pos in positions:
+                contract = pos.contract
+                if contract.secType != 'CASH':
+                    continue
 
-            local_sym = getattr(contract, 'localSymbol', '')
-            if not local_sym:
-                local_sym = contract.symbol + '.' + contract.currency
+                local_sym = getattr(contract, 'localSymbol', '')
+                if not local_sym:
+                    local_sym = contract.symbol + '.' + contract.currency
 
-            pair_id = local_to_pair.get(local_sym)
-            if pair_id and pos.position != 0:
-                result.append({
-                    'pair': pair_id,
-                    'size': float(pos.position),
-                    'avg_cost': float(pos.avgCost),
-                })
+                pair_id = local_to_pair.get(local_sym)
+                if pair_id and pos.position != 0:
+                    result.append({
+                        'pair': pair_id,
+                        'size': float(pos.position),
+                        'avg_cost': float(pos.avgCost),
+                    })
 
-        return result
-    except Exception as e:
-        print(f"    Warning: failed to read IBKR positions: {e}")
-        return []
+            return result
+        except Exception as e:
+            print(f"    Warning: failed to read IBKR positions: {e}")
+            return []
 
 
 def fetch_latest_price(ticker_symbol: str) -> Optional[float]:
@@ -282,26 +348,27 @@ def fetch_latest_price(ticker_symbol: str) -> Optional[float]:
     if not pair:
         return None
 
-    ib, connected = _get_connection()
-    if not connected:
-        return None
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None
 
-    try:
-        contract = _make_contract(pair)
-        ib.qualifyContracts(contract)
+        try:
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
 
-        # Request a snapshot
-        ib.reqMktData(contract, '', True, False)
-        ib.sleep(2)
-        ticker = ib.ticker(contract)
+            # Request a snapshot
+            ib.reqMktData(contract, '', True, False)
+            ib.sleep(2)
+            ticker = ib.ticker(contract)
 
-        if ticker and ticker.bid and ticker.ask:
-            mid = (ticker.bid + ticker.ask) / 2
+            if ticker and ticker.bid and ticker.ask:
+                mid = (ticker.bid + ticker.ask) / 2
+                ib.cancelMktData(contract)
+                return mid
+
             ib.cancelMktData(contract)
-            return mid
-
-        ib.cancelMktData(contract)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     return None

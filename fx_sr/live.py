@@ -20,6 +20,7 @@ def scan_opportunities(
     pairs: Dict = None,
     params: StrategyParams = None,
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
+    tracked_positions: Dict[str, dict] | None = None,
 ) -> List[Signal]:
     """Scan all pairs for current trading opportunities.
 
@@ -37,10 +38,22 @@ def scan_opportunities(
         params = StrategyParams()
 
     signals = []
+    tracked_pairs = {}
+    if tracked_positions:
+        for info in tracked_positions.values():
+            pair = info.get('pair')
+            trade = info.get('trade')
+            if pair and trade:
+                tracked_pairs.setdefault(pair, set()).add(trade.direction)
 
     for pair_id, pair_info in pairs.items():
         decimals = pair_info.get('decimals', 5)
         print(f"  Scanning {pair_info['name']}...", end=" ", flush=True)
+
+        if pair_id in tracked_pairs:
+            directions = "/".join(sorted(tracked_pairs[pair_id]))
+            print(f"skipping: open position tracked ({directions})")
+            continue
 
         # Fetch daily data for zone detection
         daily_df = fetch_daily_data(pair_info['ticker'], days=zone_history_days)
@@ -223,27 +236,39 @@ def live_monitor(
     print(f"\n  Live monitor started ({mode}). Scanning every {interval}s. Ctrl+C to stop.\n")
 
     try:
+        sync_positions = None
+        check_position_exits = None
+        format_positions_table = None
+        format_alerts = None
+
+        if track_positions:
+            from .positions import (
+                sync_positions, check_position_exits,
+                format_positions_table, format_alerts,
+            )
+
         while True:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n  [{now}] Scanning {len(pairs)} pairs...")
 
-            signals = scan_opportunities(pairs, params, zone_history_days)
+            tracked = sync_positions(params, zone_history_days) if track_positions else {}
+            signals = scan_opportunities(
+                pairs,
+                params,
+                zone_history_days,
+                tracked_positions=tracked,
+            )
             print(format_signals(signals))
 
             # Position monitoring
-            if track_positions:
-                from .positions import (
-                    sync_positions, check_position_exits,
-                    format_positions_table, format_alerts,
-                )
-                tracked = sync_positions(params, zone_history_days)
-                if tracked:
-                    alerts, snapshots = check_position_exits(tracked, params)
-                    print(format_positions_table(tracked, snapshots, alerts))
-                    if alerts:
-                        print(format_alerts(alerts))
+            if track_positions and tracked:
+                alerts, snapshots = check_position_exits(tracked, params)
+                print(format_positions_table(tracked, snapshots, alerts))
+                if alerts:
+                    print(format_alerts(alerts))
 
             print(f"  Next scan in {interval}s...")
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\n  Monitor stopped.")
+

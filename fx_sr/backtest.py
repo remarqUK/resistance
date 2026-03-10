@@ -22,6 +22,7 @@ from .strategy import (
     check_momentum_filter, get_correlated_pairs, get_market_exit_price,
     BLOCKED_PAIR_DIRECTIONS,
 )
+from . import ibkr
 
 
 @dataclass
@@ -496,6 +497,7 @@ def _backtest_pair(
     hourly_days: int,
     zone_history_days: int,
     force_refresh: bool = False,
+    client_id: int | None = None,
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Fetch data and run backtest for a single pair. Thread-safe."""
     daily_df = fetch_daily_data(
@@ -503,17 +505,26 @@ def _backtest_pair(
         days=zone_history_days + hourly_days,
         force_refresh=force_refresh,
         allow_stale_cache=not force_refresh,
+        client_id=client_id,
     )
     hourly_df = fetch_hourly_data(
         pair_info['ticker'],
         days=hourly_days,
         force_refresh=force_refresh,
         allow_stale_cache=not force_refresh,
+        client_id=client_id,
     )
     if daily_df.empty or hourly_df.empty:
         return pair, None
     result = run_backtest(daily_df, hourly_df, pair, params, zone_history_days)
     return pair, result
+
+
+def _pair_client_id(base_client_id: int | None, offset: int) -> int | None:
+    """Derive a stable client ID for a pair from the configured base."""
+    if base_client_id is None:
+        return None
+    return int(base_client_id) + offset
 
 
 def run_all_backtests_parallel(
@@ -522,6 +533,7 @@ def run_all_backtests_parallel(
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
     pairs: Dict = None,
     force_refresh: bool = False,
+    base_client_id: int | None = None,
 ) -> Dict[str, BacktestResult]:
     """Run all pair backtests.
 
@@ -532,16 +544,32 @@ def run_all_backtests_parallel(
         params = StrategyParams()
     if pairs is None:
         pairs = PAIRS
+    if base_client_id is None:
+        base_client_id = ibkr.TWS_CLIENT_ID
 
     results = {}
-    total = len(pairs)
+    pair_items = list(pairs.items())
+    total = len(pair_items)
     done = 0
+    client_id_suffix = ''
+    if total > 0 and base_client_id is not None:
+        last_client_id = _pair_client_id(base_client_id, total - 1)
+        if total == 1:
+            client_id_suffix = f" with client ID {base_client_id}"
+        else:
+            client_id_suffix = f" with client IDs {base_client_id}-{last_client_id}"
 
     if force_refresh:
-        print(f"  Refreshing {total} backtests from IBKR/TWS sequentially...")
-        for pair, info in pairs.items():
+        print(f"  Refreshing {total} backtests from IBKR/TWS sequentially{client_id_suffix}...")
+        for offset, (pair, info) in enumerate(pair_items):
             pair, result = _backtest_pair(
-                pair, info, params, hourly_days, zone_history_days, force_refresh
+                pair,
+                info,
+                params,
+                hourly_days,
+                zone_history_days,
+                force_refresh,
+                client_id=_pair_client_id(base_client_id, offset),
             )
             done += 1
             if result:
@@ -553,15 +581,21 @@ def run_all_backtests_parallel(
                 print(f"    [{done}/{total}] {pair}: no data")
         return results
 
-    print(f"  Launching {total} backtests in parallel (using cache when available)...")
+    print(f"  Launching {total} backtests in parallel (using cache when available{client_id_suffix})...")
 
     with ThreadPoolExecutor(max_workers=total) as executor:
         futures = {
             executor.submit(
-                _backtest_pair, pair, info, params, hourly_days,
-                zone_history_days, force_refresh,
+                _backtest_pair,
+                pair,
+                info,
+                params,
+                hourly_days,
+                zone_history_days,
+                force_refresh,
+                _pair_client_id(base_client_id, offset),
             ): pair
-            for pair, info in pairs.items()
+            for offset, (pair, info) in enumerate(pair_items)
         }
         for future in as_completed(futures):
             pair, result = future.result()

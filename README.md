@@ -143,6 +143,7 @@ viz_data.json --> chart.html
 4. The system uses `clientId 60` for data and monitoring
 
 Position tracking is read-only. The system monitors existing positions and alerts on exit conditions, but does not place orders.
+When position tracking is enabled, live scans suppress new entry signals on pairs that already have an open IBKR position so the monitor does not suggest stacking into an existing trade.
 
 ## Dependencies
 
@@ -153,3 +154,4 @@ Position tracking is read-only. The system monitors existing positions and alert
 - `tabulate>=0.9.0`
 
 See [STRATEGY.md](STRATEGY.md) for implementation details and [STRATEGY_RULES.txt](STRATEGY_RULES.txt) for the raw source playbook extracted from the videos.
+

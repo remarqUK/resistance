@@ -88,10 +88,15 @@ class Trade:
 """Pair+direction combos with historically poor win rates (<29%)."""
 BLOCKED_PAIR_DIRECTIONS = {
     ('USDCAD', 'SHORT'),   # 16.1% WR
+    ('USDCAD', 'LONG'),    # 0% WR (30-day)
     ('AUDUSD', 'SHORT'),   # 22.4% WR
     ('EURGBP', 'SHORT'),   # 25.0% WR
     ('USDCHF', 'LONG'),    # 28.6% WR
     ('GBPUSD', 'SHORT'),   # 28.6% WR
+    ('NZDUSD', 'LONG'),    # 0% WR (30-day)
+    ('NZDUSD', 'SHORT'),   # 0% WR (30-day)
+    ('GBPJPY', 'LONG'),    # 0% WR (30-day)
+    ('GBPJPY', 'SHORT'),   # 0% WR (30-day)
 }
 
 """Default hours with historically poor win rates (<25%)."""

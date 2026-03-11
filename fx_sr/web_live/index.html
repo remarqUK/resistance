@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FX S/R Live Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="hero-title-row">
+        <h1><span class="eyebrow">FX support / resistance scanner</span>Live Market Board</h1>
+        <p class="subtitle" id="hero-sizing"><span id="sizing-summary">Resolving</span> · <span id="strategy-label">Strategy preset</span></p>
+        <span id="connection-pill" class="pill pill-muted">Connecting</span>
+        <a href="/replay" target="_blank" style="color:var(--accent);text-decoration:none;font-size:0.85rem;font-weight:600">Strategy Replay</a>
+      </div>
+    </header>
+
+    <section class="metrics-grid" id="metrics-grid">
+      <article class="metric-card">
+        <span class="meta-label">Scan state</span>
+        <strong id="scan-status">Starting</strong>
+        <span id="scan-progress" class="metric-detail">0 / 0 pairs</span>
+      </article>
+      <article class="metric-card">
+        <span class="meta-label">Signals</span>
+        <strong id="signal-count">0</strong>
+        <span id="pending-count" class="metric-detail">0 pending blockers</span>
+      </article>
+      <article class="metric-card">
+        <span class="meta-label">Tracked positions</span>
+        <strong id="position-count">0</strong>
+        <span id="execution-mode" class="metric-detail">Scan only</span>
+      </article>
+    </section>
+
+    <main class="board">
+      <section class="panel panel-watchlist">
+        <p class="panel-note" style="max-width:none;text-align:left">Signals and tracked pairs float to the top while updates stream in per pair.</p>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Pair</th>
+                <th>State</th>
+                <th>Price</th>
+                <th>Support</th>
+                <th>Resistance</th>
+                <th>Setup</th>
+                <th>Signal</th>
+              </tr>
+            </thead>
+            <tbody id="watchlist-body">
+              <tr><td colspan="7" class="empty">Waiting for first scan.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="side-column">
+        <section class="panel">
+          <div id="signals-list" class="stack-list">
+            <div class="empty-card">No active signals.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div id="positions-list" class="stack-list">
+            <div class="empty-card">No tracked positions.</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel">
+        <div class="split-panel">
+          <div>
+            <div id="alerts-list" class="stack-list compact-list">
+              <div class="empty-card">No exit alerts.</div>
+            </div>
+          </div>
+          <div>
+            <div id="executions-list" class="stack-list compact-list">
+              <div class="empty-card">No execution activity.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-log">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">Flow</p>
+            <h2>Event log</h2>
+          </div>
+        </div>
+        <div id="log-list" class="log-list">
+          <div class="empty-card">No events yet.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

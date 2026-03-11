@@ -75,6 +75,7 @@ python run.py backtest --preset source --rr-ratio 1.2
 ```bash
 python run.py live --once
 python run.py live --preset aggressive --once
+python run.py live --once --balance 10000 --risk-pct 2
 python run.py live
 python run.py live --zones
 python run.py live --pair EURUSD --interval 30
@@ -144,6 +145,7 @@ viz_data.json --> chart.html
 
 Position tracking is read-only. The system monitors existing positions and alerts on exit conditions, but does not place orders.
 When position tracking is enabled, live scans suppress new entry signals on pairs that already have an open IBKR position so the monitor does not suggest stacking into an existing trade.
+Live scans now use the same risk-per-trade compounding helper as backtests to suggest FX unit size per signal. If `--balance` is omitted in `live`, the tool tries to use IBKR `NetLiquidation`; `--account-currency` can override the detected currency.
 
 ## Dependencies
 

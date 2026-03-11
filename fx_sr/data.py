@@ -154,6 +154,30 @@ def fetch_minute_data(ticker_symbol: str, days: int = 30) -> pd.DataFrame:
     return df
 
 
+def fetch_minute_data_cached(
+    ticker_symbol: str,
+    days: int = 2,
+    allow_stale_cache: bool = True,
+    client_id: int | None = None,
+) -> pd.DataFrame:
+    """Fetch 1-minute OHLC data, with SQLite caching."""
+    end = datetime.now()
+    start = end - timedelta(days=days)
+
+    cached = load_ohlc(ticker_symbol, '1m', start, end)
+    if _is_cache_fresh(cached, min_rows=max(60, days * 500), max_age_days=1):
+        return cached
+    if allow_stale_cache and not cached.empty:
+        return cached
+
+    df = _fetch_live(ticker_symbol, '1m', days, client_id=client_id)
+    if not df.empty:
+        save_ohlc(ticker_symbol, '1m', df)
+        return df
+
+    return cached if not cached.empty else pd.DataFrame()
+
+
 def fetch_latest_price(ticker_symbol: str) -> float | None:
     """Fetch the latest mid price from IBKR."""
     return ibkr.fetch_latest_price(ticker_symbol)

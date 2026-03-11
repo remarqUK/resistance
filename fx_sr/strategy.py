@@ -28,15 +28,21 @@ from .config import (
     DEFAULT_MAX_CORRELATED_TRADES,
     DEFAULT_EXECUTION_SPREAD_PIPS,
     DEFAULT_STOP_SLIPPAGE_PIPS,
+    DEFAULT_PIVOT_WINDOW,
+    DEFAULT_CLUSTER_TOL,
 )
 
 
 # Correlation groups: pairs sharing a currency tend to move together
 CORRELATION_GROUPS = {
     'USD': ['EURUSD', 'GBPUSD', 'AUDUSD', 'NZDUSD', 'USDCHF', 'USDCAD', 'USDJPY'],
-    'JPY': ['USDJPY', 'EURJPY', 'GBPJPY'],
-    'EUR': ['EURUSD', 'EURGBP', 'EURJPY'],
-    'GBP': ['GBPUSD', 'EURGBP', 'GBPJPY'],
+    'JPY': ['USDJPY', 'EURJPY', 'GBPJPY', 'AUDJPY', 'CADJPY', 'CHFJPY', 'NZDJPY'],
+    'EUR': ['EURUSD', 'EURGBP', 'EURJPY', 'EURAUD', 'EURCAD', 'EURCHF'],
+    'GBP': ['GBPUSD', 'EURGBP', 'GBPJPY', 'GBPAUD', 'GBPCAD', 'GBPCHF'],
+    'AUD': ['AUDUSD', 'AUDJPY', 'EURAUD', 'GBPAUD', 'AUDNZD', 'AUDCAD'],
+    'CAD': ['USDCAD', 'CADJPY', 'EURCAD', 'GBPCAD', 'AUDCAD'],
+    'CHF': ['USDCHF', 'CHFJPY', 'EURCHF', 'GBPCHF'],
+    'NZD': ['NZDUSD', 'NZDJPY', 'AUDNZD'],
 }
 
 
@@ -97,6 +103,19 @@ BLOCKED_PAIR_DIRECTIONS = {
     ('NZDUSD', 'SHORT'),   # 0% WR (30-day)
     ('GBPJPY', 'LONG'),    # 0% WR (30-day)
     ('GBPJPY', 'SHORT'),   # 0% WR (30-day)
+    # New crosses — poor performers
+    ('GBPCAD', 'LONG'),    # 18% WR
+    ('GBPCAD', 'SHORT'),   # 18% WR
+    ('CADJPY', 'LONG'),    # 29% WR
+    ('CADJPY', 'SHORT'),   # 29% WR
+    ('EURCAD', 'LONG'),    # 17% WR
+    ('EURCAD', 'SHORT'),   # 17% WR
+    ('AUDJPY', 'LONG'),    # 0% WR
+    ('AUDJPY', 'SHORT'),   # 0% WR
+    ('EURCHF', 'LONG'),    # 0% WR
+    ('EURCHF', 'SHORT'),   # 0% WR
+    ('AUDCAD', 'LONG'),    # 33% WR marginal
+    ('AUDCAD', 'SHORT'),   # 33% WR marginal
 }
 
 """Default hours with historically poor win rates (<25%)."""
@@ -118,8 +137,11 @@ class StrategyParams:
     early_exit_r: float = DEFAULT_EARLY_EXIT_R   # close losers at this R-multiple
     spread_pips: float = DEFAULT_EXECUTION_SPREAD_PIPS  # explicit spread on midpoint bars
     stop_slippage_pips: float = DEFAULT_STOP_SLIPPAGE_PIPS  # extra adverse stop fill
-    min_zone_touches: int = 2                    # minimum touches for a tradeable zone
+    min_zone_touches: int = 3                    # minimum touches for a tradeable zone
     zone_penetration_pct: float = 0.50            # fraction of zone price must penetrate (0.5=halfway)
+    pivot_window: int = DEFAULT_PIVOT_WINDOW      # bars left/right for pivot detection
+    cluster_tolerance: float = DEFAULT_CLUSTER_TOL  # % tolerance for clustering pivots
+    zone_windows: tuple = (180,)                  # lookback windows (days) for zone detection
     cooldown_bars: int = DEFAULT_COOLDOWN_BARS  # 1H bars between trades
     max_hold_bars: int = 72                      # ~3 days max hold without progress
     sideways_bars: int = 15                      # ~15 hours of sideways = exit

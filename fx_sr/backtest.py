@@ -23,6 +23,7 @@ from .strategy import (
     BLOCKED_PAIR_DIRECTIONS,
 )
 from . import ibkr
+from .sizing import calculate_risk_amount
 
 
 @dataclass
@@ -91,6 +92,37 @@ def _finalize_trade(
             trade.pnl_r = (trade.entry_price - trade.exit_price) / trade.risk
 
     return trade
+
+
+def _deduplicate_zones(zones: List[SRZone]) -> List[SRZone]:
+    """Merge overlapping zones from multiple detection windows.
+
+    When two zones overlap significantly, keep the one with more touches.
+    """
+    if not zones:
+        return []
+
+    # Sort by midpoint
+    sorted_zones = sorted(zones, key=lambda z: z.midpoint)
+    merged = []
+
+    for zone in sorted_zones:
+        if not merged:
+            merged.append(zone)
+            continue
+
+        last = merged[-1]
+        # Check overlap: zones overlap if they share price range
+        overlap = min(last.upper, zone.upper) - max(last.lower, zone.lower)
+        min_width = min(last.upper - last.lower, zone.upper - zone.lower)
+        if min_width > 0 and overlap / min_width > 0.5:
+            # Overlapping: keep the one with more touches
+            if zone.touches > last.touches:
+                merged[-1] = zone
+        else:
+            merged.append(zone)
+
+    return merged
 
 
 def run_backtest(
@@ -679,7 +711,7 @@ def calculate_compounding_pnl(
     balance = starting_balance
     trade_log = []
     for pair, t in filtered:
-        risk_amt = balance * risk_pct
+        risk_amt = calculate_risk_amount(balance, risk_pct)
         pnl = risk_amt * t.pnl_r
         balance += pnl
         trade_log.append((pair, t, risk_amt, pnl, balance))

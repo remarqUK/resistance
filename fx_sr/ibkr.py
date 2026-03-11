@@ -5,9 +5,10 @@ Primary data source for historical and live FX data used by the strategy.
 
 import os
 import threading
+import time
 
 import pandas as pd
-from typing import Optional
+from typing import Callable, Optional
 
 # IBKR pair mapping: our pair ID -> (symbol, currency)
 # ib_async Forex('EURUSD') handles this automatically
@@ -22,6 +23,18 @@ PAIR_TO_IB = {
     'EURGBP': 'EURGBP',
     'EURJPY': 'EURJPY',
     'GBPJPY': 'GBPJPY',
+    'AUDJPY': 'AUDJPY',
+    'CADJPY': 'CADJPY',
+    'CHFJPY': 'CHFJPY',
+    'EURAUD': 'EURAUD',
+    'EURCAD': 'EURCAD',
+    'EURCHF': 'EURCHF',
+    'GBPAUD': 'GBPAUD',
+    'GBPCAD': 'GBPCAD',
+    'GBPCHF': 'GBPCHF',
+    'AUDNZD': 'AUDNZD',
+    'NZDJPY': 'NZDJPY',
+    'AUDCAD': 'AUDCAD',
 }
 
 # Reverse: internal ticker/cache key -> our pair ID
@@ -36,6 +49,18 @@ TICKER_TO_PAIR = {
     'EURGBP=X': 'EURGBP',
     'EURJPY=X': 'EURJPY',
     'GBPJPY=X': 'GBPJPY',
+    'AUDJPY=X': 'AUDJPY',
+    'CADJPY=X': 'CADJPY',
+    'CHFJPY=X': 'CHFJPY',
+    'EURAUD=X': 'EURAUD',
+    'EURCAD=X': 'EURCAD',
+    'EURCHF=X': 'EURCHF',
+    'GBPAUD=X': 'GBPAUD',
+    'GBPCAD=X': 'GBPCAD',
+    'GBPCHF=X': 'GBPCHF',
+    'AUDNZD=X': 'AUDNZD',
+    'NZDJPY=X': 'NZDJPY',
+    'AUDCAD=X': 'AUDCAD',
 }
 
 # TWS connection settings
@@ -148,6 +173,13 @@ def _ticker_to_pair(ticker_symbol: str) -> Optional[str]:
     return TICKER_TO_PAIR.get(ticker_symbol)
 
 
+def _local_symbol_to_pair(local_symbol: str) -> Optional[str]:
+    """Convert an IB local symbol like EUR.USD into our pair ID."""
+    if not local_symbol:
+        return None
+    return PAIR_TO_IB.get(local_symbol.replace('.', ''))
+
+
 def _make_contract(pair: str):
     """Create a qualified Forex contract."""
     from ib_async import Forex
@@ -185,17 +217,18 @@ def fetch_historical(
         ib.qualifyContracts(contract)
 
         # Map interval to IB bar size
-        bar_size = '1 day' if interval == '1d' else '1 hour'
+        interval_map = {'1d': '1 day', '1h': '1 hour', '1m': '1 min'}
+        bar_size = interval_map.get(interval, '1 hour')
 
-        # IB duration string
-        if days <= 365:
-            duration = f'{days} D'
+        # IB duration string — minute data capped at 7 days (IB limit for 1-min bars)
+        effective_days = min(days, 7) if interval == '1m' else days
+        if effective_days <= 365:
+            duration = f'{effective_days} D'
         else:
-            years = days // 365
-            remaining = days % 365
+            years = effective_days // 365
+            remaining = effective_days % 365
             if remaining > 0:
-                # IB doesn't support mixed units, use days
-                duration = f'{days} D'
+                duration = f'{effective_days} D'
             else:
                 duration = f'{years} Y'
 
@@ -312,12 +345,6 @@ def fetch_positions() -> list:
 
         try:
             positions = ib.positions()
-            # Build reverse map: 'EUR.USD' -> 'EURUSD', etc.
-            local_to_pair = {}
-            for pair_id in PAIR_TO_IB:
-                local_sym = pair_id[:3] + '.' + pair_id[3:]
-                local_to_pair[local_sym] = pair_id
-
             result = []
             for pos in positions:
                 contract = pos.contract
@@ -328,7 +355,7 @@ def fetch_positions() -> list:
                 if not local_sym:
                     local_sym = contract.symbol + '.' + contract.currency
 
-                pair_id = local_to_pair.get(local_sym)
+                pair_id = _local_symbol_to_pair(local_sym)
                 if pair_id and pos.position != 0:
                     result.append({
                         'pair': pair_id,
@@ -358,12 +385,11 @@ def fetch_latest_price(ticker_symbol: str) -> Optional[float]:
             ib.qualifyContracts(contract)
 
             # Request a snapshot
-            ib.reqMktData(contract, '', True, False)
+            ticker = ib.reqMktData(contract, '', True, False)
             ib.sleep(2)
-            ticker = ib.ticker(contract)
 
-            if ticker and ticker.bid and ticker.ask:
-                mid = (ticker.bid + ticker.ask) / 2
+            mid = _ticker_mid_price(ticker or ib.ticker(contract))
+            if mid is not None:
                 ib.cancelMktData(contract)
                 return mid
 
@@ -372,3 +398,220 @@ def fetch_latest_price(ticker_symbol: str) -> Optional[float]:
             pass
 
     return None
+
+
+def _ticker_mid_price(ticker) -> Optional[float]:
+    """Extract the best available executable midpoint from an IB ticker."""
+
+    if ticker is None:
+        return None
+
+    bid = getattr(ticker, 'bid', None)
+    ask = getattr(ticker, 'ask', None)
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        return float((bid + ask) / 2.0)
+
+    market_price = getattr(ticker, 'marketPrice', None)
+    if callable(market_price):
+        try:
+            price = market_price()
+            if price is not None and price > 0:
+                return float(price)
+        except Exception:
+            pass
+
+    for field_name in ('last', 'close'):
+        price = getattr(ticker, field_name, None)
+        if price is not None and price > 0:
+            return float(price)
+
+    return None
+
+
+def stream_live_quotes(
+    pairs: list[str],
+    on_price: Callable[[str, float], None],
+    stop_event: threading.Event,
+    client_id: Optional[int] = None,
+) -> None:
+    """Maintain live IBKR ticker subscriptions and invoke ``on_price`` on change."""
+
+    if not pairs:
+        return
+
+    ib, connected = _get_connection(client_id=client_id)
+    if not connected or ib is None:
+        return
+
+    subscriptions: list[tuple[object, object, str]] = []
+    last_prices: dict[str, float] = {}
+
+    try:
+        for pair in pairs:
+            try:
+                contract = _make_contract(pair)
+                ib.qualifyContracts(contract)
+                ticker = ib.reqMktData(contract, '', False, False)
+                subscriptions.append((contract, ticker, pair))
+            except Exception:
+                continue
+
+        while not stop_event.is_set():
+            try:
+                if hasattr(ib, 'waitOnUpdate'):
+                    ib.waitOnUpdate(timeout=1)
+                elif hasattr(ib, 'sleep'):
+                    ib.sleep(1)
+                else:
+                    time.sleep(1)
+            except Exception:
+                time.sleep(1)
+
+            for _, ticker, pair in subscriptions:
+                price = _ticker_mid_price(ticker)
+                if price is None:
+                    continue
+
+                previous = last_prices.get(pair)
+                if previous is not None and abs(previous - price) < 1e-12:
+                    continue
+
+                last_prices[pair] = price
+                try:
+                    on_price(pair, float(price))
+                except Exception:
+                    continue
+    finally:
+        for contract, _, _ in subscriptions:
+            try:
+                ib.cancelMktData(contract)
+            except Exception:
+                continue
+        disconnect()
+
+
+def fetch_account_net_liquidation() -> tuple[Optional[float], Optional[str]]:
+    """Read account net liquidation from TWS.
+
+    Prefers the BASE summary row because that is the broker's consolidated
+    account value. The caller must provide the actual account currency if TWS
+    only reports the literal string ``BASE``.
+    """
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None, None
+
+        try:
+            summary = ib.accountSummary()
+            base_value = None
+            fallback_value = None
+            fallback_currency = None
+
+            for item in summary:
+                if getattr(item, 'tag', None) != 'NetLiquidation':
+                    continue
+
+                try:
+                    value = float(item.value)
+                except (TypeError, ValueError):
+                    continue
+
+                currency = getattr(item, 'currency', None) or None
+                if currency == 'BASE':
+                    base_value = value
+                elif fallback_value is None and currency:
+                    fallback_value = value
+                    fallback_currency = currency
+
+            if base_value is not None:
+                return base_value, 'BASE'
+            if fallback_value is not None:
+                return fallback_value, fallback_currency
+            return None, None
+        except Exception as e:
+            print(f"    Warning: failed to read IBKR account summary: {e}")
+            return None, None
+
+
+def fetch_open_order_pairs() -> set[str]:
+    """Return pairs with active FX orders that are not terminal."""
+    terminal_statuses = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return set()
+
+        try:
+            if hasattr(ib, 'openTrades'):
+                trades = ib.openTrades()
+            else:
+                trades = ib.trades()
+
+            result = set()
+            for trade in trades:
+                status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
+                if status in terminal_statuses:
+                    continue
+
+                contract = getattr(trade, 'contract', None)
+                if contract is None or getattr(contract, 'secType', None) != 'CASH':
+                    continue
+
+                local_sym = getattr(contract, 'localSymbol', '')
+                if not local_sym:
+                    symbol = getattr(contract, 'symbol', '')
+                    currency = getattr(contract, 'currency', '')
+                    local_sym = f'{symbol}.{currency}' if symbol and currency else ''
+
+                pair_id = _local_symbol_to_pair(local_sym)
+                if pair_id:
+                    result.add(pair_id)
+            return result
+        except Exception as e:
+            print(f"    Warning: failed to read IBKR open orders: {e}")
+            return set()
+
+
+def submit_fx_market_order(
+    pair: str,
+    direction: str,
+    quantity: int,
+    order_ref: str = '',
+) -> Optional[dict]:
+    """Submit a market FX order to TWS/IB Gateway."""
+    if quantity <= 0:
+        return None
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None
+
+        try:
+            from ib_async import MarketOrder
+
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
+
+            action = 'BUY' if direction == 'LONG' else 'SELL'
+            order = MarketOrder(action, int(quantity), orderRef=order_ref)
+            trade = ib.placeOrder(contract, order)
+            if hasattr(ib, 'sleep'):
+                ib.sleep(1)
+
+            live_order = getattr(trade, 'order', None)
+            order_status = getattr(trade, 'orderStatus', None)
+
+            return {
+                'pair': pair,
+                'direction': direction,
+                'quantity': int(quantity),
+                'order_id': getattr(live_order, 'orderId', None),
+                'status': getattr(order_status, 'status', None),
+                'avg_fill_price': getattr(order_status, 'avgFillPrice', None),
+            }
+        except Exception as e:
+            print(f"    Warning: failed to submit FX order for {pair}: {e}")
+            return None

@@ -1,0 +1,5425 @@
+{
+  "video_id": "DOpFr2ugiwo",
+  "title": "This Trading Strategy Made Me Millions (Backtesting It)",
+  "url": "https://www.youtube.com/watch?v=DOpFr2ugiwo",
+  "language": "English (auto-generated)",
+  "is_generated": true,
+  "transcript_segments": [
+    {
+      "text": "I've got a great video for you today",
+      "start": 0.08,
+      "duration": 3.359
+    },
+    {
+      "text": "because today we are going to be back",
+      "start": 1.92,
+      "duration": 3.6
+    },
+    {
+      "text": "testing the trading strategy that has",
+      "start": 3.439,
+      "duration": 3.84
+    },
+    {
+      "text": "made me millions of dollars trading",
+      "start": 5.52,
+      "duration": 3.92
+    },
+    {
+      "text": "forex and stocks and crypto over the",
+      "start": 7.279,
+      "duration": 4.32
+    },
+    {
+      "text": "course of the past decade. If you're new",
+      "start": 9.44,
+      "duration": 4.239
+    },
+    {
+      "text": "to my channel, my name is Nick Shawn. I",
+      "start": 11.599,
+      "duration": 3.441
+    },
+    {
+      "text": "share all these YouTube videos to try to",
+      "start": 13.679,
+      "duration": 2.961
+    },
+    {
+      "text": "help you get better at your trading and",
+      "start": 15.04,
+      "duration": 3.6
+    },
+    {
+      "text": "I also have a free Telegram channel",
+      "start": 16.64,
+      "duration": 3.76
+    },
+    {
+      "text": "where I share all my trades, my",
+      "start": 18.64,
+      "duration": 4.559
+    },
+    {
+      "text": "analysis, my explanations, the insights,",
+      "start": 20.4,
+      "duration": 6.639
+    },
+    {
+      "text": "recaps, outlooks, and P&L. And I have",
+      "start": 23.199,
+      "duration": 5.281
+    },
+    {
+      "text": "run this channel for about eight years.",
+      "start": 27.039,
+      "duration": 3.521
+    },
+    {
+      "text": "I'll put a link in the description below",
+      "start": 28.48,
+      "duration": 3.44
+    },
+    {
+      "text": "in this video. Just over the course of",
+      "start": 30.56,
+      "duration": 2.8
+    },
+    {
+      "text": "the past four and a half months on this",
+      "start": 31.92,
+      "duration": 2.56
+    },
+    {
+      "text": "account that I've been trading on, I've",
+      "start": 33.36,
+      "duration": 3.12
+    },
+    {
+      "text": "made over $431,000",
+      "start": 34.48,
+      "duration": 4.8
+    },
+    {
+      "text": "in profit before swaps and commissions.",
+      "start": 36.48,
+      "duration": 4.88
+    },
+    {
+      "text": "And we're going to get into not only",
+      "start": 39.28,
+      "duration": 3.68
+    },
+    {
+      "text": "just back testing my trading strategy,",
+      "start": 41.36,
+      "duration": 3.44
+    },
+    {
+      "text": "but how you can actually structure your",
+      "start": 42.96,
+      "duration": 3.439
+    },
+    {
+      "text": "Trading View back test sessions to get",
+      "start": 44.8,
+      "duration": 3.12
+    },
+    {
+      "text": "the most out of it. So, I'm going to",
+      "start": 46.399,
+      "duration": 3.041
+    },
+    {
+      "text": "show you exactly how I do it. Let's get",
+      "start": 47.92,
+      "duration": 3.44
+    },
+    {
+      "text": "right into the charts. The first thing",
+      "start": 49.44,
+      "duration": 3.68
+    },
+    {
+      "text": "that I do is I go to what's called",
+      "start": 51.36,
+      "duration": 4.32
+    },
+    {
+      "text": "random.org. It is a random number",
+      "start": 53.12,
+      "duration": 4.0
+    },
+    {
+      "text": "generator and it allows me to pick a",
+      "start": 55.68,
+      "duration": 3.519
+    },
+    {
+      "text": "number between one and whatever I want.",
+      "start": 57.12,
+      "duration": 4.239
+    },
+    {
+      "text": "Since I have about 24x pairs here that I",
+      "start": 59.199,
+      "duration": 3.84
+    },
+    {
+      "text": "trade, I just pick a random number",
+      "start": 61.359,
+      "duration": 4.641
+    },
+    {
+      "text": "between 1 and 20. Then I hit generate",
+      "start": 63.039,
+      "duration": 4.881
+    },
+    {
+      "text": "and it takes me to number six. So then I",
+      "start": 66.0,
+      "duration": 6.08
+    },
+    {
+      "text": "count down from the top 1 2 3 4 5 6 that",
+      "start": 67.92,
+      "duration": 6.96
+    },
+    {
+      "text": "is AUD/USD. Then what I do is I go down",
+      "start": 72.08,
+      "duration": 4.96
+    },
+    {
+      "text": "to the lowest time frame here on Trading",
+      "start": 74.88,
+      "duration": 3.52
+    },
+    {
+      "text": "View that I would use for my trading",
+      "start": 77.04,
+      "duration": 3.28
+    },
+    {
+      "text": "strategy. For me, I use the weekly and",
+      "start": 78.4,
+      "duration": 3.52
+    },
+    {
+      "text": "the daily to find the zones that I'm",
+      "start": 80.32,
+      "duration": 2.799
+    },
+    {
+      "text": "going to be trading off of. And then I",
+      "start": 81.92,
+      "duration": 2.48
+    },
+    {
+      "text": "go to the one hour chart to be able to",
+      "start": 83.119,
+      "duration": 2.801
+    },
+    {
+      "text": "watch price action. So I'm going to go",
+      "start": 84.4,
+      "duration": 3.039
+    },
+    {
+      "text": "to the one hour chart. That way we can",
+      "start": 85.92,
+      "duration": 4.0
+    },
+    {
+      "text": "still see it whenever it goes there. I'm",
+      "start": 87.439,
+      "duration": 3.68
+    },
+    {
+      "text": "going to hit start new. Then I'm going",
+      "start": 89.92,
+      "duration": 3.44
+    },
+    {
+      "text": "to click random bar. And it takes me",
+      "start": 91.119,
+      "duration": 3.601
+    },
+    {
+      "text": "back to a random time. So this is",
+      "start": 93.36,
+      "duration": 4.32
+    },
+    {
+      "text": "February of 2025. So about a year ago.",
+      "start": 94.72,
+      "duration": 4.48
+    },
+    {
+      "text": "Then what I'll do is I'll go back to the",
+      "start": 97.68,
+      "duration": 3.36
+    },
+    {
+      "text": "daily and I can be able to trade my",
+      "start": 99.2,
+      "duration": 3.2
+    },
+    {
+      "text": "trading strategy in the way that I",
+      "start": 101.04,
+      "duration": 4.0
+    },
+    {
+      "text": "normally would. So now we're back here",
+      "start": 102.4,
+      "duration": 5.52
+    },
+    {
+      "text": "on the daily. Let's go back to the 1",
+      "start": 105.04,
+      "duration": 6.32
+    },
+    {
+      "text": "hour chart. Now we're back in 2025.",
+      "start": 107.92,
+      "duration": 6.4
+    },
+    {
+      "text": "Let's uh try this again. Random bar.",
+      "start": 111.36,
+      "duration": 4.719
+    },
+    {
+      "text": "Okay, now we're in 2021. So, let's go",
+      "start": 114.32,
+      "duration": 4.399
+    },
+    {
+      "text": "back to the daily",
+      "start": 116.079,
+      "duration": 5.201
+    },
+    {
+      "text": "and we're here in 2021. Okay, sweet. So,",
+      "start": 118.719,
+      "duration": 4.08
+    },
+    {
+      "text": "here's exactly what we're going to do.",
+      "start": 121.28,
+      "duration": 3.119
+    },
+    {
+      "text": "I'm going to show you my a rundown of my",
+      "start": 122.799,
+      "duration": 4.32
+    },
+    {
+      "text": "trading approach very, very simply put.",
+      "start": 124.399,
+      "duration": 4.401
+    },
+    {
+      "text": "Whenever you look at price on the chart,",
+      "start": 127.119,
+      "duration": 3.681
+    },
+    {
+      "text": "prices just move up and down. That is",
+      "start": 128.8,
+      "duration": 3.84
+    },
+    {
+      "text": "all it does. Price goes back and forth",
+      "start": 130.8,
+      "duration": 4.159
+    },
+    {
+      "text": "and up and down and then it hits areas",
+      "start": 132.64,
+      "duration": 4.239
+    },
+    {
+      "text": "and it bounces away and it hits supports",
+      "start": 134.959,
+      "duration": 3.36
+    },
+    {
+      "text": "and bounces away and it does all this",
+      "start": 136.879,
+      "duration": 3.761
+    },
+    {
+      "text": "type of stuff. All I do is on the daily",
+      "start": 138.319,
+      "duration": 4.161
+    },
+    {
+      "text": "chart, I go and I find the areas where",
+      "start": 140.64,
+      "duration": 4.88
+    },
+    {
+      "text": "price has bounced at most obviously.",
+      "start": 142.48,
+      "duration": 4.56
+    },
+    {
+      "text": "Okay? And then whenever price gets to",
+      "start": 145.52,
+      "duration": 3.12
+    },
+    {
+      "text": "those regions where price has had very",
+      "start": 147.04,
+      "duration": 3.839
+    },
+    {
+      "text": "obvious clear bounces, I just wait for",
+      "start": 148.64,
+      "duration": 4.56
+    },
+    {
+      "text": "price to get there. Then I enter a trade",
+      "start": 150.879,
+      "duration": 4.0
+    },
+    {
+      "text": "as long as price hasn't broken the zone",
+      "start": 153.2,
+      "duration": 3.759
+    },
+    {
+      "text": "immediately. And then I'll monitor the",
+      "start": 154.879,
+      "duration": 3.761
+    },
+    {
+      "text": "trade on the 1 hour chart a couple times",
+      "start": 156.959,
+      "duration": 3.28
+    },
+    {
+      "text": "a day. And then I'll get out of the",
+      "start": 158.64,
+      "duration": 2.64
+    },
+    {
+      "text": "trade a little bit early if it looks",
+      "start": 160.239,
+      "duration": 2.321
+    },
+    {
+      "text": "like it's not working. And if it looks",
+      "start": 161.28,
+      "duration": 2.64
+    },
+    {
+      "text": "like it is working and going towards the",
+      "start": 162.56,
+      "duration": 4.24
+    },
+    {
+      "text": "profit target, generally I hold it. So",
+      "start": 163.92,
+      "duration": 4.959
+    },
+    {
+      "text": "this is how I do it. Now that we're here",
+      "start": 166.8,
+      "duration": 3.6
+    },
+    {
+      "text": "on the chart, we're going to clear all",
+      "start": 168.879,
+      "duration": 2.64
+    },
+    {
+      "text": "the drawings. We're going to go back",
+      "start": 170.4,
+      "duration": 2.88
+    },
+    {
+      "text": "down here to the current market, and",
+      "start": 171.519,
+      "duration": 4.961
+    },
+    {
+      "text": "we're in July of 2021. So, let's just",
+      "start": 173.28,
+      "duration": 4.72
+    },
+    {
+      "text": "let's do the exact same thing that I",
+      "start": 176.48,
+      "duration": 2.64
+    },
+    {
+      "text": "would do when I'm trading. So, first,",
+      "start": 178.0,
+      "duration": 2.64
+    },
+    {
+      "text": "I'm going to find all the clear zones",
+      "start": 179.12,
+      "duration": 3.6
+    },
+    {
+      "text": "close to current market price. You only",
+      "start": 180.64,
+      "duration": 3.44
+    },
+    {
+      "text": "really need one above price and one",
+      "start": 182.72,
+      "duration": 3.439
+    },
+    {
+      "text": "below price. Currently, I don't see",
+      "start": 184.08,
+      "duration": 3.84
+    },
+    {
+      "text": "anything except this support level down",
+      "start": 186.159,
+      "duration": 4.0
+    },
+    {
+      "text": "here. And then up above price, we see",
+      "start": 187.92,
+      "duration": 3.84
+    },
+    {
+      "text": "this pretty clear resistance zone right",
+      "start": 190.159,
+      "duration": 4.481
+    },
+    {
+      "text": "there. That's all that's all I see. Some",
+      "start": 191.76,
+      "duration": 4.399
+    },
+    {
+      "text": "would argue there's a support resistance",
+      "start": 194.64,
+      "duration": 3.2
+    },
+    {
+      "text": "zone somewhere in here where price is",
+      "start": 196.159,
+      "duration": 3.761
+    },
+    {
+      "text": "currently at. I don't see anything clear",
+      "start": 197.84,
+      "duration": 3.759
+    },
+    {
+      "text": "enough right here to justify me taking a",
+      "start": 199.92,
+      "duration": 3.76
+    },
+    {
+      "text": "trade off of. This could be a zone where",
+      "start": 201.599,
+      "duration": 3.441
+    },
+    {
+      "text": "price bounces at, but in my opinion,",
+      "start": 203.68,
+      "duration": 2.88
+    },
+    {
+      "text": "it's not clear because price has bounced",
+      "start": 205.04,
+      "duration": 3.44
+    },
+    {
+      "text": "past it over and over. So, I'm just",
+      "start": 206.56,
+      "duration": 4.319
+    },
+    {
+      "text": "going to wait. And now what I would do",
+      "start": 208.48,
+      "duration": 3.839
+    },
+    {
+      "text": "is if I was trading this in the live",
+      "start": 210.879,
+      "duration": 3.761
+    },
+    {
+      "text": "market, I would set two alerts. One up",
+      "start": 212.319,
+      "duration": 3.92
+    },
+    {
+      "text": "here at this zone. We can't set an alert",
+      "start": 214.64,
+      "duration": 2.879
+    },
+    {
+      "text": "in back testing. So, we're just going to",
+      "start": 216.239,
+      "duration": 3.041
+    },
+    {
+      "text": "set the horizontal line and one down",
+      "start": 217.519,
+      "duration": 4.241
+    },
+    {
+      "text": "here. Now, what I will do is I will wait",
+      "start": 219.28,
+      "duration": 6.08
+    },
+    {
+      "text": "for price to get to one of these zones.",
+      "start": 221.76,
+      "duration": 4.88
+    },
+    {
+      "text": "Okay. So, it looks like it's coming",
+      "start": 225.36,
+      "duration": 3.28
+    },
+    {
+      "text": "close to there. Let me skip forward a",
+      "start": 226.64,
+      "duration": 4.56
+    },
+    {
+      "text": "little bit with this little tool here.",
+      "start": 228.64,
+      "duration": 4.08
+    },
+    {
+      "text": "We're going to wait for it to go to one",
+      "start": 231.2,
+      "duration": 3.759
+    },
+    {
+      "text": "or the other.",
+      "start": 232.72,
+      "duration": 3.84
+    },
+    {
+      "text": "So, it looks like price is about to get",
+      "start": 234.959,
+      "duration": 4.801
+    },
+    {
+      "text": "up in here into this resistance zone.",
+      "start": 236.56,
+      "duration": 5.039
+    },
+    {
+      "text": "Barely gets to where my alert would have",
+      "start": 239.76,
+      "duration": 3.6
+    },
+    {
+      "text": "been. Misses it. So, now we're going to",
+      "start": 241.599,
+      "duration": 3.521
+    },
+    {
+      "text": "go back down here. So, now price is at",
+      "start": 243.36,
+      "duration": 4.48
+    },
+    {
+      "text": "this support level. Okay, cool. So now",
+      "start": 245.12,
+      "duration": 4.16
+    },
+    {
+      "text": "the idea would be that now that price is",
+      "start": 247.84,
+      "duration": 3.039
+    },
+    {
+      "text": "at this support level for my trading",
+      "start": 249.28,
+      "duration": 4.319
+    },
+    {
+      "text": "strategy. I would then be looking to buy",
+      "start": 250.879,
+      "duration": 4.72
+    },
+    {
+      "text": "and all my trades are basically the same",
+      "start": 253.599,
+      "duration": 3.92
+    },
+    {
+      "text": "exact thing, right? This just this trade",
+      "start": 255.599,
+      "duration": 4.32
+    },
+    {
+      "text": "I was in last week on CAD JPY. This is",
+      "start": 257.519,
+      "duration": 4.641
+    },
+    {
+      "text": "on the daily chart. Price came into a",
+      "start": 259.919,
+      "duration": 4.241
+    },
+    {
+      "text": "daily zone. I bought price bounced up",
+      "start": 262.16,
+      "duration": 3.36
+    },
+    {
+      "text": "really quickly. Went more than half the",
+      "start": 264.16,
+      "duration": 3.52
+    },
+    {
+      "text": "way to the profit target and then it",
+      "start": 265.52,
+      "duration": 3.679
+    },
+    {
+      "text": "came back into the zone. I ended up",
+      "start": 267.68,
+      "duration": 3.04
+    },
+    {
+      "text": "having to just close it yesterday before",
+      "start": 269.199,
+      "duration": 2.801
+    },
+    {
+      "text": "market closed and a little bit of",
+      "start": 270.72,
+      "duration": 3.84
+    },
+    {
+      "text": "profit. I risked $25,000 on this trade",
+      "start": 272.0,
+      "duration": 4.88
+    },
+    {
+      "text": "to make potentially $25,000 and it was",
+      "start": 274.56,
+      "duration": 4.72
+    },
+    {
+      "text": "just a partial profit. And last week",
+      "start": 276.88,
+      "duration": 3.759
+    },
+    {
+      "text": "trading here from all the trades that",
+      "start": 279.28,
+      "duration": 4.479
+    },
+    {
+      "text": "I've called out live, um I made $48,000",
+      "start": 280.639,
+      "duration": 5.12
+    },
+    {
+      "text": "trading. So I lost two trading outcomes.",
+      "start": 283.759,
+      "duration": 3.841
+    },
+    {
+      "text": "The rest of them were all profitable to",
+      "start": 285.759,
+      "duration": 4.081
+    },
+    {
+      "text": "some degree. And these are all the same",
+      "start": 287.6,
+      "duration": 4.159
+    },
+    {
+      "text": "exact trades. That was CAD JPY. Here's",
+      "start": 289.84,
+      "duration": 5.359
+    },
+    {
+      "text": "another one that I took. So Euro JPY. So",
+      "start": 291.759,
+      "duration": 4.72
+    },
+    {
+      "text": "when price came into this zone, you can",
+      "start": 295.199,
+      "duration": 2.641
+    },
+    {
+      "text": "see it's here on the daily chart. I",
+      "start": 296.479,
+      "duration": 2.801
+    },
+    {
+      "text": "entered whenever price came into the",
+      "start": 297.84,
+      "duration": 3.359
+    },
+    {
+      "text": "zone. I bought at support on the daily",
+      "start": 299.28,
+      "duration": 4.0
+    },
+    {
+      "text": "chart and then I had a stop loss below",
+      "start": 301.199,
+      "duration": 4.961
+    },
+    {
+      "text": "target above 1:1 riskreward ratio and I",
+      "start": 303.28,
+      "duration": 5.919
+    },
+    {
+      "text": "risked on this one $25,000 I believe as",
+      "start": 306.16,
+      "duration": 5.039
+    },
+    {
+      "text": "well. So I risked anywhere from $25,000",
+      "start": 309.199,
+      "duration": 5.201
+    },
+    {
+      "text": "to $75,000 per trade depending on the",
+      "start": 311.199,
+      "duration": 4.72
+    },
+    {
+      "text": "context.",
+      "start": 314.4,
+      "duration": 3.519
+    },
+    {
+      "text": "Now price is now here in this zone.",
+      "start": 315.919,
+      "duration": 4.241
+    },
+    {
+      "text": "Let's go to the 1 hour chart. And what",
+      "start": 317.919,
+      "duration": 3.921
+    },
+    {
+      "text": "we're waiting is we're waiting to see",
+      "start": 320.16,
+      "duration": 3.2
+    },
+    {
+      "text": "that price comes into the zone and then",
+      "start": 321.84,
+      "duration": 2.72
+    },
+    {
+      "text": "starts to kind of have a little bit of a",
+      "start": 323.36,
+      "duration": 3.6
+    },
+    {
+      "text": "bounce. You do not want to enter a trade",
+      "start": 324.56,
+      "duration": 3.919
+    },
+    {
+      "text": "the moment it gets into a zone",
+      "start": 326.96,
+      "duration": 2.959
+    },
+    {
+      "text": "immediately because you could have it",
+      "start": 328.479,
+      "duration": 3.44
+    },
+    {
+      "text": "come into the zone and then if it's a",
+      "start": 329.919,
+      "duration": 3.84
+    },
+    {
+      "text": "big bare candle like this or if it's a",
+      "start": 331.919,
+      "duration": 3.28
+    },
+    {
+      "text": "resistance and price comes into the zone",
+      "start": 333.759,
+      "duration": 3.201
+    },
+    {
+      "text": "with a big bullish candle, you don't",
+      "start": 335.199,
+      "duration": 2.961
+    },
+    {
+      "text": "know if it's going to break the zone or",
+      "start": 336.96,
+      "duration": 2.56
+    },
+    {
+      "text": "bounce immediately. And you want to",
+      "start": 338.16,
+      "duration": 2.72
+    },
+    {
+      "text": "avoid those trades that just fall",
+      "start": 339.52,
+      "duration": 2.72
+    },
+    {
+      "text": "straight through the zones or shoot",
+      "start": 340.88,
+      "duration": 3.2
+    },
+    {
+      "text": "straight through the resistance zones.",
+      "start": 342.24,
+      "duration": 3.2
+    },
+    {
+      "text": "So in this case, what I would do is I",
+      "start": 344.08,
+      "duration": 2.559
+    },
+    {
+      "text": "would leave it alone. I would let it",
+      "start": 345.44,
+      "duration": 2.72
+    },
+    {
+      "text": "continue going down. And the moment I",
+      "start": 346.639,
+      "duration": 2.881
+    },
+    {
+      "text": "start seeing a little bit of strength,",
+      "start": 348.16,
+      "duration": 3.039
+    },
+    {
+      "text": "that's the moment I would enter. Okay?",
+      "start": 349.52,
+      "duration": 3.28
+    },
+    {
+      "text": "And again, you can follow all this in my",
+      "start": 351.199,
+      "duration": 2.881
+    },
+    {
+      "text": "Telegram channel. That way you actually",
+      "start": 352.8,
+      "duration": 3.52
+    },
+    {
+      "text": "see me do this live. Back testing has",
+      "start": 354.08,
+      "duration": 4.24
+    },
+    {
+      "text": "limitations. Trading is risky and most",
+      "start": 356.32,
+      "duration": 3.68
+    },
+    {
+      "text": "people do in fact lose money. It's",
+      "start": 358.32,
+      "duration": 2.8
+    },
+    {
+      "text": "really really difficult and there's",
+      "start": 360.0,
+      "duration": 4.08
+    },
+    {
+      "text": "nothing like nothing can be guaranteed.",
+      "start": 361.12,
+      "duration": 4.48
+    },
+    {
+      "text": "But you can see me do this all live.",
+      "start": 364.08,
+      "duration": 2.959
+    },
+    {
+      "text": "That's my point. Just so that we're not",
+      "start": 365.6,
+      "duration": 2.719
+    },
+    {
+      "text": "just playing around here in back test",
+      "start": 367.039,
+      "duration": 2.641
+    },
+    {
+      "text": "mode. Back testing is a way to help you",
+      "start": 368.319,
+      "duration": 2.72
+    },
+    {
+      "text": "kind of get a proof of concept for a",
+      "start": 369.68,
+      "duration": 2.72
+    },
+    {
+      "text": "trading approach. That way it's worth",
+      "start": 371.039,
+      "duration": 3.361
+    },
+    {
+      "text": "forward testing on a demo account. Then",
+      "start": 372.4,
+      "duration": 3.68
+    },
+    {
+      "text": "if it works in demo over the course of 3",
+      "start": 374.4,
+      "duration": 3.28
+    },
+    {
+      "text": "to 6 months, you can move forward to a",
+      "start": 376.08,
+      "duration": 3.679
+    },
+    {
+      "text": "small live account risking per trade",
+      "start": 377.68,
+      "duration": 3.6
+    },
+    {
+      "text": "whatever you think is good for your risk",
+      "start": 379.759,
+      "duration": 4.081
+    },
+    {
+      "text": "tolerance. So, as price comes into the",
+      "start": 381.28,
+      "duration": 4.16
+    },
+    {
+      "text": "zone, it started to come really deep,",
+      "start": 383.84,
+      "duration": 3.6
+    },
+    {
+      "text": "then it bounced up. So, after it bounces",
+      "start": 385.44,
+      "duration": 3.44
+    },
+    {
+      "text": "up right there, and we have a little bit",
+      "start": 387.44,
+      "duration": 2.8
+    },
+    {
+      "text": "of a reaction, a little bit of bullish",
+      "start": 388.88,
+      "duration": 3.68
+    },
+    {
+      "text": "sensitivity, I would then take a buy.",
+      "start": 390.24,
+      "duration": 4.399
+    },
+    {
+      "text": "So, I take a buy right there. I'd put my",
+      "start": 392.56,
+      "duration": 4.0
+    },
+    {
+      "text": "stop below the zone. I like to distance",
+      "start": 394.639,
+      "duration": 4.56
+    },
+    {
+      "text": "my stops nice and far. Um, I don't want",
+      "start": 396.56,
+      "duration": 5.12
+    },
+    {
+      "text": "to put it so far below the zone that",
+      "start": 399.199,
+      "duration": 4.0
+    },
+    {
+      "text": "it's just something ridiculous like",
+      "start": 401.68,
+      "duration": 3.359
+    },
+    {
+      "text": "this. I'll show you right here. So, on",
+      "start": 403.199,
+      "duration": 3.521
+    },
+    {
+      "text": "the daily chart, I don't want to put my",
+      "start": 405.039,
+      "duration": 4.241
+    },
+    {
+      "text": "stop loss like way down here because",
+      "start": 406.72,
+      "duration": 4.24
+    },
+    {
+      "text": "price, if it breaks this zone, right? If",
+      "start": 409.28,
+      "duration": 2.88
+    },
+    {
+      "text": "it goes anywhere below that, it's going",
+      "start": 410.96,
+      "duration": 3.12
+    },
+    {
+      "text": "to be invalidated long before that. So,",
+      "start": 412.16,
+      "duration": 3.52
+    },
+    {
+      "text": "I don't want to play those games of like",
+      "start": 414.08,
+      "duration": 3.28
+    },
+    {
+      "text": "having the stop all the way down there",
+      "start": 415.68,
+      "duration": 3.12
+    },
+    {
+      "text": "when really, if price breaks through the",
+      "start": 417.36,
+      "duration": 2.8
+    },
+    {
+      "text": "zone, right there would be an area the",
+      "start": 418.8,
+      "duration": 3.2
+    },
+    {
+      "text": "trade would be invalidated at. So, in",
+      "start": 420.16,
+      "duration": 3.2
+    },
+    {
+      "text": "this case, I'll just put my stop loss",
+      "start": 422.0,
+      "duration": 2.56
+    },
+    {
+      "text": "right there. It's nice and clear below",
+      "start": 423.36,
+      "duration": 3.76
+    },
+    {
+      "text": "the zone, but it's not too tight either.",
+      "start": 424.56,
+      "duration": 4.88
+    },
+    {
+      "text": "It's not right below the low. It's just",
+      "start": 427.12,
+      "duration": 3.6
+    },
+    {
+      "text": "right here, and it's a good distance",
+      "start": 429.44,
+      "duration": 3.52
+    },
+    {
+      "text": "away. After I have done that, then I",
+      "start": 430.72,
+      "duration": 3.919
+    },
+    {
+      "text": "will just drag my profit target from the",
+      "start": 432.96,
+      "duration": 4.16
+    },
+    {
+      "text": "entry to a 1:1 risk-to-reward ratio. So,",
+      "start": 434.639,
+      "duration": 4.56
+    },
+    {
+      "text": "about right there. and then I will just",
+      "start": 437.12,
+      "duration": 4.32
+    },
+    {
+      "text": "let the trade play out. As I'm letting",
+      "start": 439.199,
+      "duration": 3.761
+    },
+    {
+      "text": "the trade play out, what I'm looking for",
+      "start": 441.44,
+      "duration": 3.36
+    },
+    {
+      "text": "is I'm looking for sign of continued",
+      "start": 442.96,
+      "duration": 3.44
+    },
+    {
+      "text": "strength. So, if a trade's going to go",
+      "start": 444.8,
+      "duration": 2.88
+    },
+    {
+      "text": "into profit, the idea is that it's going",
+      "start": 446.4,
+      "duration": 3.68
+    },
+    {
+      "text": "to go into profit relatively quickly. If",
+      "start": 447.68,
+      "duration": 3.76
+    },
+    {
+      "text": "a trade's probably not going to work",
+      "start": 450.08,
+      "duration": 3.519
+    },
+    {
+      "text": "out, there will be signs. Price will",
+      "start": 451.44,
+      "duration": 4.159
+    },
+    {
+      "text": "start going sideways. Price will start",
+      "start": 453.599,
+      "duration": 4.081
+    },
+    {
+      "text": "to break the zone. Price will not have",
+      "start": 455.599,
+      "duration": 3.841
+    },
+    {
+      "text": "any bullish reactions there, right?",
+      "start": 457.68,
+      "duration": 3.28
+    },
+    {
+      "text": "It'll just keep going sideways and keep",
+      "start": 459.44,
+      "duration": 3.36
+    },
+    {
+      "text": "on making little lower highs on those 1",
+      "start": 460.96,
+      "duration": 4.16
+    },
+    {
+      "text": "hour time frames and keep going down.",
+      "start": 462.8,
+      "duration": 3.76
+    },
+    {
+      "text": "The idea is if if it's going into",
+      "start": 465.12,
+      "duration": 2.56
+    },
+    {
+      "text": "profit, you want to try to hold the",
+      "start": 466.56,
+      "duration": 2.88
+    },
+    {
+      "text": "trade as long as you can, preferably to",
+      "start": 467.68,
+      "duration": 3.68
+    },
+    {
+      "text": "the profit target, like 80% of the time",
+      "start": 469.44,
+      "duration": 4.0
+    },
+    {
+      "text": "or more. Sure, you can close winning",
+      "start": 471.36,
+      "duration": 3.839
+    },
+    {
+      "text": "trades early if the context doesn't seem",
+      "start": 473.44,
+      "duration": 3.12
+    },
+    {
+      "text": "right or if price is really struggling",
+      "start": 475.199,
+      "duration": 3.28
+    },
+    {
+      "text": "to get to the target or if the market's",
+      "start": 476.56,
+      "duration": 3.199
+    },
+    {
+      "text": "about to close, it's about to be a",
+      "start": 478.479,
+      "duration": 2.961
+    },
+    {
+      "text": "weekend and price is more than halfway",
+      "start": 479.759,
+      "duration": 3.681
+    },
+    {
+      "text": "into profit. Sure, it's okay to close",
+      "start": 481.44,
+      "duration": 4.159
+    },
+    {
+      "text": "trades there in profit. However, most of",
+      "start": 483.44,
+      "duration": 3.759
+    },
+    {
+      "text": "the time you should really be trying to",
+      "start": 485.599,
+      "duration": 3.201
+    },
+    {
+      "text": "hold those trades to the profit target",
+      "start": 487.199,
+      "duration": 3.041
+    },
+    {
+      "text": "because what this means is that when you",
+      "start": 488.8,
+      "duration": 3.92
+    },
+    {
+      "text": "lose, you lose like, you know, maybe",
+      "start": 490.24,
+      "duration": 4.239
+    },
+    {
+      "text": "break even or a small profit or a small",
+      "start": 492.72,
+      "duration": 3.28
+    },
+    {
+      "text": "loss. You know, a third of the way or",
+      "start": 494.479,
+      "duration": 3.521
+    },
+    {
+      "text": "maybe half of the way to the stop loss.",
+      "start": 496.0,
+      "duration": 4.319
+    },
+    {
+      "text": "That's fine. And then when you win, you",
+      "start": 498.0,
+      "duration": 3.44
+    },
+    {
+      "text": "win a little bit more because you're",
+      "start": 500.319,
+      "duration": 2.241
+    },
+    {
+      "text": "letting most of your trades run at the",
+      "start": 501.44,
+      "duration": 3.52
+    },
+    {
+      "text": "profit target. So, what I'm going to do",
+      "start": 502.56,
+      "duration": 3.52
+    },
+    {
+      "text": "here is we're going to watch it very",
+      "start": 504.96,
+      "duration": 3.28
+    },
+    {
+      "text": "closely here on the 1 hour. You don't",
+      "start": 506.08,
+      "duration": 3.6
+    },
+    {
+      "text": "have to check this every second of every",
+      "start": 508.24,
+      "duration": 3.519
+    },
+    {
+      "text": "day. You can check a couple times a day.",
+      "start": 509.68,
+      "duration": 3.839
+    },
+    {
+      "text": "Honestly, if I didn't run this YouTube",
+      "start": 511.759,
+      "duration": 3.361
+    },
+    {
+      "text": "channel and I didn't call my trades live",
+      "start": 513.519,
+      "duration": 3.76
+    },
+    {
+      "text": "and Telegram my Discord server for my",
+      "start": 515.12,
+      "duration": 4.0
+    },
+    {
+      "text": "exact trades, if I wasn't doing all",
+      "start": 517.279,
+      "duration": 3.521
+    },
+    {
+      "text": "this, I'd probably be on charts less",
+      "start": 519.12,
+      "duration": 4.399
+    },
+    {
+      "text": "than an hour per day. 15 minutes in the",
+      "start": 520.8,
+      "duration": 4.719
+    },
+    {
+      "text": "morning, 15 minutes maybe in the",
+      "start": 523.519,
+      "duration": 4.961
+    },
+    {
+      "text": "afternoon, 15 minutes in the in in the",
+      "start": 525.519,
+      "duration": 4.481
+    },
+    {
+      "text": "late afternoon to early evening, and",
+      "start": 528.48,
+      "duration": 2.96
+    },
+    {
+      "text": "maybe like another 15 minutes before",
+      "start": 530.0,
+      "duration": 2.8
+    },
+    {
+      "text": "bed, right? So, you don't need to check",
+      "start": 531.44,
+      "duration": 3.36
+    },
+    {
+      "text": "charts all day doing this, and you have",
+      "start": 532.8,
+      "duration": 3.52
+    },
+    {
+      "text": "plenty of trading opportunities all the",
+      "start": 534.8,
+      "duration": 4.0
+    },
+    {
+      "text": "time. I myself, my stats show that I get",
+      "start": 536.32,
+      "duration": 4.24
+    },
+    {
+      "text": "about eight trades per week. And some of",
+      "start": 538.8,
+      "duration": 3.28
+    },
+    {
+      "text": "those trades are broken up in between",
+      "start": 540.56,
+      "duration": 3.279
+    },
+    {
+      "text": "different trading opportunities. So I",
+      "start": 542.08,
+      "duration": 3.12
+    },
+    {
+      "text": "would argue that I get maybe four or",
+      "start": 543.839,
+      "duration": 2.721
+    },
+    {
+      "text": "five trades per week because sometimes",
+      "start": 545.2,
+      "duration": 3.12
+    },
+    {
+      "text": "I'll enter multiple trades within the",
+      "start": 546.56,
+      "duration": 3.68
+    },
+    {
+      "text": "same trading idea. So just cuz my",
+      "start": 548.32,
+      "duration": 3.76
+    },
+    {
+      "text": "individual trades in my P&L terminal and",
+      "start": 550.24,
+      "duration": 3.84
+    },
+    {
+      "text": "the stats and analytics and metrics show",
+      "start": 552.08,
+      "duration": 4.08
+    },
+    {
+      "text": "about eight trades per week on average.",
+      "start": 554.08,
+      "duration": 3.52
+    },
+    {
+      "text": "I'm probably taking actually like four",
+      "start": 556.16,
+      "duration": 3.28
+    },
+    {
+      "text": "or five setups per week. That's what it",
+      "start": 557.6,
+      "duration": 3.76
+    },
+    {
+      "text": "comes out to be. So you get plenty of",
+      "start": 559.44,
+      "duration": 4.16
+    },
+    {
+      "text": "trades doing this. So now that price has",
+      "start": 561.36,
+      "duration": 3.84
+    },
+    {
+      "text": "started to go up, I'm going to hold this",
+      "start": 563.6,
+      "duration": 2.799
+    },
+    {
+      "text": "trade.",
+      "start": 565.2,
+      "duration": 2.48
+    },
+    {
+      "text": "Okay, now we're going to watch price",
+      "start": 566.399,
+      "duration": 3.521
+    },
+    {
+      "text": "action here. Price action can tell you a",
+      "start": 567.68,
+      "duration": 4.0
+    },
+    {
+      "text": "lot. We're going to go nice and slow.",
+      "start": 569.92,
+      "duration": 3.68
+    },
+    {
+      "text": "The idea is that price should be making",
+      "start": 571.68,
+      "duration": 3.279
+    },
+    {
+      "text": "higher highs and higher lows if it's",
+      "start": 573.6,
+      "duration": 2.48
+    },
+    {
+      "text": "going to be going up, right? And the",
+      "start": 574.959,
+      "duration": 2.56
+    },
+    {
+      "text": "moment it starts to not do that, it",
+      "start": 576.08,
+      "duration": 2.8
+    },
+    {
+      "text": "doesn't mean the trade's invalidated",
+      "start": 577.519,
+      "duration": 3.601
+    },
+    {
+      "text": "necessarily, but it does mean that you",
+      "start": 578.88,
+      "duration": 4.639
+    },
+    {
+      "text": "should start looking to maybe not stay",
+      "start": 581.12,
+      "duration": 3.92
+    },
+    {
+      "text": "in that trade as long or you should",
+      "start": 583.519,
+      "duration": 2.961
+    },
+    {
+      "text": "start trying to find reasons to get out",
+      "start": 585.04,
+      "duration": 3.6
+    },
+    {
+      "text": "of the trade a little bit early. So far,",
+      "start": 586.48,
+      "duration": 3.52
+    },
+    {
+      "text": "we just have price making higher highs",
+      "start": 588.64,
+      "duration": 3.6
+    },
+    {
+      "text": "and higher lows. Price makes a new high",
+      "start": 590.0,
+      "duration": 5.04
+    },
+    {
+      "text": "right here. It goes up higher. probably",
+      "start": 592.24,
+      "duration": 6.08
+    },
+    {
+      "text": "finds some resistance here.",
+      "start": 595.04,
+      "duration": 6.4
+    },
+    {
+      "text": "Still makes another higher high,",
+      "start": 598.32,
+      "duration": 4.48
+    },
+    {
+      "text": "tries to go up, and then it eventually",
+      "start": 601.44,
+      "duration": 3.44
+    },
+    {
+      "text": "hits the profit target. One thing I want",
+      "start": 602.8,
+      "duration": 3.92
+    },
+    {
+      "text": "to point out about this is that when",
+      "start": 604.88,
+      "duration": 5.04
+    },
+    {
+      "text": "you're right, price generally just has a",
+      "start": 606.72,
+      "duration": 4.559
+    },
+    {
+      "text": "nice easy move towards the profit",
+      "start": 609.92,
+      "duration": 3.68
+    },
+    {
+      "text": "target. That is generally what happens",
+      "start": 611.279,
+      "duration": 4.321
+    },
+    {
+      "text": "on the best trades you will ever have.",
+      "start": 613.6,
+      "duration": 3.919
+    },
+    {
+      "text": "It should not be this fight for life and",
+      "start": 615.6,
+      "duration": 3.44
+    },
+    {
+      "text": "death of it going back and forth,",
+      "start": 617.519,
+      "duration": 4.161
+    },
+    {
+      "text": "swinging way into profit, way into loss,",
+      "start": 619.04,
+      "duration": 4.479
+    },
+    {
+      "text": "back to your entry, going sideways for",
+      "start": 621.68,
+      "duration": 3.92
+    },
+    {
+      "text": "days and days. My average trade duration",
+      "start": 623.519,
+      "duration": 3.841
+    },
+    {
+      "text": "is about a day and a half. That's what",
+      "start": 625.6,
+      "duration": 3.6
+    },
+    {
+      "text": "the stats and metrics on my MetaTrader 5",
+      "start": 627.36,
+      "duration": 4.08
+    },
+    {
+      "text": "P&L show for the past rolling 12 months",
+      "start": 629.2,
+      "duration": 4.96
+    },
+    {
+      "text": "of trading data. It's about a day and a",
+      "start": 631.44,
+      "duration": 4.24
+    },
+    {
+      "text": "half for me. And this is trading daily",
+      "start": 634.16,
+      "duration": 3.119
+    },
+    {
+      "text": "and weekly charts and then entering and",
+      "start": 635.68,
+      "duration": 4.159
+    },
+    {
+      "text": "managing on the 1 hour. So, the fact",
+      "start": 637.279,
+      "duration": 3.521
+    },
+    {
+      "text": "that price has gone up here to the",
+      "start": 639.839,
+      "duration": 2.24
+    },
+    {
+      "text": "profit target means this was a winning",
+      "start": 640.8,
+      "duration": 2.96
+    },
+    {
+      "text": "trade. So, this is cool. So now what we",
+      "start": 642.079,
+      "duration": 3.841
+    },
+    {
+      "text": "do is we wait for price to get to the",
+      "start": 643.76,
+      "duration": 4.0
+    },
+    {
+      "text": "next zone. Now you can see since I've",
+      "start": 645.92,
+      "duration": 3.12
+    },
+    {
+      "text": "gone to the daily chart, the daily",
+      "start": 647.76,
+      "duration": 2.88
+    },
+    {
+      "text": "candle is now updated. It shows this did",
+      "start": 649.04,
+      "duration": 3.2
+    },
+    {
+      "text": "in fact go much further than the profit",
+      "start": 650.64,
+      "duration": 3.439
+    },
+    {
+      "text": "target. But look how simple this trade",
+      "start": 652.24,
+      "duration": 4.0
+    },
+    {
+      "text": "is. When you use really really clear",
+      "start": 654.079,
+      "duration": 4.32
+    },
+    {
+      "text": "major zones, it becomes so much easier",
+      "start": 656.24,
+      "duration": 5.599
+    },
+    {
+      "text": "to trade. Okay, cool. So we've won one",
+      "start": 658.399,
+      "duration": 5.041
+    },
+    {
+      "text": "trade. I'm going to go here to the",
+      "start": 661.839,
+      "duration": 3.281
+    },
+    {
+      "text": "calculator.",
+      "start": 663.44,
+      "duration": 4.32
+    },
+    {
+      "text": "Um",
+      "start": 665.12,
+      "duration": 4.159
+    },
+    {
+      "text": "and then we'll say, you know, how much",
+      "start": 667.76,
+      "duration": 4.079
+    },
+    {
+      "text": "did I risk on this 25,000? So we'll just",
+      "start": 669.279,
+      "duration": 4.481
+    },
+    {
+      "text": "do we'll do one unit of R. Okay. So one",
+      "start": 671.839,
+      "duration": 3.841
+    },
+    {
+      "text": "unit of risk meaning if we risk the same",
+      "start": 673.76,
+      "duration": 4.48
+    },
+    {
+      "text": "dollar amount and we lose one you know",
+      "start": 675.68,
+      "duration": 4.64
+    },
+    {
+      "text": "we'll lose one R. If we lose half of a",
+      "start": 678.24,
+      "duration": 3.279
+    },
+    {
+      "text": "trade right it's halfway to the stop",
+      "start": 680.32,
+      "duration": 3.68
+    },
+    {
+      "text": "loss. We close it we lose.5 R. So on and",
+      "start": 681.519,
+      "duration": 4.56
+    },
+    {
+      "text": "so forth. So we've got plus one R. So",
+      "start": 684.0,
+      "duration": 3.12
+    },
+    {
+      "text": "now I'm going to go back to the random",
+      "start": 686.079,
+      "duration": 2.481
+    },
+    {
+      "text": "number generator. I'm going to generate",
+      "start": 687.12,
+      "duration": 3.68
+    },
+    {
+      "text": "a different pair. So number one. So",
+      "start": 688.56,
+      "duration": 4.56
+    },
+    {
+      "text": "that's CAD JPY it looks like up here.",
+      "start": 690.8,
+      "duration": 3.68
+    },
+    {
+      "text": "And this it looks like it's on the same",
+      "start": 693.12,
+      "duration": 2.8
+    },
+    {
+      "text": "part on the Trading View chart. So",
+      "start": 694.48,
+      "duration": 2.799
+    },
+    {
+      "text": "that's great. So it's already updated",
+      "start": 695.92,
+      "duration": 2.96
+    },
+    {
+      "text": "within your train your same trading",
+      "start": 697.279,
+      "duration": 5.041
+    },
+    {
+      "text": "session. So on the daily chart, we're",
+      "start": 698.88,
+      "duration": 6.32
+    },
+    {
+      "text": "seeing current market price. I see a",
+      "start": 702.32,
+      "duration": 4.48
+    },
+    {
+      "text": "high right here where price has been and",
+      "start": 705.2,
+      "duration": 3.28
+    },
+    {
+      "text": "I also see some lows right here where",
+      "start": 706.8,
+      "duration": 3.68
+    },
+    {
+      "text": "price has had nice bounces in the past.",
+      "start": 708.48,
+      "duration": 3.76
+    },
+    {
+      "text": "So now we're going to set two alerts.",
+      "start": 710.48,
+      "duration": 3.52
+    },
+    {
+      "text": "And again, this horizontal line serves",
+      "start": 712.24,
+      "duration": 3.279
+    },
+    {
+      "text": "as an alert. So I go here to the little",
+      "start": 714.0,
+      "duration": 4.0
+    },
+    {
+      "text": "plus button. I click draw horizontal",
+      "start": 715.519,
+      "duration": 3.921
+    },
+    {
+      "text": "line, but when you're doing this in the",
+      "start": 718.0,
+      "duration": 4.079
+    },
+    {
+      "text": "live market, it'll just say set an alert",
+      "start": 719.44,
+      "duration": 5.519
+    },
+    {
+      "text": "on CAD JPY at that area. And now we're",
+      "start": 722.079,
+      "duration": 4.32
+    },
+    {
+      "text": "just going to sit here and wait. Most of",
+      "start": 724.959,
+      "duration": 3.521
+    },
+    {
+      "text": "trading is in fact waiting. You're not",
+      "start": 726.399,
+      "duration": 3.601
+    },
+    {
+      "text": "going to get trading opportunities on",
+      "start": 728.48,
+      "duration": 3.039
+    },
+    {
+      "text": "every single pair all the time.",
+      "start": 730.0,
+      "duration": 3.12
+    },
+    {
+      "text": "Sometimes it takes months to get a",
+      "start": 731.519,
+      "duration": 3.76
+    },
+    {
+      "text": "trading opportunity on a single pair.",
+      "start": 733.12,
+      "duration": 3.36
+    },
+    {
+      "text": "But that's okay because you have so many",
+      "start": 735.279,
+      "duration": 3.761
+    },
+    {
+      "text": "setups across all pairs at any given",
+      "start": 736.48,
+      "duration": 5.52
+    },
+    {
+      "text": "time.",
+      "start": 739.04,
+      "duration": 4.16
+    },
+    {
+      "text": "So, we're going to wait for price to get",
+      "start": 742.0,
+      "duration": 2.959
+    },
+    {
+      "text": "into one of these zones. Hopefully, it",
+      "start": 743.2,
+      "duration": 2.96
+    },
+    {
+      "text": "can get up there into the resistance.",
+      "start": 744.959,
+      "duration": 2.401
+    },
+    {
+      "text": "So, it does in fact get into the",
+      "start": 746.16,
+      "duration": 2.64
+    },
+    {
+      "text": "resistance. Now, we're going to go to",
+      "start": 747.36,
+      "duration": 2.64
+    },
+    {
+      "text": "the 1 hour. We're going to see if",
+      "start": 748.8,
+      "duration": 2.64
+    },
+    {
+      "text": "there's any price action here that shows",
+      "start": 750.0,
+      "duration": 4.16
+    },
+    {
+      "text": "that price is rejecting the zone. So, it",
+      "start": 751.44,
+      "duration": 4.16
+    },
+    {
+      "text": "looks like price already went up into",
+      "start": 754.16,
+      "duration": 3.2
+    },
+    {
+      "text": "this zone and then started to reject. So",
+      "start": 755.6,
+      "duration": 3.28
+    },
+    {
+      "text": "the first time we would have seen it hit",
+      "start": 757.36,
+      "duration": 3.52
+    },
+    {
+      "text": "the zone and then start rejecting is",
+      "start": 758.88,
+      "duration": 3.84
+    },
+    {
+      "text": "right here. So right there on that",
+      "start": 760.88,
+      "duration": 4.48
+    },
+    {
+      "text": "candle. So then what this would dictate",
+      "start": 762.72,
+      "duration": 5.2
+    },
+    {
+      "text": "is that price gets there. It reaches all",
+      "start": 765.36,
+      "duration": 3.84
+    },
+    {
+      "text": "the way into the zone where we had our",
+      "start": 767.92,
+      "duration": 2.64
+    },
+    {
+      "text": "alert and then it starts to pull away.",
+      "start": 769.2,
+      "duration": 2.56
+    },
+    {
+      "text": "Right? It didn't break through right",
+      "start": 770.56,
+      "duration": 3.2
+    },
+    {
+      "text": "above. So we're going to enter a sell",
+      "start": 771.76,
+      "duration": 4.0
+    },
+    {
+      "text": "right there. We're going to put our stop",
+      "start": 773.76,
+      "duration": 4.319
+    },
+    {
+      "text": "loss just above this zone. Not too",
+      "start": 775.76,
+      "duration": 4.96
+    },
+    {
+      "text": "close, but not ridiculously far like",
+      "start": 778.079,
+      "duration": 4.401
+    },
+    {
+      "text": "this either. Right? For my trading",
+      "start": 780.72,
+      "duration": 4.0
+    },
+    {
+      "text": "approach, I just tend to put my my um",
+      "start": 782.48,
+      "duration": 4.0
+    },
+    {
+      "text": "stop loss just above the zones to give",
+      "start": 784.72,
+      "duration": 3.679
+    },
+    {
+      "text": "myself some room. And then if we're",
+      "start": 786.48,
+      "duration": 3.12
+    },
+    {
+      "text": "going to set the profit target at about",
+      "start": 788.399,
+      "duration": 3.12
+    },
+    {
+      "text": "1:1, which is down here. So this is the",
+      "start": 789.6,
+      "duration": 4.239
+    },
+    {
+      "text": "trade. So now what we'll notice is from",
+      "start": 791.519,
+      "duration": 3.921
+    },
+    {
+      "text": "the moment this trade was entered to the",
+      "start": 793.839,
+      "duration": 3.841
+    },
+    {
+      "text": "moment where it's at right now, price",
+      "start": 795.44,
+      "duration": 4.24
+    },
+    {
+      "text": "has done something interesting. We went",
+      "start": 797.68,
+      "duration": 4.48
+    },
+    {
+      "text": "into profit, pulled back a little bit.",
+      "start": 799.68,
+      "duration": 4.159
+    },
+    {
+      "text": "We formed this little set of lows right",
+      "start": 802.16,
+      "duration": 5.359
+    },
+    {
+      "text": "here. And what happened right here is",
+      "start": 803.839,
+      "duration": 5.521
+    },
+    {
+      "text": "that price started going sideways around",
+      "start": 807.519,
+      "duration": 3.681
+    },
+    {
+      "text": "these lows. And then we actually got a",
+      "start": 809.36,
+      "duration": 3.279
+    },
+    {
+      "text": "nice little breakthrough, right? So we",
+      "start": 811.2,
+      "duration": 3.52
+    },
+    {
+      "text": "made a little high right here. We made a",
+      "start": 812.639,
+      "duration": 4.161
+    },
+    {
+      "text": "low, made a lower high, and then a lower",
+      "start": 814.72,
+      "duration": 3.6
+    },
+    {
+      "text": "low. But then price has come up and now",
+      "start": 816.8,
+      "duration": 3.36
+    },
+    {
+      "text": "it's invalidated this little downtrend",
+      "start": 818.32,
+      "duration": 3.519
+    },
+    {
+      "text": "structure. If this was going to work out",
+      "start": 820.16,
+      "duration": 2.72
+    },
+    {
+      "text": "nicely, it just would have fallen",
+      "start": 821.839,
+      "duration": 3.201
+    },
+    {
+      "text": "straight to the profit target. The fact",
+      "start": 822.88,
+      "duration": 3.759
+    },
+    {
+      "text": "that this hasn't done that, it doesn't",
+      "start": 825.04,
+      "duration": 3.28
+    },
+    {
+      "text": "mean that this is an invalidated trade",
+      "start": 826.639,
+      "duration": 3.041
+    },
+    {
+      "text": "completely because price is just back",
+      "start": 828.32,
+      "duration": 3.12
+    },
+    {
+      "text": "here at the resistance zone. But what",
+      "start": 829.68,
+      "duration": 3.279
+    },
+    {
+      "text": "this does mean is that we should start",
+      "start": 831.44,
+      "duration": 2.88
+    },
+    {
+      "text": "being a little bit more careful and",
+      "start": 832.959,
+      "duration": 2.961
+    },
+    {
+      "text": "looking for reasons to close now that",
+      "start": 834.32,
+      "duration": 4.0
+    },
+    {
+      "text": "the trade's not working out easier. A",
+      "start": 835.92,
+      "duration": 4.719
+    },
+    {
+      "text": "hallmark sign of a profitable trader is",
+      "start": 838.32,
+      "duration": 4.319
+    },
+    {
+      "text": "getting into trades, holding your",
+      "start": 840.639,
+      "duration": 3.921
+    },
+    {
+      "text": "winners a little bit longer than you",
+      "start": 842.639,
+      "duration": 4.0
+    },
+    {
+      "text": "hold your losers. So, get out of losing",
+      "start": 844.56,
+      "duration": 4.079
+    },
+    {
+      "text": "trades early, cut them short, and then",
+      "start": 846.639,
+      "duration": 3.681
+    },
+    {
+      "text": "stay in winning trades longer, meaning",
+      "start": 848.639,
+      "duration": 3.841
+    },
+    {
+      "text": "let them run. So, we're going to go",
+      "start": 850.32,
+      "duration": 3.84
+    },
+    {
+      "text": "candle by candle here in the 1 hour.",
+      "start": 852.48,
+      "duration": 3.039
+    },
+    {
+      "text": "What I'm looking for is price either",
+      "start": 854.16,
+      "duration": 3.28
+    },
+    {
+      "text": "going sideways or quickly breaking above",
+      "start": 855.519,
+      "duration": 4.56
+    },
+    {
+      "text": "this zone. So, let's see what happens.",
+      "start": 857.44,
+      "duration": 5.04
+    },
+    {
+      "text": "I'm going to click through very slowly.",
+      "start": 860.079,
+      "duration": 3.841
+    },
+    {
+      "text": "Price is starting to go sideways here",
+      "start": 862.48,
+      "duration": 3.12
+    },
+    {
+      "text": "for a couple candlesticks. Tries to go",
+      "start": 863.92,
+      "duration": 4.4
+    },
+    {
+      "text": "up and break the high. tries to go up,",
+      "start": 865.6,
+      "duration": 4.479
+    },
+    {
+      "text": "succeeds in breaking the high. So now",
+      "start": 868.32,
+      "duration": 2.959
+    },
+    {
+      "text": "we're really deep here into this",
+      "start": 870.079,
+      "duration": 3.681
+    },
+    {
+      "text": "resistance zone. Let's wait and see what",
+      "start": 871.279,
+      "duration": 4.8
+    },
+    {
+      "text": "happens. It goes up even deeper. So now",
+      "start": 873.76,
+      "duration": 3.519
+    },
+    {
+      "text": "we're at the make it or break it point.",
+      "start": 876.079,
+      "duration": 3.281
+    },
+    {
+      "text": "If it starts breaking past this area,",
+      "start": 877.279,
+      "duration": 3.441
+    },
+    {
+      "text": "we'll know it's probably not going to",
+      "start": 879.36,
+      "duration": 4.08
+    },
+    {
+      "text": "work out. So price does in fact start",
+      "start": 880.72,
+      "duration": 3.919
+    },
+    {
+      "text": "breaking past this zone and we're able",
+      "start": 883.44,
+      "duration": 2.639
+    },
+    {
+      "text": "to close it up here. So I'm going to go",
+      "start": 884.639,
+      "duration": 3.76
+    },
+    {
+      "text": "ahead and close it right there. This is",
+      "start": 886.079,
+      "duration": 3.921
+    },
+    {
+      "text": "a little more than halfway to the stop",
+      "start": 888.399,
+      "duration": 4.321
+    },
+    {
+      "text": "loss. So I'm going to call this 6R. So",
+      "start": 890.0,
+      "duration": 5.36
+    },
+    {
+      "text": "60% of the way to the stop loss. So we",
+      "start": 892.72,
+      "duration": 7.679
+    },
+    {
+      "text": "will do one and we will subtract 0.6R",
+      "start": 895.36,
+      "duration": 6.96
+    },
+    {
+      "text": "and right now this equals point4. So let",
+      "start": 900.399,
+      "duration": 3.361
+    },
+    {
+      "text": "me just redo this. That way we have the",
+      "start": 902.32,
+      "duration": 3.6
+    },
+    {
+      "text": "whole thing lined up here. So 1 minus",
+      "start": 903.76,
+      "duration": 4.0
+    },
+    {
+      "text": "0.6",
+      "start": 905.92,
+      "duration": 3.599
+    },
+    {
+      "text": "and then we'll add the next outcome in",
+      "start": 907.76,
+      "duration": 3.28
+    },
+    {
+      "text": "there. You know after that now we're",
+      "start": 909.519,
+      "duration": 2.801
+    },
+    {
+      "text": "going to go to another pair. But first",
+      "start": 911.04,
+      "duration": 2.4
+    },
+    {
+      "text": "let's actually go and see what would",
+      "start": 912.32,
+      "duration": 2.56
+    },
+    {
+      "text": "have happened here had we held. I just",
+      "start": 913.44,
+      "duration": 3.68
+    },
+    {
+      "text": "want to see. So that would have gone and",
+      "start": 914.88,
+      "duration": 4.16
+    },
+    {
+      "text": "hit the stop loss. This is why I like to",
+      "start": 917.12,
+      "duration": 3.12
+    },
+    {
+      "text": "get out of my trades early if they're",
+      "start": 919.04,
+      "duration": 2.96
+    },
+    {
+      "text": "not working because you can als you can",
+      "start": 920.24,
+      "duration": 4.08
+    },
+    {
+      "text": "oftentimes tell, you know, with plenty",
+      "start": 922.0,
+      "duration": 4.56
+    },
+    {
+      "text": "of range out, you know, like there's a",
+      "start": 924.32,
+      "duration": 4.16
+    },
+    {
+      "text": "missile coming, you catch it on radar,",
+      "start": 926.56,
+      "duration": 3.36
+    },
+    {
+      "text": "you catch it on LAR, you have",
+      "start": 928.48,
+      "duration": 3.039
+    },
+    {
+      "text": "observation towers looking to see the",
+      "start": 929.92,
+      "duration": 4.08
+    },
+    {
+      "text": "missile coming into your base. If you",
+      "start": 931.519,
+      "duration": 3.68
+    },
+    {
+      "text": "see that coming and you don't have any",
+      "start": 934.0,
+      "duration": 2.48
+    },
+    {
+      "text": "countermeasures for the missile, the",
+      "start": 935.199,
+      "duration": 2.32
+    },
+    {
+      "text": "missile's probably going to come and hit",
+      "start": 936.48,
+      "duration": 2.32
+    },
+    {
+      "text": "your base and you can give an early",
+      "start": 937.519,
+      "duration": 3.601
+    },
+    {
+      "text": "warning out so everyone can take cover.",
+      "start": 938.8,
+      "duration": 3.92
+    },
+    {
+      "text": "This is me taking cover and trading.",
+      "start": 941.12,
+      "duration": 2.8
+    },
+    {
+      "text": "Just get the hell out of the trade if it",
+      "start": 942.72,
+      "duration": 2.799
+    },
+    {
+      "text": "looks like it's not going to work out.",
+      "start": 943.92,
+      "duration": 2.96
+    },
+    {
+      "text": "Not every time, but a lot of times",
+      "start": 945.519,
+      "duration": 2.56
+    },
+    {
+      "text": "you'll see something like this happens",
+      "start": 946.88,
+      "duration": 2.399
+    },
+    {
+      "text": "where it just ends up going to where",
+      "start": 948.079,
+      "duration": 2.401
+    },
+    {
+      "text": "your stop loss would have been and it",
+      "start": 949.279,
+      "duration": 2.641
+    },
+    {
+      "text": "would have resulted in a full loss and",
+      "start": 950.48,
+      "duration": 3.12
+    },
+    {
+      "text": "that would have wiped out every the",
+      "start": 951.92,
+      "duration": 3.359
+    },
+    {
+      "text": "trade we had before for the profit. So",
+      "start": 953.6,
+      "duration": 3.2
+    },
+    {
+      "text": "then we'd be sitting break even instead",
+      "start": 955.279,
+      "duration": 3.841
+    },
+    {
+      "text": "of in a small profit right now.",
+      "start": 956.8,
+      "duration": 3.68
+    },
+    {
+      "text": "Sometimes you get out of a trade and it",
+      "start": 959.12,
+      "duration": 2.56
+    },
+    {
+      "text": "will in fact go back to the profit",
+      "start": 960.48,
+      "duration": 3.039
+    },
+    {
+      "text": "target and other times you won't have a",
+      "start": 961.68,
+      "duration": 3.279
+    },
+    {
+      "text": "chance to close manually. You might be",
+      "start": 963.519,
+      "duration": 3.12
+    },
+    {
+      "text": "asleep. It might be overnight, right?",
+      "start": 964.959,
+      "duration": 2.88
+    },
+    {
+      "text": "You know, if we're being realistic, you",
+      "start": 966.639,
+      "duration": 2.64
+    },
+    {
+      "text": "just sometimes you won't see it and",
+      "start": 967.839,
+      "duration": 3.12
+    },
+    {
+      "text": "it'll just happen way too fast. you have",
+      "start": 969.279,
+      "duration": 3.12
+    },
+    {
+      "text": "a crazy news event that spikes it",
+      "start": 970.959,
+      "duration": 3.361
+    },
+    {
+      "text": "against you and then it goes to the stop",
+      "start": 972.399,
+      "duration": 3.44
+    },
+    {
+      "text": "loss. And that's okay. If you take a",
+      "start": 974.32,
+      "duration": 2.879
+    },
+    {
+      "text": "full loss, it's okay. As long as you",
+      "start": 975.839,
+      "duration": 2.481
+    },
+    {
+      "text": "have your stop loss set and you're",
+      "start": 977.199,
+      "duration": 2.161
+    },
+    {
+      "text": "risking an amount that you're",
+      "start": 978.32,
+      "duration": 2.959
+    },
+    {
+      "text": "comfortable risking per trade, whether",
+      "start": 979.36,
+      "duration": 5.039
+    },
+    {
+      "text": "that's $100 or $200 or $1,000 or like",
+      "start": 981.279,
+      "duration": 7.041
+    },
+    {
+      "text": "me, $25,000, $50,000, $75,000 or more.",
+      "start": 984.399,
+      "duration": 5.281
+    },
+    {
+      "text": "You have to pick what you want to risk",
+      "start": 988.32,
+      "duration": 3.12
+    },
+    {
+      "text": "per trade. And sometimes I'll risk",
+      "start": 989.68,
+      "duration": 2.959
+    },
+    {
+      "text": "different amounts depending on the",
+      "start": 991.44,
+      "duration": 3.12
+    },
+    {
+      "text": "quality of the trading opportunity. And",
+      "start": 992.639,
+      "duration": 4.401
+    },
+    {
+      "text": "then you just go from there. So in this",
+      "start": 994.56,
+      "duration": 4.32
+    },
+    {
+      "text": "case, this ended up not working out. we",
+      "start": 997.04,
+      "duration": 3.599
+    },
+    {
+      "text": "were able to save ourselves from that.",
+      "start": 998.88,
+      "duration": 3.199
+    },
+    {
+      "text": "Um, and if we go here, if we keep",
+      "start": 1000.639,
+      "duration": 2.961
+    },
+    {
+      "text": "running out, looks like this went much,",
+      "start": 1002.079,
+      "duration": 3.44
+    },
+    {
+      "text": "much further. So, that's why stop losses",
+      "start": 1003.6,
+      "duration": 3.599
+    },
+    {
+      "text": "save you. And then also dynamic",
+      "start": 1005.519,
+      "duration": 3.361
+    },
+    {
+      "text": "management, which is us just watching",
+      "start": 1007.199,
+      "duration": 3.041
+    },
+    {
+      "text": "the trade and managing it if it goes",
+      "start": 1008.88,
+      "duration": 4.48
+    },
+    {
+      "text": "against us. That really helps a lot. So,",
+      "start": 1010.24,
+      "duration": 4.8
+    },
+    {
+      "text": "we're going to pick another 4x pair. So,",
+      "start": 1013.36,
+      "duration": 3.279
+    },
+    {
+      "text": "I did the random number generator again,",
+      "start": 1015.04,
+      "duration": 2.799
+    },
+    {
+      "text": "and we got number four. So, we're going",
+      "start": 1016.639,
+      "duration": 3.921
+    },
+    {
+      "text": "to go one, two, three, four. So, euro",
+      "start": 1017.839,
+      "duration": 6.881
+    },
+    {
+      "text": "GBP. Euro GBP here in March of 2022. So,",
+      "start": 1020.56,
+      "duration": 5.68
+    },
+    {
+      "text": "first things first, we're going to draw",
+      "start": 1024.72,
+      "duration": 4.64
+    },
+    {
+      "text": "up all the zones we have. I see a pretty",
+      "start": 1026.24,
+      "duration": 5.12
+    },
+    {
+      "text": "clear resistance zone right here. I'm",
+      "start": 1029.36,
+      "duration": 3.36
+    },
+    {
+      "text": "not sure about all this in here, but I",
+      "start": 1031.36,
+      "duration": 2.959
+    },
+    {
+      "text": "do know that these two recent highs were",
+      "start": 1032.72,
+      "duration": 3.839
+    },
+    {
+      "text": "pretty obvious right here. And then we",
+      "start": 1034.319,
+      "duration": 3.681
+    },
+    {
+      "text": "also have a support zone right here,",
+      "start": 1036.559,
+      "duration": 2.801
+    },
+    {
+      "text": "which it looks like price was already",
+      "start": 1038.0,
+      "duration": 4.16
+    },
+    {
+      "text": "bouncing at. So, let's go down here into",
+      "start": 1039.36,
+      "duration": 4.88
+    },
+    {
+      "text": "the price action since price got into",
+      "start": 1042.16,
+      "duration": 3.6
+    },
+    {
+      "text": "this zone where it was just at here,",
+      "start": 1044.24,
+      "duration": 3.04
+    },
+    {
+      "text": "literally on the daily candle that it",
+      "start": 1045.76,
+      "duration": 3.84
+    },
+    {
+      "text": "stopped at. Um, let's go and see if this",
+      "start": 1047.28,
+      "duration": 3.6
+    },
+    {
+      "text": "would have given us a good reason to",
+      "start": 1049.6,
+      "duration": 3.12
+    },
+    {
+      "text": "enter right there. And if so, we will",
+      "start": 1050.88,
+      "duration": 3.84
+    },
+    {
+      "text": "take that trade. So, we're going to go",
+      "start": 1052.72,
+      "duration": 4.0
+    },
+    {
+      "text": "here to the 1 hour. So what would have",
+      "start": 1054.72,
+      "duration": 3.6
+    },
+    {
+      "text": "happened when price got into this zone?",
+      "start": 1056.72,
+      "duration": 4.16
+    },
+    {
+      "text": "Well, when price got into this zone, it",
+      "start": 1058.32,
+      "duration": 4.96
+    },
+    {
+      "text": "looks like the first moment it got here",
+      "start": 1060.88,
+      "duration": 3.919
+    },
+    {
+      "text": "deep enough into the zone and started to",
+      "start": 1063.28,
+      "duration": 4.639
+    },
+    {
+      "text": "reverse would have been right here. So",
+      "start": 1064.799,
+      "duration": 4.721
+    },
+    {
+      "text": "came into the zone, started to reject,",
+      "start": 1067.919,
+      "duration": 3.281
+    },
+    {
+      "text": "and then it had an upwards candle right",
+      "start": 1069.52,
+      "duration": 3.519
+    },
+    {
+      "text": "there with a little bit of a wick. Then",
+      "start": 1071.2,
+      "duration": 3.2
+    },
+    {
+      "text": "it came down lower, then it bounced",
+      "start": 1073.039,
+      "duration": 2.64
+    },
+    {
+      "text": "again with a little bit more of a wick",
+      "start": 1074.4,
+      "duration": 2.72
+    },
+    {
+      "text": "right there. I would say this would be",
+      "start": 1075.679,
+      "duration": 2.561
+    },
+    {
+      "text": "good enough to show that it's not",
+      "start": 1077.12,
+      "duration": 2.559
+    },
+    {
+      "text": "breaking immediately. What you want,",
+      "start": 1078.24,
+      "duration": 2.72
+    },
+    {
+      "text": "what you don't want to see is you don't",
+      "start": 1079.679,
+      "duration": 2.801
+    },
+    {
+      "text": "want to see big bare candles like this",
+      "start": 1080.96,
+      "duration": 3.36
+    },
+    {
+      "text": "just dropping straight through the zone.",
+      "start": 1082.48,
+      "duration": 3.28
+    },
+    {
+      "text": "You want to see that kind of pause. So,",
+      "start": 1084.32,
+      "duration": 4.479
+    },
+    {
+      "text": "we got that pause right there.",
+      "start": 1085.76,
+      "duration": 4.32
+    },
+    {
+      "text": "So, in this case, we're going to enter a",
+      "start": 1088.799,
+      "duration": 3.201
+    },
+    {
+      "text": "buy position right there after that",
+      "start": 1090.08,
+      "duration": 3.599
+    },
+    {
+      "text": "rejection. We're going to set our stop",
+      "start": 1092.0,
+      "duration": 4.64
+    },
+    {
+      "text": "loss below this zone.",
+      "start": 1093.679,
+      "duration": 4.081
+    },
+    {
+      "text": "And then we're going to set our profit",
+      "start": 1096.64,
+      "duration": 4.0
+    },
+    {
+      "text": "target at 1:1 riskreward ratio. So, does",
+      "start": 1097.76,
+      "duration": 5.52
+    },
+    {
+      "text": "this give us enough room? Yes, I would",
+      "start": 1100.64,
+      "duration": 4.0
+    },
+    {
+      "text": "say this gives us enough room to manage",
+      "start": 1103.28,
+      "duration": 2.88
+    },
+    {
+      "text": "the trade. I'm going to drag this stop",
+      "start": 1104.64,
+      "duration": 2.88
+    },
+    {
+      "text": "out just a little bit more. And then",
+      "start": 1106.16,
+      "duration": 2.879
+    },
+    {
+      "text": "we'll set the target profit target up",
+      "start": 1107.52,
+      "duration": 3.84
+    },
+    {
+      "text": "here. So, what would have happened after",
+      "start": 1109.039,
+      "duration": 3.76
+    },
+    {
+      "text": "we entered this trade? So, after we",
+      "start": 1111.36,
+      "duration": 3.679
+    },
+    {
+      "text": "entered this trade, you notice that",
+      "start": 1112.799,
+      "duration": 3.681
+    },
+    {
+      "text": "price kind of struggled here at this",
+      "start": 1115.039,
+      "duration": 3.441
+    },
+    {
+      "text": "little support for a second. It made a",
+      "start": 1116.48,
+      "duration": 4.16
+    },
+    {
+      "text": "lower low. Just cuz it makes a lower low",
+      "start": 1118.48,
+      "duration": 3.92
+    },
+    {
+      "text": "inside the zone doesn't necessarily mean",
+      "start": 1120.64,
+      "duration": 3.76
+    },
+    {
+      "text": "that the trade's invalidated completely.",
+      "start": 1122.4,
+      "duration": 3.84
+    },
+    {
+      "text": "The trade is invalidated completely once",
+      "start": 1124.4,
+      "duration": 3.68
+    },
+    {
+      "text": "it clearly breaks pretty far past the",
+      "start": 1126.24,
+      "duration": 3.76
+    },
+    {
+      "text": "support zone or resistance zone. Vice",
+      "start": 1128.08,
+      "duration": 4.959
+    },
+    {
+      "text": "versa. In this case, it just went down",
+      "start": 1130.0,
+      "duration": 5.12
+    },
+    {
+      "text": "here, made a low, and then it popped",
+      "start": 1133.039,
+      "duration": 3.921
+    },
+    {
+      "text": "right back up, and then we made a new",
+      "start": 1135.12,
+      "duration": 3.439
+    },
+    {
+      "text": "high. Then, we made a set of higher lows",
+      "start": 1136.96,
+      "duration": 2.8
+    },
+    {
+      "text": "right here. Now, it looks like it might",
+      "start": 1138.559,
+      "duration": 3.12
+    },
+    {
+      "text": "be trying to make a new high right here.",
+      "start": 1139.76,
+      "duration": 3.2
+    },
+    {
+      "text": "So, we're going to click it through very",
+      "start": 1141.679,
+      "duration": 2.401
+    },
+    {
+      "text": "slowly. We're going to watch price",
+      "start": 1142.96,
+      "duration": 4.16
+    },
+    {
+      "text": "action. If we're right, what is likely",
+      "start": 1144.08,
+      "duration": 4.959
+    },
+    {
+      "text": "going to happen is we'll just see this",
+      "start": 1147.12,
+      "duration": 3.2
+    },
+    {
+      "text": "little pattern of higher highs and",
+      "start": 1149.039,
+      "duration": 3.361
+    },
+    {
+      "text": "higher lows continue, hopefully sending",
+      "start": 1150.32,
+      "duration": 3.76
+    },
+    {
+      "text": "us to the profit target. And if we're",
+      "start": 1152.4,
+      "duration": 3.84
+    },
+    {
+      "text": "wrong, we'll start to notice that price",
+      "start": 1154.08,
+      "duration": 3.68
+    },
+    {
+      "text": "is not going to be easily moving towards",
+      "start": 1156.24,
+      "duration": 3.439
+    },
+    {
+      "text": "the profit target. So, let's click",
+      "start": 1157.76,
+      "duration": 3.76
+    },
+    {
+      "text": "through very slowly here on the 1 hour",
+      "start": 1159.679,
+      "duration": 4.081
+    },
+    {
+      "text": "and see what it does.",
+      "start": 1161.52,
+      "duration": 3.76
+    },
+    {
+      "text": "goes sideways, struggles here at the",
+      "start": 1163.76,
+      "duration": 4.52
+    },
+    {
+      "text": "high,",
+      "start": 1165.28,
+      "duration": 3.0
+    },
+    {
+      "text": "knocks out the little recent lows, finds",
+      "start": 1168.32,
+      "duration": 4.08
+    },
+    {
+      "text": "some bullish sensitivity, goes up,",
+      "start": 1170.4,
+      "duration": 5.04
+    },
+    {
+      "text": "creates a new high, starts to pull back,",
+      "start": 1172.4,
+      "duration": 5.44
+    },
+    {
+      "text": "pulls back very quickly. Now, we're here",
+      "start": 1175.44,
+      "duration": 5.119
+    },
+    {
+      "text": "back at the low, finds support again,",
+      "start": 1177.84,
+      "duration": 5.52
+    },
+    {
+      "text": "tries to make a new high right here. So",
+      "start": 1180.559,
+      "duration": 4.48
+    },
+    {
+      "text": "far, we're still generally angled",
+      "start": 1183.36,
+      "duration": 3.28
+    },
+    {
+      "text": "upwards, right? We we're still having",
+      "start": 1185.039,
+      "duration": 2.961
+    },
+    {
+      "text": "like, you know, all these little lower",
+      "start": 1186.64,
+      "duration": 3.36
+    },
+    {
+      "text": "highs form in here, and we're also",
+      "start": 1188.0,
+      "duration": 3.679
+    },
+    {
+      "text": "having all these higher highs form in",
+      "start": 1190.0,
+      "duration": 4.32
+    },
+    {
+      "text": "here. So, so far it's still okay at this",
+      "start": 1191.679,
+      "duration": 4.801
+    },
+    {
+      "text": "exact moment.",
+      "start": 1194.32,
+      "duration": 4.719
+    },
+    {
+      "text": "We start to fall a little bit. She tries",
+      "start": 1196.48,
+      "duration": 4.319
+    },
+    {
+      "text": "to go up. Will we be able to make a new",
+      "start": 1199.039,
+      "duration": 4.081
+    },
+    {
+      "text": "high right here? Barely. Let's see if",
+      "start": 1200.799,
+      "duration": 3.601
+    },
+    {
+      "text": "that actually holds through. We need to",
+      "start": 1203.12,
+      "duration": 2.96
+    },
+    {
+      "text": "see if that actually falls through. So,",
+      "start": 1204.4,
+      "duration": 3.279
+    },
+    {
+      "text": "yes, we do make a new high and then we",
+      "start": 1206.08,
+      "duration": 3.68
+    },
+    {
+      "text": "have another move further. So, now we",
+      "start": 1207.679,
+      "duration": 3.12
+    },
+    {
+      "text": "just want to get the hell out of the",
+      "start": 1209.76,
+      "duration": 2.56
+    },
+    {
+      "text": "trade early and close it early in",
+      "start": 1210.799,
+      "duration": 3.201
+    },
+    {
+      "text": "profit.",
+      "start": 1212.32,
+      "duration": 4.08
+    },
+    {
+      "text": "I'm just kidding. We should not do that.",
+      "start": 1214.0,
+      "duration": 4.0
+    },
+    {
+      "text": "If you knew I was joking, that's great.",
+      "start": 1216.4,
+      "duration": 3.2
+    },
+    {
+      "text": "Gold star for you. You get a gold",
+      "start": 1218.0,
+      "duration": 3.28
+    },
+    {
+      "text": "sticker. I will personally hand deliver",
+      "start": 1219.6,
+      "duration": 3.76
+    },
+    {
+      "text": "you a gold sticker, figuratively",
+      "start": 1221.28,
+      "duration": 4.96
+    },
+    {
+      "text": "speaking. So, with this right here,",
+      "start": 1223.36,
+      "duration": 4.559
+    },
+    {
+      "text": "price has gone up and we're going to",
+      "start": 1226.24,
+      "duration": 2.96
+    },
+    {
+      "text": "keep holding this trade. We should",
+      "start": 1227.919,
+      "duration": 2.961
+    },
+    {
+      "text": "expect a little bit of a pullback after",
+      "start": 1229.2,
+      "duration": 3.2
+    },
+    {
+      "text": "this little bull run kind of finishes",
+      "start": 1230.88,
+      "duration": 3.6
+    },
+    {
+      "text": "up. We should expect a pullback, but so",
+      "start": 1232.4,
+      "duration": 4.8
+    },
+    {
+      "text": "far the trade's still valid.",
+      "start": 1234.48,
+      "duration": 4.16
+    },
+    {
+      "text": "So, it's pulling back just like we",
+      "start": 1237.2,
+      "duration": 3.599
+    },
+    {
+      "text": "anticipated. Let's see if it holds these",
+      "start": 1238.64,
+      "duration": 3.68
+    },
+    {
+      "text": "lows somewhere in this region or let's",
+      "start": 1240.799,
+      "duration": 3.041
+    },
+    {
+      "text": "see if it breaks and goes lower back to",
+      "start": 1242.32,
+      "duration": 3.599
+    },
+    {
+      "text": "the entry. So, in this case, it does go",
+      "start": 1243.84,
+      "duration": 4.0
+    },
+    {
+      "text": "lower, but it doesn't it still looks",
+      "start": 1245.919,
+      "duration": 3.601
+    },
+    {
+      "text": "like it's still angled upwards. It looks",
+      "start": 1247.84,
+      "duration": 3.76
+    },
+    {
+      "text": "like it's just pulled back. Keep going",
+      "start": 1249.52,
+      "duration": 4.399
+    },
+    {
+      "text": "very slowly. We try to pull back again",
+      "start": 1251.6,
+      "duration": 3.84
+    },
+    {
+      "text": "and then we break the recent lows and",
+      "start": 1253.919,
+      "duration": 3.521
+    },
+    {
+      "text": "come back here into the support zone.",
+      "start": 1255.44,
+      "duration": 3.52
+    },
+    {
+      "text": "This is where we want to start getting a",
+      "start": 1257.44,
+      "duration": 3.359
+    },
+    {
+      "text": "little bit suspicious. Okay. So, so far",
+      "start": 1258.96,
+      "duration": 3.04
+    },
+    {
+      "text": "from the moment we enter this trade on",
+      "start": 1260.799,
+      "duration": 3.201
+    },
+    {
+      "text": "the 22nd of March all the way up to",
+      "start": 1262.0,
+      "duration": 4.4
+    },
+    {
+      "text": "here's the 25th of March. So, this would",
+      "start": 1264.0,
+      "duration": 6.72
+    },
+    {
+      "text": "have been 22nd, 23rd, 24th, 25th. So, a",
+      "start": 1266.4,
+      "duration": 5.36
+    },
+    {
+      "text": "couple days. We've been in this trade",
+      "start": 1270.72,
+      "duration": 2.72
+    },
+    {
+      "text": "for 3 days. So, it's coming back to the",
+      "start": 1271.76,
+      "duration": 3.12
+    },
+    {
+      "text": "entry. Let's see what it does. We need",
+      "start": 1273.44,
+      "duration": 2.719
+    },
+    {
+      "text": "to see if it's going to bounce here at",
+      "start": 1274.88,
+      "duration": 3.76
+    },
+    {
+      "text": "this support zone.",
+      "start": 1276.159,
+      "duration": 5.921
+    },
+    {
+      "text": "tries to bounce. It's going sideways,",
+      "start": 1278.64,
+      "duration": 5.279
+    },
+    {
+      "text": "comes back with a big bear candle. Are",
+      "start": 1282.08,
+      "duration": 2.959
+    },
+    {
+      "text": "we going to break through these little",
+      "start": 1283.919,
+      "duration": 2.721
+    },
+    {
+      "text": "recent lows? We need to wait. We need to",
+      "start": 1285.039,
+      "duration": 3.681
+    },
+    {
+      "text": "see.",
+      "start": 1286.64,
+      "duration": 3.76
+    },
+    {
+      "text": "Comes a little bit lower, then it",
+      "start": 1288.72,
+      "duration": 3.92
+    },
+    {
+      "text": "rockets up and breaks the recent highs.",
+      "start": 1290.4,
+      "duration": 3.759
+    },
+    {
+      "text": "That's why again, you don't want to",
+      "start": 1292.64,
+      "duration": 2.96
+    },
+    {
+      "text": "close immediately the moment a little",
+      "start": 1294.159,
+      "duration": 2.88
+    },
+    {
+      "text": "bit of price action starts running",
+      "start": 1295.6,
+      "duration": 3.12
+    },
+    {
+      "text": "against you. But you do want to you want",
+      "start": 1297.039,
+      "duration": 3.681
+    },
+    {
+      "text": "to take that into account to say like,",
+      "start": 1298.72,
+      "duration": 3.28
+    },
+    {
+      "text": "look, if this thing was going to go up",
+      "start": 1300.72,
+      "duration": 4.24
+    },
+    {
+      "text": "easily, the the best trades, right, it",
+      "start": 1302.0,
+      "duration": 4.799
+    },
+    {
+      "text": "should have gone up right there. That's",
+      "start": 1304.96,
+      "duration": 3.44
+    },
+    {
+      "text": "what would be best. But sometimes since",
+      "start": 1306.799,
+      "duration": 2.961
+    },
+    {
+      "text": "price is not perfect and you can't",
+      "start": 1308.4,
+      "duration": 2.8
+    },
+    {
+      "text": "predict anything in Forex trading, all",
+      "start": 1309.76,
+      "duration": 2.72
+    },
+    {
+      "text": "you can do is just manage risk. That's",
+      "start": 1311.2,
+      "duration": 2.8
+    },
+    {
+      "text": "the only way you're profitable by just",
+      "start": 1312.48,
+      "duration": 2.64
+    },
+    {
+      "text": "making more when you're right versus",
+      "start": 1314.0,
+      "duration": 2.96
+    },
+    {
+      "text": "what you lose when you're wrong. We need",
+      "start": 1315.12,
+      "duration": 3.52
+    },
+    {
+      "text": "to take that into account. So it came",
+      "start": 1316.96,
+      "duration": 3.199
+    },
+    {
+      "text": "lower. It came into the zone again. It",
+      "start": 1318.64,
+      "duration": 2.8
+    },
+    {
+      "text": "bounced around the entry. Now we've made",
+      "start": 1320.159,
+      "duration": 2.961
+    },
+    {
+      "text": "some new highs. Let's see if we can get",
+      "start": 1321.44,
+      "duration": 4.479
+    },
+    {
+      "text": "this previous high broken.",
+      "start": 1323.12,
+      "duration": 6.0
+    },
+    {
+      "text": "So it pulls back, goes back up, makes a",
+      "start": 1325.919,
+      "duration": 4.561
+    },
+    {
+      "text": "new high. So now we're pretty close to",
+      "start": 1329.12,
+      "duration": 2.96
+    },
+    {
+      "text": "the profit target. And then you can see",
+      "start": 1330.48,
+      "duration": 3.28
+    },
+    {
+      "text": "right there after I clicked to the next",
+      "start": 1332.08,
+      "duration": 3.28
+    },
+    {
+      "text": "candle that went and hit the profit",
+      "start": 1333.76,
+      "duration": 4.399
+    },
+    {
+      "text": "target. So this is a full profit. It's a",
+      "start": 1335.36,
+      "duration": 4.559
+    },
+    {
+      "text": "full profit target hit, which is great.",
+      "start": 1338.159,
+      "duration": 3.121
+    },
+    {
+      "text": "So we're going to go back here into the",
+      "start": 1339.919,
+      "duration": 3.361
+    },
+    {
+      "text": "calculator and we're going to add plus",
+      "start": 1341.28,
+      "duration": 4.48
+    },
+    {
+      "text": "one. So so far we're sitting here in a",
+      "start": 1343.28,
+      "duration": 4.08
+    },
+    {
+      "text": "net profit, which is pretty nice. About",
+      "start": 1345.76,
+      "duration": 5.919
+    },
+    {
+      "text": "1.4 units of profit if my math serves.",
+      "start": 1347.36,
+      "duration": 5.84
+    },
+    {
+      "text": "And then we're going to go and let's",
+      "start": 1351.679,
+      "duration": 2.561
+    },
+    {
+      "text": "just see what would have happened after",
+      "start": 1353.2,
+      "duration": 2.719
+    },
+    {
+      "text": "this. Would it have gone up a lot or",
+      "start": 1354.24,
+      "duration": 2.64
+    },
+    {
+      "text": "would it would have pulled back",
+      "start": 1355.919,
+      "duration": 2.481
+    },
+    {
+      "text": "immediately? What would have happened?",
+      "start": 1356.88,
+      "duration": 2.799
+    },
+    {
+      "text": "So it looks like this would have gone up",
+      "start": 1358.4,
+      "duration": 3.36
+    },
+    {
+      "text": "even more. And then this might be",
+      "start": 1359.679,
+      "duration": 3.441
+    },
+    {
+      "text": "another trading opportunity up here when",
+      "start": 1361.76,
+      "duration": 3.76
+    },
+    {
+      "text": "it gets to this zone. But we will go to",
+      "start": 1363.12,
+      "duration": 3.679
+    },
+    {
+      "text": "another pair. And this one would have",
+      "start": 1365.52,
+      "duration": 3.039
+    },
+    {
+      "text": "broken above. So that one probably would",
+      "start": 1366.799,
+      "duration": 3.521
+    },
+    {
+      "text": "have been a small loss had we taken it.",
+      "start": 1368.559,
+      "duration": 3.521
+    },
+    {
+      "text": "But again, after this, it's a good idea",
+      "start": 1370.32,
+      "duration": 3.28
+    },
+    {
+      "text": "to always switch to a new pair. That",
+      "start": 1372.08,
+      "duration": 2.64
+    },
+    {
+      "text": "way, you're not trading the same pair",
+      "start": 1373.6,
+      "duration": 3.12
+    },
+    {
+      "text": "and chasing stuff. It's good because it",
+      "start": 1374.72,
+      "duration": 4.24
+    },
+    {
+      "text": "also simulates the kind of the random",
+      "start": 1376.72,
+      "duration": 4.56
+    },
+    {
+      "text": "variability you'll have between trades.",
+      "start": 1378.96,
+      "duration": 3.92
+    },
+    {
+      "text": "So, we're going to go to another trade",
+      "start": 1381.28,
+      "duration": 4.879
+    },
+    {
+      "text": "here. 1 to 20. We've got number one. So,",
+      "start": 1382.88,
+      "duration": 4.64
+    },
+    {
+      "text": "the same pair, but since we already did",
+      "start": 1386.159,
+      "duration": 4.0
+    },
+    {
+      "text": "CAD JPY, we already did that pair. Let's",
+      "start": 1387.52,
+      "duration": 4.72
+    },
+    {
+      "text": "just see if we can get a different one.",
+      "start": 1390.159,
+      "duration": 8.161
+    },
+    {
+      "text": "So, 12. Okay. So, 1 2 3 4 5 6 7 8 9 10.",
+      "start": 1392.24,
+      "duration": 10.16
+    },
+    {
+      "text": "What the hell just happened? 1 2 3 4 5 6",
+      "start": 1398.32,
+      "duration": 9.12
+    },
+    {
+      "text": "7 8 9 10 11 12. CHF JPY. We're here in",
+      "start": 1402.4,
+      "duration": 7.92
+    },
+    {
+      "text": "the daily CHF JPY March of 2022. Let's",
+      "start": 1407.44,
+      "duration": 4.4
+    },
+    {
+      "text": "zoom out. See if we can find any zones",
+      "start": 1410.32,
+      "duration": 3.599
+    },
+    {
+      "text": "where price was at. I don't see anything",
+      "start": 1411.84,
+      "duration": 3.76
+    },
+    {
+      "text": "very clear, honestly. I look way back",
+      "start": 1413.919,
+      "duration": 5.041
+    },
+    {
+      "text": "here. The last high was in June of 2015.",
+      "start": 1415.6,
+      "duration": 4.959
+    },
+    {
+      "text": "That would have been 7 years before",
+      "start": 1418.96,
+      "duration": 4.24
+    },
+    {
+      "text": "this. You're in March of 2022. So, I",
+      "start": 1420.559,
+      "duration": 3.681
+    },
+    {
+      "text": "don't see anything. So, I'm going to",
+      "start": 1423.2,
+      "duration": 3.12
+    },
+    {
+      "text": "wait. I'm going to let price play out.",
+      "start": 1424.24,
+      "duration": 3.28
+    },
+    {
+      "text": "Sometimes you won't get trading",
+      "start": 1426.32,
+      "duration": 2.719
+    },
+    {
+      "text": "opportunities for a few months on these,",
+      "start": 1427.52,
+      "duration": 3.6
+    },
+    {
+      "text": "and that's perfectly fine. I don't see",
+      "start": 1429.039,
+      "duration": 4.0
+    },
+    {
+      "text": "anything here. I'm going to be waiting.",
+      "start": 1431.12,
+      "duration": 4.24
+    },
+    {
+      "text": "There's no there's no price action here.",
+      "start": 1433.039,
+      "duration": 3.681
+    },
+    {
+      "text": "It just looks like it's in a pretty",
+      "start": 1435.36,
+      "duration": 4.24
+    },
+    {
+      "text": "strong uptrend. And then now we've got",
+      "start": 1436.72,
+      "duration": 4.48
+    },
+    {
+      "text": "price. Let's see if anything's setting",
+      "start": 1439.6,
+      "duration": 4.76
+    },
+    {
+      "text": "up here.",
+      "start": 1441.2,
+      "duration": 3.16
+    },
+    {
+      "text": "Yeah, this one is a weird one. I don't",
+      "start": 1446.0,
+      "duration": 3.6
+    },
+    {
+      "text": "really see anything so far.",
+      "start": 1447.52,
+      "duration": 6.56
+    },
+    {
+      "text": "Um, I don't see a price. Okay, so I",
+      "start": 1449.6,
+      "duration": 6.24
+    },
+    {
+      "text": "think now it will be safe to say this",
+      "start": 1454.08,
+      "duration": 3.199
+    },
+    {
+      "text": "looks like an area where price had a",
+      "start": 1455.84,
+      "duration": 2.48
+    },
+    {
+      "text": "nice little turnaround. So I'm going to",
+      "start": 1457.279,
+      "duration": 2.801
+    },
+    {
+      "text": "put a resistance zone right there. It",
+      "start": 1458.32,
+      "duration": 3.359
+    },
+    {
+      "text": "also looks like we have a support zone",
+      "start": 1460.08,
+      "duration": 3.36
+    },
+    {
+      "text": "right here. So let's see if price can",
+      "start": 1461.679,
+      "duration": 4.721
+    },
+    {
+      "text": "get to either one of these regions.",
+      "start": 1463.44,
+      "duration": 4.64
+    },
+    {
+      "text": "We'll pretend to set the alerts right.",
+      "start": 1466.4,
+      "duration": 5.68
+    },
+    {
+      "text": "So set the alert there.",
+      "start": 1468.08,
+      "duration": 5.92
+    },
+    {
+      "text": "We'll set an alert up here as well. This",
+      "start": 1472.08,
+      "duration": 4.24
+    },
+    {
+      "text": "resistance zone. We'll wait for price to",
+      "start": 1474.0,
+      "duration": 4.64
+    },
+    {
+      "text": "get to one of these areas. So price",
+      "start": 1476.32,
+      "duration": 3.68
+    },
+    {
+      "text": "comes up here into the resistance zone.",
+      "start": 1478.64,
+      "duration": 3.039
+    },
+    {
+      "text": "Let's go to the 1 hour and let's see if",
+      "start": 1480.0,
+      "duration": 3.279
+    },
+    {
+      "text": "we can actually get all the way up into",
+      "start": 1481.679,
+      "duration": 3.921
+    },
+    {
+      "text": "there where the alert is at. So price",
+      "start": 1483.279,
+      "duration": 3.921
+    },
+    {
+      "text": "does get up there into the alert and",
+      "start": 1485.6,
+      "duration": 3.439
+    },
+    {
+      "text": "then it starts to pull back quickly.",
+      "start": 1487.2,
+      "duration": 4.16
+    },
+    {
+      "text": "Cool. That is perfectly fine. It's great",
+      "start": 1489.039,
+      "duration": 4.161
+    },
+    {
+      "text": "for a sell trade. It came into the zone",
+      "start": 1491.36,
+      "duration": 3.76
+    },
+    {
+      "text": "and then we saw price tug away just a",
+      "start": 1493.2,
+      "duration": 3.359
+    },
+    {
+      "text": "little bit. You don't want to be",
+      "start": 1495.12,
+      "duration": 3.039
+    },
+    {
+      "text": "entering after price has already had a",
+      "start": 1496.559,
+      "duration": 3.201
+    },
+    {
+      "text": "move like this away from the zone",
+      "start": 1498.159,
+      "duration": 3.12
+    },
+    {
+      "text": "because if you do that, here's what your",
+      "start": 1499.76,
+      "duration": 4.24
+    },
+    {
+      "text": "trade structure looks like. Instead of",
+      "start": 1501.279,
+      "duration": 4.481
+    },
+    {
+      "text": "something like this, which is you",
+      "start": 1504.0,
+      "duration": 3.76
+    },
+    {
+      "text": "entering here and price and the stop",
+      "start": 1505.76,
+      "duration": 3.6
+    },
+    {
+      "text": "loss goes above the zone. I'm going to",
+      "start": 1507.76,
+      "duration": 3.76
+    },
+    {
+      "text": "put it right up there just to be safe",
+      "start": 1509.36,
+      "duration": 4.319
+    },
+    {
+      "text": "and then you have a move like down here.",
+      "start": 1511.52,
+      "duration": 3.84
+    },
+    {
+      "text": "So I'm going to say something like this.",
+      "start": 1513.679,
+      "duration": 3.841
+    },
+    {
+      "text": "This be a 1 to1 ass ratio. Instead of",
+      "start": 1515.36,
+      "duration": 4.16
+    },
+    {
+      "text": "that, what you have if you enter when",
+      "start": 1517.52,
+      "duration": 4.399
+    },
+    {
+      "text": "price is all the way down here, you have",
+      "start": 1519.52,
+      "duration": 4.159
+    },
+    {
+      "text": "a trade that looks like this. An entry",
+      "start": 1521.919,
+      "duration": 3.441
+    },
+    {
+      "text": "there, the stop still has to go above",
+      "start": 1523.679,
+      "duration": 3.441
+    },
+    {
+      "text": "the zone, but now look, your profit",
+      "start": 1525.36,
+      "duration": 4.319
+    },
+    {
+      "text": "target has to go all the way down here.",
+      "start": 1527.12,
+      "duration": 4.32
+    },
+    {
+      "text": "This makes it much more difficult to be",
+      "start": 1529.679,
+      "duration": 2.801
+    },
+    {
+      "text": "able to actually have your profit",
+      "start": 1531.44,
+      "duration": 2.96
+    },
+    {
+      "text": "targets hit. And whenever you're doing",
+      "start": 1532.48,
+      "duration": 3.84
+    },
+    {
+      "text": "that, it's just not it's not as optimal",
+      "start": 1534.4,
+      "duration": 3.6
+    },
+    {
+      "text": "as an entry as compared to just waiting",
+      "start": 1536.32,
+      "duration": 3.04
+    },
+    {
+      "text": "for price to get to the zone and then",
+      "start": 1538.0,
+      "duration": 3.36
+    },
+    {
+      "text": "entering there. So if price has a big",
+      "start": 1539.36,
+      "duration": 4.319
+    },
+    {
+      "text": "move away from the zone very quickly, my",
+      "start": 1541.36,
+      "duration": 4.799
+    },
+    {
+      "text": "suggestion, my generalized suggestion,",
+      "start": 1543.679,
+      "duration": 4.401
+    },
+    {
+      "text": "non-financial advice for entertainment",
+      "start": 1546.159,
+      "duration": 4.0
+    },
+    {
+      "text": "and education purposes only is just to",
+      "start": 1548.08,
+      "duration": 3.36
+    },
+    {
+      "text": "not take the trade if it's already had a",
+      "start": 1550.159,
+      "duration": 2.801
+    },
+    {
+      "text": "big move away from the zone. Just skip",
+      "start": 1551.44,
+      "duration": 2.96
+    },
+    {
+      "text": "it or wait for it to come back into the",
+      "start": 1552.96,
+      "duration": 2.719
+    },
+    {
+      "text": "zone.",
+      "start": 1554.4,
+      "duration": 3.279
+    },
+    {
+      "text": "So price gets there, it starts to pull",
+      "start": 1555.679,
+      "duration": 4.081
+    },
+    {
+      "text": "away. And we still have to kind of keep",
+      "start": 1557.679,
+      "duration": 3.6
+    },
+    {
+      "text": "in mind, even though we've had that, we",
+      "start": 1559.76,
+      "duration": 2.64
+    },
+    {
+      "text": "still do have a little uptrend right",
+      "start": 1561.279,
+      "duration": 2.321
+    },
+    {
+      "text": "here. So we need to pay attention to",
+      "start": 1562.4,
+      "duration": 3.44
+    },
+    {
+      "text": "that. Let's watch price candle by",
+      "start": 1563.6,
+      "duration": 4.319
+    },
+    {
+      "text": "candle. You'll have plenty of time to do",
+      "start": 1565.84,
+      "duration": 4.959
+    },
+    {
+      "text": "this throughout the day.",
+      "start": 1567.919,
+      "duration": 4.481
+    },
+    {
+      "text": "So is price going to go up and make a",
+      "start": 1570.799,
+      "duration": 3.281
+    },
+    {
+      "text": "new high or is it going to kind of fall",
+      "start": 1572.4,
+      "duration": 4.879
+    },
+    {
+      "text": "right here? We need to watch.",
+      "start": 1574.08,
+      "duration": 5.199
+    },
+    {
+      "text": "So price so far is just going sideways.",
+      "start": 1577.279,
+      "duration": 3.681
+    },
+    {
+      "text": "We're trying to push up, but it looks",
+      "start": 1579.279,
+      "duration": 3.041
+    },
+    {
+      "text": "like it's struggling a little bit for",
+      "start": 1580.96,
+      "duration": 4.0
+    },
+    {
+      "text": "now to move up. We make a little bit of",
+      "start": 1582.32,
+      "duration": 4.719
+    },
+    {
+      "text": "a new low right here. Barely, right?",
+      "start": 1584.96,
+      "duration": 3.52
+    },
+    {
+      "text": "We've got we've got a little bit of a",
+      "start": 1587.039,
+      "duration": 3.12
+    },
+    {
+      "text": "new low. So, let's see if that holds or",
+      "start": 1588.48,
+      "duration": 4.16
+    },
+    {
+      "text": "if it just shoots back up. So, price",
+      "start": 1590.159,
+      "duration": 4.241
+    },
+    {
+      "text": "starts to shoot back up. It goes back",
+      "start": 1592.64,
+      "duration": 3.12
+    },
+    {
+      "text": "into the resistance zone we entered,",
+      "start": 1594.4,
+      "duration": 3.92
+    },
+    {
+      "text": "then it tugs away. Let's keep on playing",
+      "start": 1595.76,
+      "duration": 4.08
+    },
+    {
+      "text": "it out. Let's be patient. We need to",
+      "start": 1598.32,
+      "duration": 2.719
+    },
+    {
+      "text": "keep this in mind because remember, if",
+      "start": 1599.84,
+      "duration": 3.439
+    },
+    {
+      "text": "we were right, that move right there",
+      "start": 1601.039,
+      "duration": 3.76
+    },
+    {
+      "text": "would have gone into more profit. This",
+      "start": 1603.279,
+      "duration": 3.28
+    },
+    {
+      "text": "second try right here, that one would",
+      "start": 1604.799,
+      "duration": 3.441
+    },
+    {
+      "text": "have gone into more profit. That's what",
+      "start": 1606.559,
+      "duration": 2.801
+    },
+    {
+      "text": "happens when we're right. If we're",
+      "start": 1608.24,
+      "duration": 2.319
+    },
+    {
+      "text": "wrong, you know, we're going to start to",
+      "start": 1609.36,
+      "duration": 3.6
+    },
+    {
+      "text": "notice things like this. So, let's see",
+      "start": 1610.559,
+      "duration": 3.681
+    },
+    {
+      "text": "if it breaks above this little",
+      "start": 1612.96,
+      "duration": 5.4
+    },
+    {
+      "text": "resistance zone price is in.",
+      "start": 1614.24,
+      "duration": 4.12
+    },
+    {
+      "text": "So, it does in fact start to break up a",
+      "start": 1618.96,
+      "duration": 5.04
+    },
+    {
+      "text": "little bit and it pulls back. So, now",
+      "start": 1620.799,
+      "duration": 4.401
+    },
+    {
+      "text": "we're having we're having a set of",
+      "start": 1624.0,
+      "duration": 3.279
+    },
+    {
+      "text": "higher highs and higher lows. So, now",
+      "start": 1625.2,
+      "duration": 3.44
+    },
+    {
+      "text": "I'm going to go back here and see what",
+      "start": 1627.279,
+      "duration": 2.721
+    },
+    {
+      "text": "price did when it was previously up",
+      "start": 1628.64,
+      "duration": 3.12
+    },
+    {
+      "text": "here. So, where it's at right now, this",
+      "start": 1630.0,
+      "duration": 3.52
+    },
+    {
+      "text": "is the point of kind of the make it or",
+      "start": 1631.76,
+      "duration": 4.08
+    },
+    {
+      "text": "break it moment in price. It's either",
+      "start": 1633.52,
+      "duration": 4.159
+    },
+    {
+      "text": "going to bounce here around these highs",
+      "start": 1635.84,
+      "duration": 3.68
+    },
+    {
+      "text": "where price previously bounced before or",
+      "start": 1637.679,
+      "duration": 4.161
+    },
+    {
+      "text": "it's not. So, let's look and see exactly",
+      "start": 1639.52,
+      "duration": 5.36
+    },
+    {
+      "text": "what's going to happen here.",
+      "start": 1641.84,
+      "duration": 6.4
+    },
+    {
+      "text": "So, price pulls back. Okay, we struggle",
+      "start": 1644.88,
+      "duration": 4.72
+    },
+    {
+      "text": "a little bit here at this support zone",
+      "start": 1648.24,
+      "duration": 2.72
+    },
+    {
+      "text": "to try to go up and it looks like it",
+      "start": 1649.6,
+      "duration": 2.72
+    },
+    {
+      "text": "just pulled a little bit lower with a",
+      "start": 1650.96,
+      "duration": 3.52
+    },
+    {
+      "text": "bare candle. Let's play it forward just",
+      "start": 1652.32,
+      "duration": 7.56
+    },
+    {
+      "text": "a little bit more. Tries to go back up.",
+      "start": 1654.48,
+      "duration": 5.4
+    },
+    {
+      "text": "Pulls back to the to the zone.",
+      "start": 1659.919,
+      "duration": 6.64
+    },
+    {
+      "text": "It's trying really hard right now to",
+      "start": 1664.0,
+      "duration": 4.96
+    },
+    {
+      "text": "make a new high. Here we go. So, we",
+      "start": 1666.559,
+      "duration": 3.841
+    },
+    {
+      "text": "pulled back more. Now we're back to the",
+      "start": 1668.96,
+      "duration": 3.68
+    },
+    {
+      "text": "previous highs. Um, let me play it one",
+      "start": 1670.4,
+      "duration": 4.08
+    },
+    {
+      "text": "more candle.",
+      "start": 1672.64,
+      "duration": 4.32
+    },
+    {
+      "text": "Okay, now one more.",
+      "start": 1674.48,
+      "duration": 4.16
+    },
+    {
+      "text": "Okay, it comes down. Let's keep on",
+      "start": 1676.96,
+      "duration": 4.16
+    },
+    {
+      "text": "watching it.",
+      "start": 1678.64,
+      "duration": 4.0
+    },
+    {
+      "text": "We know that if it breaks these little",
+      "start": 1681.12,
+      "duration": 2.96
+    },
+    {
+      "text": "highs right here, that's going to be a",
+      "start": 1682.64,
+      "duration": 4.639
+    },
+    {
+      "text": "sign we should just get the hell out.",
+      "start": 1684.08,
+      "duration": 6.24
+    },
+    {
+      "text": "It tries to drop again,",
+      "start": 1687.279,
+      "duration": 5.52
+    },
+    {
+      "text": "tries to go sideways,",
+      "start": 1690.32,
+      "duration": 4.079
+    },
+    {
+      "text": "tries to go up, and then now this looks",
+      "start": 1692.799,
+      "duration": 3.041
+    },
+    {
+      "text": "like it's going to be starting to break",
+      "start": 1694.399,
+      "duration": 3.28
+    },
+    {
+      "text": "above. So in this case, I'm going to",
+      "start": 1695.84,
+      "duration": 4.0
+    },
+    {
+      "text": "elect to close this trade right here.",
+      "start": 1697.679,
+      "duration": 4.401
+    },
+    {
+      "text": "This is what maybe a third of the way to",
+      "start": 1699.84,
+      "duration": 4.079
+    },
+    {
+      "text": "the profit target. So that would be a",
+      "start": 1702.08,
+      "duration": 3.36
+    },
+    {
+      "text": "third. This would be 2/3. That would be",
+      "start": 1703.919,
+      "duration": 3.201
+    },
+    {
+      "text": "the stop loss. So I meant a third of the",
+      "start": 1705.44,
+      "duration": 3.68
+    },
+    {
+      "text": "way to the stop loss, not profit target.",
+      "start": 1707.12,
+      "duration": 3.2
+    },
+    {
+      "text": "About a third of the way to the stop",
+      "start": 1709.12,
+      "duration": 2.72
+    },
+    {
+      "text": "loss. I'm going to elect to close it",
+      "start": 1710.32,
+      "duration": 4.64
+    },
+    {
+      "text": "right here. Whoops. Let me do this. I'm",
+      "start": 1711.84,
+      "duration": 5.36
+    },
+    {
+      "text": "going to close it right here. So now",
+      "start": 1714.96,
+      "duration": 3.439
+    },
+    {
+      "text": "what we can do is we can go back into",
+      "start": 1717.2,
+      "duration": 3.52
+    },
+    {
+      "text": "the calculator and we we can subtract.3.",
+      "start": 1718.399,
+      "duration": 4.16
+    },
+    {
+      "text": "We lost.3",
+      "start": 1720.72,
+      "duration": 4.079
+    },
+    {
+      "text": "instead of a full unit of uh of risk,",
+      "start": 1722.559,
+      "duration": 6.0
+    },
+    {
+      "text": "right? So, we lost Oh my god, we lost",
+      "start": 1724.799,
+      "duration": 5.681
+    },
+    {
+      "text": "0.3.",
+      "start": 1728.559,
+      "duration": 3.681
+    },
+    {
+      "text": "So, you'll notice we've only won two",
+      "start": 1730.48,
+      "duration": 3.439
+    },
+    {
+      "text": "trades, right? We won two trades and",
+      "start": 1732.24,
+      "duration": 4.0
+    },
+    {
+      "text": "then we lost the other one, but we lost",
+      "start": 1733.919,
+      "duration": 4.081
+    },
+    {
+      "text": "the other two. And then what I want to",
+      "start": 1736.24,
+      "duration": 2.88
+    },
+    {
+      "text": "do is I want to go back here. We're",
+      "start": 1738.0,
+      "duration": 2.32
+    },
+    {
+      "text": "going to see what would have happened",
+      "start": 1739.12,
+      "duration": 2.559
+    },
+    {
+      "text": "had we held. Would it have gone to the",
+      "start": 1740.32,
+      "duration": 2.64
+    },
+    {
+      "text": "profit target? Would it have gone all",
+      "start": 1741.679,
+      "duration": 3.6
+    },
+    {
+      "text": "the way to the stop? Let's see. So, as",
+      "start": 1742.96,
+      "duration": 3.76
+    },
+    {
+      "text": "you can see, price starts breaking above",
+      "start": 1745.279,
+      "duration": 4.0
+    },
+    {
+      "text": "the zone. Oh, and then it pulls back,",
+      "start": 1746.72,
+      "duration": 4.64
+    },
+    {
+      "text": "finds resistance. Is it going to go down",
+      "start": 1749.279,
+      "duration": 4.081
+    },
+    {
+      "text": "from here? Let's see.",
+      "start": 1751.36,
+      "duration": 3.679
+    },
+    {
+      "text": "Looks like it starts to go down, then it",
+      "start": 1753.36,
+      "duration": 2.88
+    },
+    {
+      "text": "goes up, and this would have hit the",
+      "start": 1755.039,
+      "duration": 4.0
+    },
+    {
+      "text": "stop- loss. That is why monitoring it",
+      "start": 1756.24,
+      "duration": 4.0
+    },
+    {
+      "text": "here on these little time frames like",
+      "start": 1759.039,
+      "duration": 2.88
+    },
+    {
+      "text": "the 1 hour and watching the price action",
+      "start": 1760.24,
+      "duration": 4.0
+    },
+    {
+      "text": "gives you so much valuable information.",
+      "start": 1761.919,
+      "duration": 4.321
+    },
+    {
+      "text": "Had we held this, this would have been a",
+      "start": 1764.24,
+      "duration": 4.72
+    },
+    {
+      "text": "stopout. So now what happens is you'll",
+      "start": 1766.24,
+      "duration": 4.319
+    },
+    {
+      "text": "notice that when price broke above this",
+      "start": 1768.96,
+      "duration": 2.959
+    },
+    {
+      "text": "zone, right, it broke above, it came",
+      "start": 1770.559,
+      "duration": 2.561
+    },
+    {
+      "text": "back, went sideways, then it went up",
+      "start": 1771.919,
+      "duration": 2.48
+    },
+    {
+      "text": "here. This one would have hit the stop",
+      "start": 1773.12,
+      "duration": 3.12
+    },
+    {
+      "text": "loss. So for this back testing session,",
+      "start": 1774.399,
+      "duration": 3.441
+    },
+    {
+      "text": "had we not been managing the trades",
+      "start": 1776.24,
+      "duration": 3.439
+    },
+    {
+      "text": "based on the price action, it would have",
+      "start": 1777.84,
+      "duration": 4.4
+    },
+    {
+      "text": "resulted in a break even net outcome",
+      "start": 1779.679,
+      "duration": 4.48
+    },
+    {
+      "text": "instead of a profitable net outcome. So",
+      "start": 1782.24,
+      "duration": 3.919
+    },
+    {
+      "text": "we'll hit equals on this. We come out",
+      "start": 1784.159,
+      "duration": 4.161
+    },
+    {
+      "text": "about 1.1 units of profit. And if we",
+      "start": 1786.159,
+      "duration": 4.24
+    },
+    {
+      "text": "subtract that, we just let's just say we",
+      "start": 1788.32,
+      "duration": 4.239
+    },
+    {
+      "text": "take away the 0.1 and we just say that",
+      "start": 1790.399,
+      "duration": 3.681
+    },
+    {
+      "text": "was for fees and commissions and swaps",
+      "start": 1792.559,
+      "duration": 3.041
+    },
+    {
+      "text": "or whatever. Let's just say we came out",
+      "start": 1794.08,
+      "duration": 3.52
+    },
+    {
+      "text": "in one unit of profit. Over the course",
+      "start": 1795.6,
+      "duration": 3.92
+    },
+    {
+      "text": "of four trades, we came out in one unit",
+      "start": 1797.6,
+      "duration": 4.319
+    },
+    {
+      "text": "of profit. That is amazing. Over the",
+      "start": 1799.52,
+      "duration": 3.92
+    },
+    {
+      "text": "course of just four trades, you know",
+      "start": 1801.919,
+      "duration": 3.36
+    },
+    {
+      "text": "what this means? This means if if I was",
+      "start": 1803.44,
+      "duration": 4.479
+    },
+    {
+      "text": "risking $25,000 on each of these trades",
+      "start": 1805.279,
+      "duration": 4.161
+    },
+    {
+      "text": "and I had taken four of these trades and",
+      "start": 1807.919,
+      "duration": 3.681
+    },
+    {
+      "text": "they had played out as you've seen here,",
+      "start": 1809.44,
+      "duration": 3.839
+    },
+    {
+      "text": "then what would have happened is net",
+      "start": 1811.6,
+      "duration": 2.959
+    },
+    {
+      "text": "after these four trades, I would have",
+      "start": 1813.279,
+      "duration": 2.88
+    },
+    {
+      "text": "come out in a net profit of about",
+      "start": 1814.559,
+      "duration": 3.12
+    },
+    {
+      "text": "$25,000.",
+      "start": 1816.159,
+      "duration": 3.361
+    },
+    {
+      "text": "And when you go into my live P&L and you",
+      "start": 1817.679,
+      "duration": 3.201
+    },
+    {
+      "text": "actually look at the P&L that I share",
+      "start": 1819.52,
+      "duration": 2.72
+    },
+    {
+      "text": "from the live trades I call here in",
+      "start": 1820.88,
+      "duration": 3.039
+    },
+    {
+      "text": "Telegram, you'll notice something",
+      "start": 1822.24,
+      "duration": 3.679
+    },
+    {
+      "text": "interesting about my wins and losses.",
+      "start": 1823.919,
+      "duration": 3.76
+    },
+    {
+      "text": "Whenever you go and factor up all the",
+      "start": 1825.919,
+      "duration": 4.321
+    },
+    {
+      "text": "wins, on average, the wins are more than",
+      "start": 1827.679,
+      "duration": 4.641
+    },
+    {
+      "text": "the losses. I'll have wins right here",
+      "start": 1830.24,
+      "duration": 5.6
+    },
+    {
+      "text": "like GBPUSD for $40,000, $30,000,",
+      "start": 1832.32,
+      "duration": 5.12
+    },
+    {
+      "text": "$20,000. And then when you go to my",
+      "start": 1835.84,
+      "duration": 6.719
+    },
+    {
+      "text": "losses, 2,000, 20,000, 5,000, $11,000,",
+      "start": 1837.44,
+      "duration": 6.4
+    },
+    {
+      "text": "and then you factor in all the other",
+      "start": 1842.559,
+      "duration": 3.12
+    },
+    {
+      "text": "ones, you add it all together, I make",
+      "start": 1843.84,
+      "duration": 3.28
+    },
+    {
+      "text": "more on my winners than I lose on my",
+      "start": 1845.679,
+      "duration": 3.841
+    },
+    {
+      "text": "losers. And just for this past trading",
+      "start": 1847.12,
+      "duration": 4.0
+    },
+    {
+      "text": "week, which this was my trading week for",
+      "start": 1849.52,
+      "duration": 2.879
+    },
+    {
+      "text": "the trades that I called here in the",
+      "start": 1851.12,
+      "duration": 4.08
+    },
+    {
+      "text": "Telegram channel, um, for these trades",
+      "start": 1852.399,
+      "duration": 4.64
+    },
+    {
+      "text": "right here, you can see I made $48,000",
+      "start": 1855.2,
+      "duration": 3.04
+    },
+    {
+      "text": "and actually had a pretty good week",
+      "start": 1857.039,
+      "duration": 2.88
+    },
+    {
+      "text": "where I won most of the setups, right?",
+      "start": 1858.24,
+      "duration": 3.2
+    },
+    {
+      "text": "Some of them were break even or small",
+      "start": 1859.919,
+      "duration": 3.36
+    },
+    {
+      "text": "profit. But you can see on these two",
+      "start": 1861.44,
+      "duration": 4.56
+    },
+    {
+      "text": "here, my my biggest winner was USD JPY",
+      "start": 1863.279,
+      "duration": 5.76
+    },
+    {
+      "text": "for about $31,000. Uh second biggest one",
+      "start": 1866.0,
+      "duration": 5.12
+    },
+    {
+      "text": "was EURGBP for 20,000. All the rest of",
+      "start": 1869.039,
+      "duration": 3.52
+    },
+    {
+      "text": "them were just kind of like negligent,",
+      "start": 1871.12,
+      "duration": 3.76
+    },
+    {
+      "text": "right? A couple thousand for wins. Then",
+      "start": 1872.559,
+      "duration": 4.72
+    },
+    {
+      "text": "my losses, you can see this was $5,000.",
+      "start": 1874.88,
+      "duration": 4.24
+    },
+    {
+      "text": "The risk on this 80USD trade was",
+      "start": 1877.279,
+      "duration": 4.321
+    },
+    {
+      "text": "$25,000. So I lost about a fifth of what",
+      "start": 1879.12,
+      "duration": 5.12
+    },
+    {
+      "text": "the actual stop loss was. And then CF",
+      "start": 1881.6,
+      "duration": 4.72
+    },
+    {
+      "text": "CHF JPY, the risk on that was like I",
+      "start": 1884.24,
+      "duration": 4.0
+    },
+    {
+      "text": "think it was $25,000 as well. I don't",
+      "start": 1886.32,
+      "duration": 3.52
+    },
+    {
+      "text": "know if it was 25,000 or 50, but",
+      "start": 1888.24,
+      "duration": 3.52
+    },
+    {
+      "text": "everything's shared there in Telegram.",
+      "start": 1889.84,
+      "duration": 4.48
+    },
+    {
+      "text": "Um, so this was $11,000 of loss instead",
+      "start": 1891.76,
+      "duration": 6.0
+    },
+    {
+      "text": "of something like 25,000 or 50,000. My",
+      "start": 1894.32,
+      "duration": 5.68
+    },
+    {
+      "text": "average wins are bigger than my average",
+      "start": 1897.76,
+      "duration": 4.56
+    },
+    {
+      "text": "losses. And it is because I do this",
+      "start": 1900.0,
+      "duration": 4.799
+    },
+    {
+      "text": "right here. I manage my trades in such a",
+      "start": 1902.32,
+      "duration": 3.839
+    },
+    {
+      "text": "way that allows me to make more when I'm",
+      "start": 1904.799,
+      "duration": 3.281
+    },
+    {
+      "text": "right versus what I lose when I'm wrong.",
+      "start": 1906.159,
+      "duration": 3.441
+    },
+    {
+      "text": "And if you're back testing it this way,",
+      "start": 1908.08,
+      "duration": 2.959
+    },
+    {
+      "text": "it can very quickly get a couple",
+      "start": 1909.6,
+      "duration": 3.36
+    },
+    {
+      "text": "repetitions under your belt. Even if",
+      "start": 1911.039,
+      "duration": 3.441
+    },
+    {
+      "text": "you're just taking 10 trades per day on",
+      "start": 1912.96,
+      "duration": 3.199
+    },
+    {
+      "text": "back test, doing this the exact same way",
+      "start": 1914.48,
+      "duration": 3.439
+    },
+    {
+      "text": "that I've showed you here. You can take",
+      "start": 1916.159,
+      "duration": 3.601
+    },
+    {
+      "text": "10 trades per day doing this on back",
+      "start": 1917.919,
+      "duration": 3.041
+    },
+    {
+      "text": "test. And that'll take you maybe like",
+      "start": 1919.76,
+      "duration": 3.44
+    },
+    {
+      "text": "what less than an hour like may maybe",
+      "start": 1920.96,
+      "duration": 5.199
+    },
+    {
+      "text": "even take you like 30 minutes, right? Um",
+      "start": 1923.2,
+      "duration": 4.16
+    },
+    {
+      "text": "and then when you're doing this, this",
+      "start": 1926.159,
+      "duration": 2.721
+    },
+    {
+      "text": "builds up that skill set. And then you",
+      "start": 1927.36,
+      "duration": 3.36
+    },
+    {
+      "text": "can follow my trades in Telegram live.",
+      "start": 1928.88,
+      "duration": 3.519
+    },
+    {
+      "text": "You can follow my live analysis here and",
+      "start": 1930.72,
+      "duration": 3.28
+    },
+    {
+      "text": "my insights for the trades that I post.",
+      "start": 1932.399,
+      "duration": 3.361
+    },
+    {
+      "text": "I put all the analysis in here. I even",
+      "start": 1934.0,
+      "duration": 3.919
+    },
+    {
+      "text": "make little unlisted YouTube videos",
+      "start": 1935.76,
+      "duration": 5.44
+    },
+    {
+      "text": "showing um exactly what I'm looking for.",
+      "start": 1937.919,
+      "duration": 4.88
+    },
+    {
+      "text": "and and you only get access to certain",
+      "start": 1941.2,
+      "duration": 3.04
+    },
+    {
+      "text": "videos like these, like the analysis",
+      "start": 1942.799,
+      "duration": 3.36
+    },
+    {
+      "text": "video for the free Telegram members that",
+      "start": 1944.24,
+      "duration": 3.919
+    },
+    {
+      "text": "are in here. Um, you only get access to",
+      "start": 1946.159,
+      "duration": 3.041
+    },
+    {
+      "text": "those links if you're here in the",
+      "start": 1948.159,
+      "duration": 2.64
+    },
+    {
+      "text": "channel. It takes 5 seconds to join.",
+      "start": 1949.2,
+      "duration": 2.959
+    },
+    {
+      "text": "Like seriously, like right now, just hit",
+      "start": 1950.799,
+      "duration": 3.201
+    },
+    {
+      "text": "the link in the description or I'll put",
+      "start": 1952.159,
+      "duration": 3.841
+    },
+    {
+      "text": "it in the pin comment too to join this",
+      "start": 1954.0,
+      "duration": 3.679
+    },
+    {
+      "text": "Telegram channel. We've got 56,000",
+      "start": 1956.0,
+      "duration": 2.96
+    },
+    {
+      "text": "members in here right now at the time",
+      "start": 1957.679,
+      "duration": 3.201
+    },
+    {
+      "text": "I'm recording and you only get access to",
+      "start": 1958.96,
+      "duration": 3.76
+    },
+    {
+      "text": "these private YouTube videos that are",
+      "start": 1960.88,
+      "duration": 3.039
+    },
+    {
+      "text": "here on my channel that are unlisted.",
+      "start": 1962.72,
+      "duration": 2.48
+    },
+    {
+      "text": "You only get these links right here if",
+      "start": 1963.919,
+      "duration": 2.88
+    },
+    {
+      "text": "you're in the Telegram channel. So you",
+      "start": 1965.2,
+      "duration": 2.8
+    },
+    {
+      "text": "can follow all this and you'll be able",
+      "start": 1966.799,
+      "duration": 2.48
+    },
+    {
+      "text": "to learn in real time through a",
+      "start": 1968.0,
+      "duration": 3.279
+    },
+    {
+      "text": "combination of back testing this on your",
+      "start": 1969.279,
+      "duration": 3.921
+    },
+    {
+      "text": "own to build the experience and then",
+      "start": 1971.279,
+      "duration": 4.0
+    },
+    {
+      "text": "following my live trades there. There's",
+      "start": 1973.2,
+      "duration": 3.44
+    },
+    {
+      "text": "been no other trading strategy that I",
+      "start": 1975.279,
+      "duration": 2.721
+    },
+    {
+      "text": "found that is simpler than the way that",
+      "start": 1976.64,
+      "duration": 3.36
+    },
+    {
+      "text": "I trade. Aside from just blindfolding",
+      "start": 1978.0,
+      "duration": 3.76
+    },
+    {
+      "text": "yourself and entering random trades,",
+      "start": 1980.0,
+      "duration": 4.08
+    },
+    {
+      "text": "this is about as basic as it gets. And",
+      "start": 1981.76,
+      "duration": 4.24
+    },
+    {
+      "text": "I've proven time and time again for the",
+      "start": 1984.08,
+      "duration": 3.28
+    },
+    {
+      "text": "last eight years that I've been running",
+      "start": 1986.0,
+      "duration": 3.36
+    },
+    {
+      "text": "my free Telegram channel. And for the",
+      "start": 1987.36,
+      "duration": 3.52
+    },
+    {
+      "text": "past 10 years that I have personally",
+      "start": 1989.36,
+      "duration": 3.6
+    },
+    {
+      "text": "been trading, this is a decade of",
+      "start": 1990.88,
+      "duration": 4.08
+    },
+    {
+      "text": "trading in millions of dollars made in",
+      "start": 1992.96,
+      "duration": 4.24
+    },
+    {
+      "text": "Forex and crypto and stocks combined, I",
+      "start": 1994.96,
+      "duration": 3.439
+    },
+    {
+      "text": "have proven time and time again that",
+      "start": 1997.2,
+      "duration": 3.52
+    },
+    {
+      "text": "this works very, very, very well. And it",
+      "start": 1998.399,
+      "duration": 3.841
+    },
+    {
+      "text": "works because it hinges upon something",
+      "start": 2000.72,
+      "duration": 3.12
+    },
+    {
+      "text": "that hedge fund billionaires have",
+      "start": 2002.24,
+      "duration": 4.4
+    },
+    {
+      "text": "already told all of us for decades. Hold",
+      "start": 2003.84,
+      "duration": 5.28
+    },
+    {
+      "text": "your winners longer than your losers.",
+      "start": 2006.64,
+      "duration": 4.159
+    },
+    {
+      "text": "Whenever you have wins, let them run.",
+      "start": 2009.12,
+      "duration": 3.679
+    },
+    {
+      "text": "When you have losses, cut them short.",
+      "start": 2010.799,
+      "duration": 3.36
+    },
+    {
+      "text": "Doing this here in back testing to",
+      "start": 2012.799,
+      "duration": 2.88
+    },
+    {
+      "text": "practice and then doing it on a demo",
+      "start": 2014.159,
+      "duration": 3.201
+    },
+    {
+      "text": "account, forward testing, following my",
+      "start": 2015.679,
+      "duration": 3.681
+    },
+    {
+      "text": "trades in Telegram and then doing it for",
+      "start": 2017.36,
+      "duration": 3.52
+    },
+    {
+      "text": "yourself builds up that experience to",
+      "start": 2019.36,
+      "duration": 3.12
+    },
+    {
+      "text": "where over the course of six to 12",
+      "start": 2020.88,
+      "duration": 3.36
+    },
+    {
+      "text": "months, right? This is just six six",
+      "start": 2022.48,
+      "duration": 3.919
+    },
+    {
+      "text": "months to a year, you can build up a",
+      "start": 2024.24,
+      "duration": 4.0
+    },
+    {
+      "text": "trading approach that works very very",
+      "start": 2026.399,
+      "duration": 4.88
+    },
+    {
+      "text": "very very very extremely well. And over",
+      "start": 2028.24,
+      "duration": 4.72
+    },
+    {
+      "text": "the course of even a small data set of",
+      "start": 2031.279,
+      "duration": 3.361
+    },
+    {
+      "text": "trades, you can come out in profit.",
+      "start": 2032.96,
+      "duration": 3.839
+    },
+    {
+      "text": "Again, I can't guarantee you anything. I",
+      "start": 2034.64,
+      "duration": 3.279
+    },
+    {
+      "text": "don't know you and I don't know if",
+      "start": 2036.799,
+      "duration": 2.401
+    },
+    {
+      "text": "you're going to follow this exactly the",
+      "start": 2037.919,
+      "duration": 3.281
+    },
+    {
+      "text": "way that I do it. But what I do know is",
+      "start": 2039.2,
+      "duration": 4.24
+    },
+    {
+      "text": "that I can guarantee you that if you do",
+      "start": 2041.2,
+      "duration": 4.0
+    },
+    {
+      "text": "this and then you join my free Telegram",
+      "start": 2043.44,
+      "duration": 3.599
+    },
+    {
+      "text": "channel right now, you can be able to",
+      "start": 2045.2,
+      "duration": 3.84
+    },
+    {
+      "text": "follow all these trades live and you can",
+      "start": 2047.039,
+      "duration": 3.441
+    },
+    {
+      "text": "just see all my analysis and the stuff",
+      "start": 2049.04,
+      "duration": 3.119
+    },
+    {
+      "text": "I'm looking at day in and day out",
+      "start": 2050.48,
+      "duration": 3.199
+    },
+    {
+      "text": "because I post on my Telegram every",
+      "start": 2052.159,
+      "duration": 3.68
+    },
+    {
+      "text": "single day. So, I hope this video was",
+      "start": 2053.679,
+      "duration": 4.321
+    },
+    {
+      "text": "useful. If it was and you liked this",
+      "start": 2055.839,
+      "duration": 3.601
+    },
+    {
+      "text": "video, then that's great. Really",
+      "start": 2058.0,
+      "duration": 3.119
+    },
+    {
+      "text": "appreciate it and I will see you in the",
+      "start": 2059.44,
+      "duration": 5.12
+    },
+    {
+      "text": "next one. Happy trading.",
+      "start": 2061.119,
+      "duration": 3.441
+    }
+  ],
+  "full_text": "I've got a great video for you today because today we are going to be back testing the trading strategy that has made me millions of dollars trading forex and stocks and crypto over the course of the past decade. If you're new to my channel, my name is Nick Shawn. I share all these YouTube videos to try to help you get better at your trading and I also have a free Telegram channel where I share all my trades, my analysis, my explanations, the insights, recaps, outlooks, and P&L. And I have run this channel for about eight years. I'll put a link in the description below in this video. Just over the course of the past four and a half months on this account that I've been trading on, I've made over $431,000 in profit before swaps and commissions. And we're going to get into not only just back testing my trading strategy, but how you can actually structure your Trading View back test sessions to get the most out of it. So, I'm going to show you exactly how I do it. Let's get right into the charts. The first thing that I do is I go to what's called random.org. It is a random number generator and it allows me to pick a number between one and whatever I want. Since I have about 24x pairs here that I trade, I just pick a random number between 1 and 20. Then I hit generate and it takes me to number six. So then I count down from the top 1 2 3 4 5 6 that is AUD/USD. Then what I do is I go down to the lowest time frame here on Trading View that I would use for my trading strategy. For me, I use the weekly and the daily to find the zones that I'm going to be trading off of. And then I go to the one hour chart to be able to watch price action. So I'm going to go to the one hour chart. That way we can still see it whenever it goes there. I'm going to hit start new. Then I'm going to click random bar. And it takes me back to a random time. So this is February of 2025. So about a year ago. Then what I'll do is I'll go back to the daily and I can be able to trade my trading strategy in the way that I normally would. So now we're back here on the daily. Let's go back to the 1 hour chart. Now we're back in 2025. Let's uh try this again. Random bar. Okay, now we're in 2021. So, let's go back to the daily and we're here in 2021. Okay, sweet. So, here's exactly what we're going to do. I'm going to show you my a rundown of my trading approach very, very simply put. Whenever you look at price on the chart, prices just move up and down. That is all it does. Price goes back and forth and up and down and then it hits areas and it bounces away and it hits supports and bounces away and it does all this type of stuff. All I do is on the daily chart, I go and I find the areas where price has bounced at most obviously. Okay? And then whenever price gets to those regions where price has had very obvious clear bounces, I just wait for price to get there. Then I enter a trade as long as price hasn't broken the zone immediately. And then I'll monitor the trade on the 1 hour chart a couple times a day. And then I'll get out of the trade a little bit early if it looks like it's not working. And if it looks like it is working and going towards the profit target, generally I hold it. So this is how I do it. Now that we're here on the chart, we're going to clear all the drawings. We're going to go back down here to the current market, and we're in July of 2021. So, let's just let's do the exact same thing that I would do when I'm trading. So, first, I'm going to find all the clear zones close to current market price. You only really need one above price and one below price. Currently, I don't see anything except this support level down here. And then up above price, we see this pretty clear resistance zone right there. That's all that's all I see. Some would argue there's a support resistance zone somewhere in here where price is currently at. I don't see anything clear enough right here to justify me taking a trade off of. This could be a zone where price bounces at, but in my opinion, it's not clear because price has bounced past it over and over. So, I'm just going to wait. And now what I would do is if I was trading this in the live market, I would set two alerts. One up here at this zone. We can't set an alert in back testing. So, we're just going to set the horizontal line and one down here. Now, what I will do is I will wait for price to get to one of these zones. Okay. So, it looks like it's coming close to there. Let me skip forward a little bit with this little tool here. We're going to wait for it to go to one or the other. So, it looks like price is about to get up in here into this resistance zone. Barely gets to where my alert would have been. Misses it. So, now we're going to go back down here. So, now price is at this support level. Okay, cool. So now the idea would be that now that price is at this support level for my trading strategy. I would then be looking to buy and all my trades are basically the same exact thing, right? This just this trade I was in last week on CAD JPY. This is on the daily chart. Price came into a daily zone. I bought price bounced up really quickly. Went more than half the way to the profit target and then it came back into the zone. I ended up having to just close it yesterday before market closed and a little bit of profit. I risked $25,000 on this trade to make potentially $25,000 and it was just a partial profit. And last week trading here from all the trades that I've called out live, um I made $48,000 trading. So I lost two trading outcomes. The rest of them were all profitable to some degree. And these are all the same exact trades. That was CAD JPY. Here's another one that I took. So Euro JPY. So when price came into this zone, you can see it's here on the daily chart. I entered whenever price came into the zone. I bought at support on the daily chart and then I had a stop loss below target above 1:1 riskreward ratio and I risked on this one $25,000 I believe as well. So I risked anywhere from $25,000 to $75,000 per trade depending on the context. Now price is now here in this zone. Let's go to the 1 hour chart. And what we're waiting is we're waiting to see that price comes into the zone and then starts to kind of have a little bit of a bounce. You do not want to enter a trade the moment it gets into a zone immediately because you could have it come into the zone and then if it's a big bare candle like this or if it's a resistance and price comes into the zone with a big bullish candle, you don't know if it's going to break the zone or bounce immediately. And you want to avoid those trades that just fall straight through the zones or shoot straight through the resistance zones. So in this case, what I would do is I would leave it alone. I would let it continue going down. And the moment I start seeing a little bit of strength, that's the moment I would enter. Okay? And again, you can follow all this in my Telegram channel. That way you actually see me do this live. Back testing has limitations. Trading is risky and most people do in fact lose money. It's really really difficult and there's nothing like nothing can be guaranteed. But you can see me do this all live. That's my point. Just so that we're not just playing around here in back test mode. Back testing is a way to help you kind of get a proof of concept for a trading approach. That way it's worth forward testing on a demo account. Then if it works in demo over the course of 3 to 6 months, you can move forward to a small live account risking per trade whatever you think is good for your risk tolerance. So, as price comes into the zone, it started to come really deep, then it bounced up. So, after it bounces up right there, and we have a little bit of a reaction, a little bit of bullish sensitivity, I would then take a buy. So, I take a buy right there. I'd put my stop below the zone. I like to distance my stops nice and far. Um, I don't want to put it so far below the zone that it's just something ridiculous like this. I'll show you right here. So, on the daily chart, I don't want to put my stop loss like way down here because price, if it breaks this zone, right? If it goes anywhere below that, it's going to be invalidated long before that. So, I don't want to play those games of like having the stop all the way down there when really, if price breaks through the zone, right there would be an area the trade would be invalidated at. So, in this case, I'll just put my stop loss right there. It's nice and clear below the zone, but it's not too tight either. It's not right below the low. It's just right here, and it's a good distance away. After I have done that, then I will just drag my profit target from the entry to a 1:1 risk-to-reward ratio. So, about right there. and then I will just let the trade play out. As I'm letting the trade play out, what I'm looking for is I'm looking for sign of continued strength. So, if a trade's going to go into profit, the idea is that it's going to go into profit relatively quickly. If a trade's probably not going to work out, there will be signs. Price will start going sideways. Price will start to break the zone. Price will not have any bullish reactions there, right? It'll just keep going sideways and keep on making little lower highs on those 1 hour time frames and keep going down. The idea is if if it's going into profit, you want to try to hold the trade as long as you can, preferably to the profit target, like 80% of the time or more. Sure, you can close winning trades early if the context doesn't seem right or if price is really struggling to get to the target or if the market's about to close, it's about to be a weekend and price is more than halfway into profit. Sure, it's okay to close trades there in profit. However, most of the time you should really be trying to hold those trades to the profit target because what this means is that when you lose, you lose like, you know, maybe break even or a small profit or a small loss. You know, a third of the way or maybe half of the way to the stop loss. That's fine. And then when you win, you win a little bit more because you're letting most of your trades run at the profit target. So, what I'm going to do here is we're going to watch it very closely here on the 1 hour. You don't have to check this every second of every day. You can check a couple times a day. Honestly, if I didn't run this YouTube channel and I didn't call my trades live and Telegram my Discord server for my exact trades, if I wasn't doing all this, I'd probably be on charts less than an hour per day. 15 minutes in the morning, 15 minutes maybe in the afternoon, 15 minutes in the in in the late afternoon to early evening, and maybe like another 15 minutes before bed, right? So, you don't need to check charts all day doing this, and you have plenty of trading opportunities all the time. I myself, my stats show that I get about eight trades per week. And some of those trades are broken up in between different trading opportunities. So I would argue that I get maybe four or five trades per week because sometimes I'll enter multiple trades within the same trading idea. So just cuz my individual trades in my P&L terminal and the stats and analytics and metrics show about eight trades per week on average. I'm probably taking actually like four or five setups per week. That's what it comes out to be. So you get plenty of trades doing this. So now that price has started to go up, I'm going to hold this trade. Okay, now we're going to watch price action here. Price action can tell you a lot. We're going to go nice and slow. The idea is that price should be making higher highs and higher lows if it's going to be going up, right? And the moment it starts to not do that, it doesn't mean the trade's invalidated necessarily, but it does mean that you should start looking to maybe not stay in that trade as long or you should start trying to find reasons to get out of the trade a little bit early. So far, we just have price making higher highs and higher lows. Price makes a new high right here. It goes up higher. probably finds some resistance here. Still makes another higher high, tries to go up, and then it eventually hits the profit target. One thing I want to point out about this is that when you're right, price generally just has a nice easy move towards the profit target. That is generally what happens on the best trades you will ever have. It should not be this fight for life and death of it going back and forth, swinging way into profit, way into loss, back to your entry, going sideways for days and days. My average trade duration is about a day and a half. That's what the stats and metrics on my MetaTrader 5 P&L show for the past rolling 12 months of trading data. It's about a day and a half for me. And this is trading daily and weekly charts and then entering and managing on the 1 hour. So, the fact that price has gone up here to the profit target means this was a winning trade. So, this is cool. So now what we do is we wait for price to get to the next zone. Now you can see since I've gone to the daily chart, the daily candle is now updated. It shows this did in fact go much further than the profit target. But look how simple this trade is. When you use really really clear major zones, it becomes so much easier to trade. Okay, cool. So we've won one trade. I'm going to go here to the calculator. Um and then we'll say, you know, how much did I risk on this 25,000? So we'll just do we'll do one unit of R. Okay. So one unit of risk meaning if we risk the same dollar amount and we lose one you know we'll lose one R. If we lose half of a trade right it's halfway to the stop loss. We close it we lose.5 R. So on and so forth. So we've got plus one R. So now I'm going to go back to the random number generator. I'm going to generate a different pair. So number one. So that's CAD JPY it looks like up here. And this it looks like it's on the same part on the Trading View chart. So that's great. So it's already updated within your train your same trading session. So on the daily chart, we're seeing current market price. I see a high right here where price has been and I also see some lows right here where price has had nice bounces in the past. So now we're going to set two alerts. And again, this horizontal line serves as an alert. So I go here to the little plus button. I click draw horizontal line, but when you're doing this in the live market, it'll just say set an alert on CAD JPY at that area. And now we're just going to sit here and wait. Most of trading is in fact waiting. You're not going to get trading opportunities on every single pair all the time. Sometimes it takes months to get a trading opportunity on a single pair. But that's okay because you have so many setups across all pairs at any given time. So, we're going to wait for price to get into one of these zones. Hopefully, it can get up there into the resistance. So, it does in fact get into the resistance. Now, we're going to go to the 1 hour. We're going to see if there's any price action here that shows that price is rejecting the zone. So, it looks like price already went up into this zone and then started to reject. So the first time we would have seen it hit the zone and then start rejecting is right here. So right there on that candle. So then what this would dictate is that price gets there. It reaches all the way into the zone where we had our alert and then it starts to pull away. Right? It didn't break through right above. So we're going to enter a sell right there. We're going to put our stop loss just above this zone. Not too close, but not ridiculously far like this either. Right? For my trading approach, I just tend to put my my um stop loss just above the zones to give myself some room. And then if we're going to set the profit target at about 1:1, which is down here. So this is the trade. So now what we'll notice is from the moment this trade was entered to the moment where it's at right now, price has done something interesting. We went into profit, pulled back a little bit. We formed this little set of lows right here. And what happened right here is that price started going sideways around these lows. And then we actually got a nice little breakthrough, right? So we made a little high right here. We made a low, made a lower high, and then a lower low. But then price has come up and now it's invalidated this little downtrend structure. If this was going to work out nicely, it just would have fallen straight to the profit target. The fact that this hasn't done that, it doesn't mean that this is an invalidated trade completely because price is just back here at the resistance zone. But what this does mean is that we should start being a little bit more careful and looking for reasons to close now that the trade's not working out easier. A hallmark sign of a profitable trader is getting into trades, holding your winners a little bit longer than you hold your losers. So, get out of losing trades early, cut them short, and then stay in winning trades longer, meaning let them run. So, we're going to go candle by candle here in the 1 hour. What I'm looking for is price either going sideways or quickly breaking above this zone. So, let's see what happens. I'm going to click through very slowly. Price is starting to go sideways here for a couple candlesticks. Tries to go up and break the high. tries to go up, succeeds in breaking the high. So now we're really deep here into this resistance zone. Let's wait and see what happens. It goes up even deeper. So now we're at the make it or break it point. If it starts breaking past this area, we'll know it's probably not going to work out. So price does in fact start breaking past this zone and we're able to close it up here. So I'm going to go ahead and close it right there. This is a little more than halfway to the stop loss. So I'm going to call this 6R. So 60% of the way to the stop loss. So we will do one and we will subtract 0.6R and right now this equals point4. So let me just redo this. That way we have the whole thing lined up here. So 1 minus 0.6 and then we'll add the next outcome in there. You know after that now we're going to go to another pair. But first let's actually go and see what would have happened here had we held. I just want to see. So that would have gone and hit the stop loss. This is why I like to get out of my trades early if they're not working because you can als you can oftentimes tell, you know, with plenty of range out, you know, like there's a missile coming, you catch it on radar, you catch it on LAR, you have observation towers looking to see the missile coming into your base. If you see that coming and you don't have any countermeasures for the missile, the missile's probably going to come and hit your base and you can give an early warning out so everyone can take cover. This is me taking cover and trading. Just get the hell out of the trade if it looks like it's not going to work out. Not every time, but a lot of times you'll see something like this happens where it just ends up going to where your stop loss would have been and it would have resulted in a full loss and that would have wiped out every the trade we had before for the profit. So then we'd be sitting break even instead of in a small profit right now. Sometimes you get out of a trade and it will in fact go back to the profit target and other times you won't have a chance to close manually. You might be asleep. It might be overnight, right? You know, if we're being realistic, you just sometimes you won't see it and it'll just happen way too fast. you have a crazy news event that spikes it against you and then it goes to the stop loss. And that's okay. If you take a full loss, it's okay. As long as you have your stop loss set and you're risking an amount that you're comfortable risking per trade, whether that's $100 or $200 or $1,000 or like me, $25,000, $50,000, $75,000 or more. You have to pick what you want to risk per trade. And sometimes I'll risk different amounts depending on the quality of the trading opportunity. And then you just go from there. So in this case, this ended up not working out. we were able to save ourselves from that. Um, and if we go here, if we keep running out, looks like this went much, much further. So, that's why stop losses save you. And then also dynamic management, which is us just watching the trade and managing it if it goes against us. That really helps a lot. So, we're going to pick another 4x pair. So, I did the random number generator again, and we got number four. So, we're going to go one, two, three, four. So, euro GBP. Euro GBP here in March of 2022. So, first things first, we're going to draw up all the zones we have. I see a pretty clear resistance zone right here. I'm not sure about all this in here, but I do know that these two recent highs were pretty obvious right here. And then we also have a support zone right here, which it looks like price was already bouncing at. So, let's go down here into the price action since price got into this zone where it was just at here, literally on the daily candle that it stopped at. Um, let's go and see if this would have given us a good reason to enter right there. And if so, we will take that trade. So, we're going to go here to the 1 hour. So what would have happened when price got into this zone? Well, when price got into this zone, it looks like the first moment it got here deep enough into the zone and started to reverse would have been right here. So came into the zone, started to reject, and then it had an upwards candle right there with a little bit of a wick. Then it came down lower, then it bounced again with a little bit more of a wick right there. I would say this would be good enough to show that it's not breaking immediately. What you want, what you don't want to see is you don't want to see big bare candles like this just dropping straight through the zone. You want to see that kind of pause. So, we got that pause right there. So, in this case, we're going to enter a buy position right there after that rejection. We're going to set our stop loss below this zone. And then we're going to set our profit target at 1:1 riskreward ratio. So, does this give us enough room? Yes, I would say this gives us enough room to manage the trade. I'm going to drag this stop out just a little bit more. And then we'll set the target profit target up here. So, what would have happened after we entered this trade? So, after we entered this trade, you notice that price kind of struggled here at this little support for a second. It made a lower low. Just cuz it makes a lower low inside the zone doesn't necessarily mean that the trade's invalidated completely. The trade is invalidated completely once it clearly breaks pretty far past the support zone or resistance zone. Vice versa. In this case, it just went down here, made a low, and then it popped right back up, and then we made a new high. Then, we made a set of higher lows right here. Now, it looks like it might be trying to make a new high right here. So, we're going to click it through very slowly. We're going to watch price action. If we're right, what is likely going to happen is we'll just see this little pattern of higher highs and higher lows continue, hopefully sending us to the profit target. And if we're wrong, we'll start to notice that price is not going to be easily moving towards the profit target. So, let's click through very slowly here on the 1 hour and see what it does. goes sideways, struggles here at the high, knocks out the little recent lows, finds some bullish sensitivity, goes up, creates a new high, starts to pull back, pulls back very quickly. Now, we're here back at the low, finds support again, tries to make a new high right here. So far, we're still generally angled upwards, right? We we're still having like, you know, all these little lower highs form in here, and we're also having all these higher highs form in here. So, so far it's still okay at this exact moment. We start to fall a little bit. She tries to go up. Will we be able to make a new high right here? Barely. Let's see if that actually holds through. We need to see if that actually falls through. So, yes, we do make a new high and then we have another move further. So, now we just want to get the hell out of the trade early and close it early in profit. I'm just kidding. We should not do that. If you knew I was joking, that's great. Gold star for you. You get a gold sticker. I will personally hand deliver you a gold sticker, figuratively speaking. So, with this right here, price has gone up and we're going to keep holding this trade. We should expect a little bit of a pullback after this little bull run kind of finishes up. We should expect a pullback, but so far the trade's still valid. So, it's pulling back just like we anticipated. Let's see if it holds these lows somewhere in this region or let's see if it breaks and goes lower back to the entry. So, in this case, it does go lower, but it doesn't it still looks like it's still angled upwards. It looks like it's just pulled back. Keep going very slowly. We try to pull back again and then we break the recent lows and come back here into the support zone. This is where we want to start getting a little bit suspicious. Okay. So, so far from the moment we enter this trade on the 22nd of March all the way up to here's the 25th of March. So, this would have been 22nd, 23rd, 24th, 25th. So, a couple days. We've been in this trade for 3 days. So, it's coming back to the entry. Let's see what it does. We need to see if it's going to bounce here at this support zone. tries to bounce. It's going sideways, comes back with a big bear candle. Are we going to break through these little recent lows? We need to wait. We need to see. Comes a little bit lower, then it rockets up and breaks the recent highs. That's why again, you don't want to close immediately the moment a little bit of price action starts running against you. But you do want to you want to take that into account to say like, look, if this thing was going to go up easily, the the best trades, right, it should have gone up right there. That's what would be best. But sometimes since price is not perfect and you can't predict anything in Forex trading, all you can do is just manage risk. That's the only way you're profitable by just making more when you're right versus what you lose when you're wrong. We need to take that into account. So it came lower. It came into the zone again. It bounced around the entry. Now we've made some new highs. Let's see if we can get this previous high broken. So it pulls back, goes back up, makes a new high. So now we're pretty close to the profit target. And then you can see right there after I clicked to the next candle that went and hit the profit target. So this is a full profit. It's a full profit target hit, which is great. So we're going to go back here into the calculator and we're going to add plus one. So so far we're sitting here in a net profit, which is pretty nice. About 1.4 units of profit if my math serves. And then we're going to go and let's just see what would have happened after this. Would it have gone up a lot or would it would have pulled back immediately? What would have happened? So it looks like this would have gone up even more. And then this might be another trading opportunity up here when it gets to this zone. But we will go to another pair. And this one would have broken above. So that one probably would have been a small loss had we taken it. But again, after this, it's a good idea to always switch to a new pair. That way, you're not trading the same pair and chasing stuff. It's good because it also simulates the kind of the random variability you'll have between trades. So, we're going to go to another trade here. 1 to 20. We've got number one. So, the same pair, but since we already did CAD JPY, we already did that pair. Let's just see if we can get a different one. So, 12. Okay. So, 1 2 3 4 5 6 7 8 9 10. What the hell just happened? 1 2 3 4 5 6 7 8 9 10 11 12. CHF JPY. We're here in the daily CHF JPY March of 2022. Let's zoom out. See if we can find any zones where price was at. I don't see anything very clear, honestly. I look way back here. The last high was in June of 2015. That would have been 7 years before this. You're in March of 2022. So, I don't see anything. So, I'm going to wait. I'm going to let price play out. Sometimes you won't get trading opportunities for a few months on these, and that's perfectly fine. I don't see anything here. I'm going to be waiting. There's no there's no price action here. It just looks like it's in a pretty strong uptrend. And then now we've got price. Let's see if anything's setting up here. Yeah, this one is a weird one. I don't really see anything so far. Um, I don't see a price. Okay, so I think now it will be safe to say this looks like an area where price had a nice little turnaround. So I'm going to put a resistance zone right there. It also looks like we have a support zone right here. So let's see if price can get to either one of these regions. We'll pretend to set the alerts right. So set the alert there. We'll set an alert up here as well. This resistance zone. We'll wait for price to get to one of these areas. So price comes up here into the resistance zone. Let's go to the 1 hour and let's see if we can actually get all the way up into there where the alert is at. So price does get up there into the alert and then it starts to pull back quickly. Cool. That is perfectly fine. It's great for a sell trade. It came into the zone and then we saw price tug away just a little bit. You don't want to be entering after price has already had a move like this away from the zone because if you do that, here's what your trade structure looks like. Instead of something like this, which is you entering here and price and the stop loss goes above the zone. I'm going to put it right up there just to be safe and then you have a move like down here. So I'm going to say something like this. This be a 1 to1 ass ratio. Instead of that, what you have if you enter when price is all the way down here, you have a trade that looks like this. An entry there, the stop still has to go above the zone, but now look, your profit target has to go all the way down here. This makes it much more difficult to be able to actually have your profit targets hit. And whenever you're doing that, it's just not it's not as optimal as an entry as compared to just waiting for price to get to the zone and then entering there. So if price has a big move away from the zone very quickly, my suggestion, my generalized suggestion, non-financial advice for entertainment and education purposes only is just to not take the trade if it's already had a big move away from the zone. Just skip it or wait for it to come back into the zone. So price gets there, it starts to pull away. And we still have to kind of keep in mind, even though we've had that, we still do have a little uptrend right here. So we need to pay attention to that. Let's watch price candle by candle. You'll have plenty of time to do this throughout the day. So is price going to go up and make a new high or is it going to kind of fall right here? We need to watch. So price so far is just going sideways. We're trying to push up, but it looks like it's struggling a little bit for now to move up. We make a little bit of a new low right here. Barely, right? We've got we've got a little bit of a new low. So, let's see if that holds or if it just shoots back up. So, price starts to shoot back up. It goes back into the resistance zone we entered, then it tugs away. Let's keep on playing it out. Let's be patient. We need to keep this in mind because remember, if we were right, that move right there would have gone into more profit. This second try right here, that one would have gone into more profit. That's what happens when we're right. If we're wrong, you know, we're going to start to notice things like this. So, let's see if it breaks above this little resistance zone price is in. So, it does in fact start to break up a little bit and it pulls back. So, now we're having we're having a set of higher highs and higher lows. So, now I'm going to go back here and see what price did when it was previously up here. So, where it's at right now, this is the point of kind of the make it or break it moment in price. It's either going to bounce here around these highs where price previously bounced before or it's not. So, let's look and see exactly what's going to happen here. So, price pulls back. Okay, we struggle a little bit here at this support zone to try to go up and it looks like it just pulled a little bit lower with a bare candle. Let's play it forward just a little bit more. Tries to go back up. Pulls back to the to the zone. It's trying really hard right now to make a new high. Here we go. So, we pulled back more. Now we're back to the previous highs. Um, let me play it one more candle. Okay, now one more. Okay, it comes down. Let's keep on watching it. We know that if it breaks these little highs right here, that's going to be a sign we should just get the hell out. It tries to drop again, tries to go sideways, tries to go up, and then now this looks like it's going to be starting to break above. So in this case, I'm going to elect to close this trade right here. This is what maybe a third of the way to the profit target. So that would be a third. This would be 2/3. That would be the stop loss. So I meant a third of the way to the stop loss, not profit target. About a third of the way to the stop loss. I'm going to elect to close it right here. Whoops. Let me do this. I'm going to close it right here. So now what we can do is we can go back into the calculator and we we can subtract.3. We lost.3 instead of a full unit of uh of risk, right? So, we lost Oh my god, we lost 0.3. So, you'll notice we've only won two trades, right? We won two trades and then we lost the other one, but we lost the other two. And then what I want to do is I want to go back here. We're going to see what would have happened had we held. Would it have gone to the profit target? Would it have gone all the way to the stop? Let's see. So, as you can see, price starts breaking above the zone. Oh, and then it pulls back, finds resistance. Is it going to go down from here? Let's see. Looks like it starts to go down, then it goes up, and this would have hit the stop- loss. That is why monitoring it here on these little time frames like the 1 hour and watching the price action gives you so much valuable information. Had we held this, this would have been a stopout. So now what happens is you'll notice that when price broke above this zone, right, it broke above, it came back, went sideways, then it went up here. This one would have hit the stop loss. So for this back testing session, had we not been managing the trades based on the price action, it would have resulted in a break even net outcome instead of a profitable net outcome. So we'll hit equals on this. We come out about 1.1 units of profit. And if we subtract that, we just let's just say we take away the 0.1 and we just say that was for fees and commissions and swaps or whatever. Let's just say we came out in one unit of profit. Over the course of four trades, we came out in one unit of profit. That is amazing. Over the course of just four trades, you know what this means? This means if if I was risking $25,000 on each of these trades and I had taken four of these trades and they had played out as you've seen here, then what would have happened is net after these four trades, I would have come out in a net profit of about $25,000. And when you go into my live P&L and you actually look at the P&L that I share from the live trades I call here in Telegram, you'll notice something interesting about my wins and losses. Whenever you go and factor up all the wins, on average, the wins are more than the losses. I'll have wins right here like GBPUSD for $40,000, $30,000, $20,000. And then when you go to my losses, 2,000, 20,000, 5,000, $11,000, and then you factor in all the other ones, you add it all together, I make more on my winners than I lose on my losers. And just for this past trading week, which this was my trading week for the trades that I called here in the Telegram channel, um, for these trades right here, you can see I made $48,000 and actually had a pretty good week where I won most of the setups, right? Some of them were break even or small profit. But you can see on these two here, my my biggest winner was USD JPY for about $31,000. Uh second biggest one was EURGBP for 20,000. All the rest of them were just kind of like negligent, right? A couple thousand for wins. Then my losses, you can see this was $5,000. The risk on this 80USD trade was $25,000. So I lost about a fifth of what the actual stop loss was. And then CF CHF JPY, the risk on that was like I think it was $25,000 as well. I don't know if it was 25,000 or 50, but everything's shared there in Telegram. Um, so this was $11,000 of loss instead of something like 25,000 or 50,000. My average wins are bigger than my average losses. And it is because I do this right here. I manage my trades in such a way that allows me to make more when I'm right versus what I lose when I'm wrong. And if you're back testing it this way, it can very quickly get a couple repetitions under your belt. Even if you're just taking 10 trades per day on back test, doing this the exact same way that I've showed you here. You can take 10 trades per day doing this on back test. And that'll take you maybe like what less than an hour like may maybe even take you like 30 minutes, right? Um and then when you're doing this, this builds up that skill set. And then you can follow my trades in Telegram live. You can follow my live analysis here and my insights for the trades that I post. I put all the analysis in here. I even make little unlisted YouTube videos showing um exactly what I'm looking for. and and you only get access to certain videos like these, like the analysis video for the free Telegram members that are in here. Um, you only get access to those links if you're here in the channel. It takes 5 seconds to join. Like seriously, like right now, just hit the link in the description or I'll put it in the pin comment too to join this Telegram channel. We've got 56,000 members in here right now at the time I'm recording and you only get access to these private YouTube videos that are here on my channel that are unlisted. You only get these links right here if you're in the Telegram channel. So you can follow all this and you'll be able to learn in real time through a combination of back testing this on your own to build the experience and then following my live trades there. There's been no other trading strategy that I found that is simpler than the way that I trade. Aside from just blindfolding yourself and entering random trades, this is about as basic as it gets. And I've proven time and time again for the last eight years that I've been running my free Telegram channel. And for the past 10 years that I have personally been trading, this is a decade of trading in millions of dollars made in Forex and crypto and stocks combined, I have proven time and time again that this works very, very, very well. And it works because it hinges upon something that hedge fund billionaires have already told all of us for decades. Hold your winners longer than your losers. Whenever you have wins, let them run. When you have losses, cut them short. Doing this here in back testing to practice and then doing it on a demo account, forward testing, following my trades in Telegram and then doing it for yourself builds up that experience to where over the course of six to 12 months, right? This is just six six months to a year, you can build up a trading approach that works very very very very very extremely well. And over the course of even a small data set of trades, you can come out in profit. Again, I can't guarantee you anything. I don't know you and I don't know if you're going to follow this exactly the way that I do it. But what I do know is that I can guarantee you that if you do this and then you join my free Telegram channel right now, you can be able to follow all these trades live and you can just see all my analysis and the stuff I'm looking at day in and day out because I post on my Telegram every single day. So, I hope this video was useful. If it was and you liked this video, then that's great. Really appreciate it and I will see you in the next one. Happy trading."
+}

@@ -57,6 +57,7 @@ class Signal:
     zone_lower: float
     zone_strength: str
     zone_type: str
+    quality_score: float = 0.0
 
 
 @dataclass
@@ -77,6 +78,7 @@ class Trade:
     pnl_pips: float = 0.0
     pnl_r: float = 0.0     # P&L in R-multiples
     bars_held: int = 0      # 1H bars the trade was open
+    quality_score: float = 0.0
 
 
 from .profiles import BLOCKED_PAIR_DIRECTIONS
@@ -126,6 +128,18 @@ class StrategyParams:
     dd_risk_start: float = 5.0                 # DD% at which risk starts scaling down
     dd_risk_full: float = 18.0                 # DD% at which risk hits the floor
     dd_risk_floor: float = 0.5                 # minimum risk% during deep drawdown
+    # Quick bounce / linger filter
+    max_linger_bars: int = 0                   # skip entry if price lingered at zone this many bars (0=off)
+    linger_lookback: int = 8                   # how far back to check for lingering
+    # Zone exhaustion
+    zone_exhaustion_threshold: int = 0         # skip if zone visited X+ times recently (0=off)
+    zone_exhaustion_lookback: int = 50         # 1H bars to check for recent visits
+    # Quality-based risk scaling
+    quality_sizing: bool = False               # enable quality-based risk scaling
+    quality_risk_min: float = 0.5              # risk multiplier for lowest quality (0.5x base)
+    quality_risk_max: float = 1.5              # risk multiplier for highest quality (1.5x base)
+    # Correlation quality selection
+    correlation_prefer_quality: bool = False    # prefer higher-quality trades in correlation filter
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -166,6 +180,14 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         dd_risk_start=merged.get('dd_risk_start', 5.0),
         dd_risk_full=merged.get('dd_risk_full', 18.0),
         dd_risk_floor=merged.get('dd_risk_floor', 0.5),
+        max_linger_bars=merged.get('max_linger_bars', 0),
+        linger_lookback=merged.get('linger_lookback', 8),
+        zone_exhaustion_threshold=merged.get('zone_exhaustion_threshold', 0),
+        zone_exhaustion_lookback=merged.get('zone_exhaustion_lookback', 50),
+        quality_sizing=merged.get('quality_sizing', False),
+        quality_risk_min=merged.get('quality_risk_min', 0.5),
+        quality_risk_max=merged.get('quality_risk_max', 1.5),
+        correlation_prefer_quality=merged.get('correlation_prefer_quality', False),
     )
 
 
@@ -330,6 +352,103 @@ def check_momentum_filter(
     return strong_count >= lookback
 
 
+def check_linger_filter(
+    hourly_df: pd.DataFrame,
+    bar_idx: int,
+    zone: SRZone,
+    params: StrategyParams,
+) -> bool:
+    """Check if price has been lingering at the zone (no quick bounce).
+
+    Returns True if price lingered too long (should SKIP the entry).
+    """
+    if params.max_linger_bars <= 0:
+        return False
+
+    start = max(0, bar_idx - params.linger_lookback)
+    overlap_count = 0
+    for j in range(start, bar_idx):
+        row = hourly_df.iloc[j]
+        if row['Low'] <= zone.upper and row['High'] >= zone.lower:
+            overlap_count += 1
+
+    return overlap_count >= params.max_linger_bars
+
+
+def check_zone_exhaustion(
+    hourly_df: pd.DataFrame,
+    bar_idx: int,
+    zone: SRZone,
+    params: StrategyParams,
+) -> bool:
+    """Check if zone has been tested too many times recently.
+
+    Counts distinct visits (transitions from not-in-zone to in-zone).
+    Returns True if exhausted (should SKIP the entry).
+    """
+    if params.zone_exhaustion_threshold <= 0:
+        return False
+
+    start = max(0, bar_idx - params.zone_exhaustion_lookback)
+    visits = 0
+    was_in_zone = False
+    for j in range(start, bar_idx):
+        row = hourly_df.iloc[j]
+        in_zone = row['Low'] <= zone.upper and row['High'] >= zone.lower
+        if in_zone and not was_in_zone:
+            visits += 1
+        was_in_zone = in_zone
+
+    return visits >= params.zone_exhaustion_threshold
+
+
+def score_signal_quality(
+    zone: SRZone,
+    bar_open: float,
+    bar_close: float,
+    bar_high: float,
+    bar_low: float,
+    hourly_df: pd.DataFrame,
+    bar_idx: int,
+    params: StrategyParams,
+) -> float:
+    """Score signal quality from 0.0 to 1.0.
+
+    Factors (weighted average):
+    - Zone touches (0.4): min(touches/8, 1.0)
+    - Candle body quality (0.3): body/range ratio
+    - Freshness (0.2): inverse of recent zone visits
+    - Zone width tightness (0.1): tighter = better defined
+    """
+    # Zone touches: cap at 8
+    touch_score = min(zone.touches / 8.0, 1.0)
+
+    # Candle body quality
+    candle_range = abs(bar_high - bar_low)
+    body_score = abs(bar_close - bar_open) / candle_range if candle_range > 0 else 0.0
+
+    # Freshness: count recent visits and invert
+    lookback = params.zone_exhaustion_lookback if params.zone_exhaustion_lookback > 0 else 50
+    start = max(0, bar_idx - lookback)
+    visits = 0
+    was_in_zone = False
+    for j in range(start, bar_idx):
+        row = hourly_df.iloc[j]
+        in_zone = row['Low'] <= zone.upper and row['High'] >= zone.lower
+        if in_zone and not was_in_zone:
+            visits += 1
+        was_in_zone = in_zone
+    freshness_score = max(0.0, 1.0 - visits / 5.0)
+
+    # Zone width tightness (relative to midpoint)
+    zone_width = zone.upper - zone.lower
+    relative_width = zone_width / zone.midpoint if zone.midpoint > 0 else 0.0
+    width_score = max(0.0, 1.0 - relative_width / 0.01)
+
+    quality = 0.4 * touch_score + 0.3 * body_score + 0.2 * freshness_score + 0.1 * width_score
+    return max(0.0, min(1.0, quality))
+
+
 def get_tradeable_zones(
     zones: List[SRZone],
     current_price: float,
@@ -425,6 +544,10 @@ def select_entry_signal(
             continue
         if check_momentum_filter(hourly_df, bar_idx, zone, params):
             continue
+        if check_linger_filter(hourly_df, bar_idx, zone, params):
+            continue
+        if check_zone_exhaustion(hourly_df, bar_idx, zone, params):
+            continue
 
         signal = generate_signal(
             bar_open=row['Open'],
@@ -440,6 +563,10 @@ def select_entry_signal(
             continue
         if is_pair_direction_blocked(pair, signal.direction, params):
             continue
+        signal.quality_score = score_signal_quality(
+            zone, row['Open'], row['Close'], row['High'], row['Low'],
+            hourly_df, bar_idx, params,
+        )
         return signal
 
     return None
@@ -463,6 +590,7 @@ def build_trade_from_signal(signal: Signal) -> Trade:
         zone_lower=signal.zone_lower,
         zone_strength=signal.zone_strength,
         risk=risk,
+        quality_score=signal.quality_score,
     )
 
 

@@ -1,8 +1,10 @@
-"""Parallel sweep targeting 500 trades.
+"""Parallel sweep: new entry filters + volume drivers + quality sizing.
 
-Key insight: zone boundaries/touches are identical regardless of major_touches.
-Compute zones ONCE with major_touches=1 (all zones are 'major'), then use
-min_zone_touches in strategy params to filter. This avoids recomputing zones.
+Baseline: high_volume profile (532 trades, +87710%, 20% DD, dynamic risk).
+Goal: more trades, more profit, DD <= 20%.
+
+Trade-generation params go through backtest. Post-processing params
+(quality_sizing, dynamic_risk) are applied at scoring time for efficiency.
 """
 import sys, os, time, itertools
 sys.path.insert(0, os.path.dirname(__file__))
@@ -43,7 +45,7 @@ def _run_one_config(args):
         pair_trades[pair] = [(t.entry_time, t.exit_time, t.direction, t.pnl_pips,
                               t.pnl_r, t.exit_reason, t.entry_price, t.exit_price,
                               t.sl_price, t.tp_price, t.zone_upper, t.zone_lower,
-                              t.zone_strength, t.risk, t.bars_held)
+                              t.zone_strength, t.risk, t.bars_held, t.quality_score)
                              for t in result.trades]
     return cfg_idx, pair_trades
 
@@ -66,10 +68,11 @@ def rebuild_trade(tt):
         pnl_pips=tt[3], pnl_r=tt[4], exit_reason=tt[5],
         entry_price=tt[6], exit_price=tt[7], sl_price=tt[8], tp_price=tt[9],
         zone_upper=tt[10], zone_lower=tt[11], zone_strength=tt[12],
-        risk=tt[13], bars_held=tt[14])
+        risk=tt[13], bars_held=tt[14],
+        quality_score=tt[15] if len(tt) > 15 else 0.0)
 
 
-def apply_blocks_and_score(pair_trades, blocks, base_profile):
+def apply_blocks_and_score(pair_trades, blocks, base_profile, quality_sizing=False):
     all_trades = []
     for pair, t_tuples in pair_trades.items():
         for tt in t_tuples:
@@ -82,11 +85,43 @@ def apply_blocks_and_score(pair_trades, blocks, base_profile):
 
     balance = base_profile['starting_balance']
     risk_pct = base_profile['risk_pct'] / 100.0
+    peak_balance = balance
+
+    # Dynamic risk params (always on for high_volume baseline comparison)
+    use_dynamic = base_profile.get('dynamic_risk', False)
+    dd_start = base_profile.get('dd_risk_start', 5.0)
+    dd_full = base_profile.get('dd_risk_full', 18.0)
+    dd_floor = base_profile.get('dd_risk_floor', 0.5)
+
+    # Quality sizing params
+    q_min = base_profile.get('quality_risk_min', 0.5)
+    q_max = base_profile.get('quality_risk_max', 1.5)
+
     trade_log = []
     for pair, t in all_trades:
-        risk_amt = balance * risk_pct
+        # Dynamic risk sizing
+        if use_dynamic and peak_balance > 0:
+            dd_pct = (peak_balance - balance) / peak_balance * 100
+            if dd_pct <= dd_start:
+                effective_risk = risk_pct
+            elif dd_pct >= dd_full:
+                effective_risk = dd_floor / 100.0
+            else:
+                frac = (dd_pct - dd_start) / (dd_full - dd_start)
+                effective_risk = risk_pct - (risk_pct - dd_floor / 100.0) * frac
+        else:
+            effective_risk = risk_pct
+
+        # Quality-based risk scaling
+        if quality_sizing:
+            multiplier = q_min + t.quality_score * (q_max - q_min)
+            effective_risk *= multiplier
+
+        risk_amt = balance * effective_risk
         pnl = risk_amt * t.pnl_r
         balance += pnl
+        if balance > peak_balance:
+            peak_balance = balance
         trade_log.append((pair, t, risk_amt, pnl, balance))
     if not trade_log:
         return None
@@ -128,6 +163,15 @@ def apply_blocks_and_score(pair_trades, blocks, base_profile):
     }
 
 
+# Short label for param names
+ABBREV = {
+    'zone_penetration_pct': 'zp', 'min_entry_candle_body_pct': 'body',
+    'min_zone_touches': 'zt', 'max_linger_bars': 'ling',
+    'linger_lookback': 'llb', 'zone_exhaustion_threshold': 'exh',
+    'zone_exhaustion_lookback': 'elb',
+}
+
+
 def main():
     t0 = time.time()
     base = PROFILES['high_volume']
@@ -136,39 +180,34 @@ def main():
     data = fetch_all_data(base)
     print(f"  {len(data)} pairs loaded in {time.time()-t0:.1f}s")
 
-    # Compute zone cache ONCE with major_touches=1 so ALL zones are 'major'.
-    # min_zone_touches in strategy params will do the actual filtering.
-    print("Pre-computing zone cache (parallel, major_touches=1 to keep all zones)...")
+    print("Pre-computing zone cache (parallel, major_touches=1)...")
     t1 = time.time()
-
-    # Temporarily override the detect_zones default to use major_touches=1
     import fx_sr.levels as levels_mod
     orig_major = levels_mod.DEFAULT_MAJOR_TOUCHES
     levels_mod.DEFAULT_MAJOR_TOUCHES = 1
-
     zone_cache = precompute_zone_cache_parallel(data, base['zone_history_days'])
-
     levels_mod.DEFAULT_MAJOR_TOUCHES = orig_major
     print(f"  {len(zone_cache)} zone entries in {time.time()-t1:.1f}s")
 
     hourly_dict = {pair: hourly_df for pair, (_, hourly_df) in data.items()}
     pips = {pair: PAIRS[pair]['pip'] for pair in data}
 
-    # ── Parameter grid (focused: fine granularity between 409-trade and 600-trade configs) ──
+    # ── Trade-generation grid ──
+    # Volume drivers + new entry filters. Exit params locked to high_volume.
     grid = {
-        'rr_ratio': [1.1],
-        'early_exit_r': [0.40],
-        'sideways_bars': [15, 20],
-        'zone_penetration_pct': [0.40, 0.41, 0.42, 0.43, 0.44, 0.45],
-        'momentum_threshold': [0.6, 0.65, 0.7, 0.75, 0.8],
+        'zone_penetration_pct': [0.38, 0.40, 0.42],
         'min_entry_candle_body_pct': [0.03, 0.05],
         'min_zone_touches': [2, 3],
+        'max_linger_bars': [0, 3, 5],
+        'linger_lookback': [6, 8],
+        'zone_exhaustion_threshold': [0, 3, 5],
+        'zone_exhaustion_lookback': [30, 50],
     }
 
     keys = list(grid.keys())
     combos = list(itertools.product(*[grid[k] for k in keys]))
     print(f"\n  Grid: {' x '.join(f'{k}({len(grid[k])})' for k in keys)}")
-    print(f"  Total: {len(combos)} configs")
+    print(f"  Total: {len(combos)} backtest configs")
 
     configs = []
     for combo in combos:
@@ -222,8 +261,10 @@ def main():
         ('ALL', BLOCKED_PAIR_DIRECTIONS),
     ]
 
-    total_evals = len(configs) * len(block_levels)
-    print(f"\n  Scoring {total_evals} combos...")
+    # ── Scoring: block levels x quality_sizing ──
+    quality_modes = [('Q:off', False), ('Q:on', True)]
+    total_evals = len(configs) * len(block_levels) * len(quality_modes)
+    print(f"\n  Scoring {total_evals} combos (blocks x quality_sizing)...")
     t3 = time.time()
 
     all_results = []
@@ -232,69 +273,98 @@ def main():
         parts = []
         for k in keys:
             v = overrides[k]
-            s = k.replace('zone_penetration_pct','zp').replace('early_exit_r','ee') \
-                 .replace('rr_ratio','rr').replace('sideways_bars','sw') \
-                 .replace('momentum_threshold','mom').replace('min_entry_candle_body_pct','body') \
-                 .replace('min_zone_touches','zt')
-            parts.append(f"{s}={v}")
+            parts.append(f"{ABBREV.get(k,k)}={v}")
         param_label = ' '.join(parts)
 
         for block_name, blocks in block_levels:
-            r = apply_blocks_and_score(pair_trades, blocks, base)
-            if r:
-                r['label'] = f"[{block_name:>4}] {param_label}"
-                r['block_name'] = block_name
-                r['overrides'] = overrides
-                all_results.append(r)
+            for q_label, q_on in quality_modes:
+                r = apply_blocks_and_score(pair_trades, blocks, base, quality_sizing=q_on)
+                if r:
+                    r['label'] = f"[{block_name:>4}|{q_label}] {param_label}"
+                    r['block_name'] = block_name
+                    r['q_sizing'] = q_label
+                    r['overrides'] = overrides
+                    all_results.append(r)
 
     print(f"  Scored {len(all_results)} results in {time.time()-t3:.1f}s")
 
-    w = 130
+    w = 140
 
-    # ── Results ──
+    # ── PRIMARY: DD <= 20%, trades > 532 (beat baseline), sorted by return ──
     print(f"\n{'='*w}")
-    print("TARGET ~500: trades 400-600, streak <= 7, sorted by return")
+    print("BEAT BASELINE: trades > 532, DD <= 20%, sorted by return")
+    print(f"  Baseline: 532 trades, +87710% return, 20.0% DD (high_volume)")
     print(f"{'='*w}")
-    hdr = f"  {'Label':<85} {'Tr':>4} {'Ret':>9} {'DD':>6} {'Str':>4} {'WR':>5} {'MinM':>5}"
+    hdr = f"  {'Label':<95} {'Tr':>4} {'Ret':>10} {'DD':>6} {'Str':>4} {'WR':>5} {'MinM':>5}"
     print(hdr)
     print(f"  {'-'*(w-2)}")
 
-    t500 = [r for r in all_results if 400 <= r['trades'] <= 600 and r['streak'] <= 7]
-    t500.sort(key=lambda x: -x['return'])
-    for r in t500[:30]:
-        print(f"  {r['label']:<85} {r['trades']:>4} {r['return']:>+8.1f}% {r['max_dd']:>5.1f}% {r['streak']:>4} {r['wr']:>4.1f}% {r['min_month']:>5}")
+    beat = [r for r in all_results if r['trades'] > 532 and r['max_dd'] <= 20.0]
+    beat.sort(key=lambda x: -x['return'])
+    for r in beat[:40]:
+        print(f"  {r['label']:<95} {r['trades']:>4} {r['return']:>+9.0f}% {r['max_dd']:>5.1f}% {r['streak']:>4} {r['wr']:>4.1f}% {r['min_month']:>5}")
 
+    # ── HIGHEST RETURN: DD <= 20%, any trade count, sorted by return ──
     print(f"\n{'='*w}")
-    print("HIGH TRADE COUNT: trades >= 500, sorted by return (any streak)")
-    print(f"{'='*w}")
-    print(hdr)
-    print(f"  {'-'*(w-2)}")
-
-    h500 = [r for r in all_results if r['trades'] >= 500]
-    h500.sort(key=lambda x: -x['return'])
-    for r in h500[:30]:
-        print(f"  {r['label']:<85} {r['trades']:>4} {r['return']:>+8.1f}% {r['max_dd']:>5.1f}% {r['streak']:>4} {r['wr']:>4.1f}% {r['min_month']:>5}")
-
-    print(f"\n{'='*w}")
-    print("BEST BALANCED: trades >= 350, streak <= 6, sorted by return")
+    print("HIGHEST RETURN: DD <= 20%, any trade count, sorted by return")
     print(f"{'='*w}")
     print(hdr)
     print(f"  {'-'*(w-2)}")
 
-    bal = [r for r in all_results if r['trades'] >= 350 and r['streak'] <= 6]
-    bal.sort(key=lambda x: -x['return'])
-    for r in bal[:20]:
-        print(f"  {r['label']:<85} {r['trades']:>4} {r['return']:>+8.1f}% {r['max_dd']:>5.1f}% {r['streak']:>4} {r['wr']:>4.1f}% {r['min_month']:>5}")
+    best_ret = [r for r in all_results if r['max_dd'] <= 20.0]
+    best_ret.sort(key=lambda x: -x['return'])
+    for r in best_ret[:40]:
+        print(f"  {r['label']:<95} {r['trades']:>4} {r['return']:>+9.0f}% {r['max_dd']:>5.1f}% {r['streak']:>4} {r['wr']:>4.1f}% {r['min_month']:>5}")
 
-    # ── Best ~500 detail ──
-    candidates = [r for r in all_results if 400 <= r['trades'] <= 600 and r['streak'] <= 8]
+    # ── MOST TRADES: DD <= 20%, sorted by trade count ──
+    print(f"\n{'='*w}")
+    print("MOST TRADES: DD <= 20%, sorted by trade count")
+    print(f"{'='*w}")
+    print(hdr)
+    print(f"  {'-'*(w-2)}")
+
+    most = [r for r in all_results if r['max_dd'] <= 20.0]
+    most.sort(key=lambda x: (-x['trades'], -x['return']))
+    for r in most[:30]:
+        print(f"  {r['label']:<95} {r['trades']:>4} {r['return']:>+9.0f}% {r['max_dd']:>5.1f}% {r['streak']:>4} {r['wr']:>4.1f}% {r['min_month']:>5}")
+
+    # ── QUALITY SIZING IMPACT: show best Q:on vs best Q:off for same backtest config ──
+    print(f"\n{'='*w}")
+    print("QUALITY SIZING IMPACT: best Q:on vs Q:off pairs (DD <= 20%, trades >= 400)")
+    print(f"{'='*w}")
+    by_cfg = {}
+    for r in all_results:
+        if r['max_dd'] > 20.0 or r['trades'] < 400:
+            continue
+        # Key on config + block level (quality is the variable)
+        cfg_key = (r['block_name'], str(r['overrides']))
+        if cfg_key not in by_cfg:
+            by_cfg[cfg_key] = {}
+        by_cfg[cfg_key][r['q_sizing']] = r
+
+    comparisons = []
+    for cfg_key, modes in by_cfg.items():
+        if 'Q:off' in modes and 'Q:on' in modes:
+            off = modes['Q:off']
+            on = modes['Q:on']
+            delta_ret = on['return'] - off['return']
+            comparisons.append((delta_ret, off, on))
+    comparisons.sort(key=lambda x: -x[0])
+
+    print(f"  {'Delta':>8}  {'Q:off ret':>10}  {'Q:on ret':>10}  {'Tr':>4}  {'Config'}")
+    print(f"  {'-'*(w-2)}")
+    for delta, off, on in comparisons[:20]:
+        print(f"  {delta:>+7.0f}%  {off['return']:>+9.0f}%  {on['return']:>+9.0f}%  {off['trades']:>4}  [{off['block_name']:>4}] {' '.join(f'{ABBREV.get(k,k)}={v}' for k,v in off['overrides'].items() if k != 'use_pair_direction_filter')}")
+
+    # ── Best overall detail ──
+    candidates = [r for r in all_results if r['max_dd'] <= 20.0 and r['trades'] >= 400]
     candidates.sort(key=lambda x: -x['return'])
     if candidates:
         b = candidates[0]
         print(f"\n{'='*w}")
-        print(f"BEST ~500 DETAIL: {b['label']}")
+        print(f"BEST OVERALL DETAIL: {b['label']}")
         print(f"{'='*w}")
-        print(f"  Trades={b['trades']} Ret={b['return']:+.1f}% DD={b['max_dd']:.1f}% Streak={b['streak']} WR={b['wr']:.1f}%")
+        print(f"  Trades={b['trades']} Ret={b['return']:+.0f}% DD={b['max_dd']:.1f}% Streak={b['streak']} WR={b['wr']:.1f}%")
         print(f"  Exit: {b['exit_reasons']}")
         print(f"  Monthly: {b['months']}")
         print(f"  MinMonth={b['min_month']}")

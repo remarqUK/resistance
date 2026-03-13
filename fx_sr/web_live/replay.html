@@ -211,7 +211,11 @@
 
     <div id="chart-container"></div>
 
-    <div id="playback-row" style="display:none"></div>
+    <div id="playback-row" class="playback-row" style="display:none">
+      <button class="btn-icon" id="prev-trade-btn" title="Previous trade" aria-label="Previous trade">&larr;</button>
+      <div class="bar-label" id="trade-nav-label" style="min-width:220px">No trade selected</div>
+      <button class="btn-icon" id="next-trade-btn" title="Next trade" aria-label="Next trade">&rarr;</button>
+    </div>
   </div>
 
   <div class="info-grid" id="info-grid" style="display:none">

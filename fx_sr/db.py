@@ -106,6 +106,7 @@ def init_db(db_path: str = None):
                 ticker             TEXT NOT NULL,
                 strategy_version   TEXT NOT NULL,
                 result_json        TEXT NOT NULL,
+                run_config_json    TEXT,
                 created_at         TEXT NOT NULL,
                 updated_at         TEXT NOT NULL,
                 PRIMARY KEY (pair, params_hash, hourly_days, zone_history_days)
@@ -115,6 +116,12 @@ def init_db(db_path: str = None):
             CREATE INDEX IF NOT EXISTS idx_backtest_lookup
             ON backtest_result (pair, params_hash, hourly_days, zone_history_days)
         """)
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(backtest_result)").fetchall()
+        }
+        if 'run_config_json' not in existing_columns:
+            conn.execute("ALTER TABLE backtest_result ADD COLUMN run_config_json TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -129,6 +136,7 @@ def save_backtest_result(
     ticker: str,
     strategy_version: str,
     result_json: str,
+    run_config_json: str | None = None,
     db_path: str = None,
 ) -> None:
     """Save or replace a cached backtest result."""
@@ -146,15 +154,16 @@ def save_backtest_result(
                 """
                 INSERT INTO backtest_result (
                     pair, params_hash, hourly_days, zone_history_days, data_signature,
-                    ticker, strategy_version, result_json, created_at, updated_at
+                    ticker, strategy_version, result_json, run_config_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(pair, params_hash, hourly_days, zone_history_days)
                 DO UPDATE SET
                     data_signature = excluded.data_signature,
                     ticker = excluded.ticker,
                     strategy_version = excluded.strategy_version,
                     result_json = excluded.result_json,
+                    run_config_json = excluded.run_config_json,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -166,6 +175,7 @@ def save_backtest_result(
                     ticker,
                     strategy_version,
                     result_json,
+                    run_config_json,
                     now,
                     now,
                 ),
@@ -187,11 +197,11 @@ def load_backtest_result(
     hourly_days: int,
     zone_history_days: int,
     db_path: str = None,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str | None] | None:
     """Load cached backtest metadata and payload.
 
     Returns:
-        (data_signature, result_json, strategy_version) if cached, else None
+        (data_signature, result_json, strategy_version, run_config_json) if cached, else None
     """
     if db_path is None:
         db_path = get_db_path()
@@ -203,7 +213,7 @@ def load_backtest_result(
     try:
         cursor = conn.execute(
             """
-            SELECT data_signature, result_json, strategy_version
+            SELECT data_signature, result_json, strategy_version, run_config_json
             FROM backtest_result
             WHERE pair=? AND params_hash=? AND hourly_days=? AND zone_history_days=?
             """,
@@ -215,7 +225,7 @@ def load_backtest_result(
 
     if row is None:
         return None
-    return row[0], row[1], row[2]
+    return row[0], row[1], row[2], row[3]
 
 
 def load_backtest_results(
@@ -231,7 +241,7 @@ def load_backtest_results(
 
     query = """
         SELECT pair, params_hash, hourly_days, zone_history_days, data_signature,
-            ticker, strategy_version, result_json, created_at, updated_at
+            ticker, strategy_version, result_json, run_config_json, created_at, updated_at
         FROM backtest_result
     """
     params: list[object] = []
@@ -263,8 +273,9 @@ def load_backtest_results(
             'ticker': row[5],
             'strategy_version': row[6],
             'result_json': row[7],
-            'created_at': row[8],
-            'updated_at': row[9],
+            'run_config_json': row[8],
+            'created_at': row[9],
+            'updated_at': row[10],
         }
         for row in rows
     ]

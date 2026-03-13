@@ -21,9 +21,11 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data
 from .levels import detect_zones, SRZone
+from .profiles import PROFILES
 from .strategy import (
     Trade, StrategyParams, check_exit, get_correlated_pairs, get_market_exit_price,
-    build_trade_from_signal, get_tradeable_zones, is_pair_fully_blocked, select_entry_signal,
+    build_trade_from_signal, get_tradeable_zones, is_pair_fully_blocked, params_from_profile,
+    select_entry_signal,
 )
 from .db import load_backtest_result, save_backtest_result
 from . import ibkr
@@ -50,7 +52,7 @@ class BacktestResult:
     zones: List[SRZone]
 
 
-BACKTEST_CACHE_VERSION = '4'
+BACKTEST_CACHE_VERSION = '5'
 
 
 def _serialize_timestamp(value: pd.Timestamp | None) -> str | None:
@@ -82,6 +84,7 @@ def _trade_to_dict(trade: Trade) -> dict:
         'pnl_pips': float(trade.pnl_pips),
         'pnl_r': float(trade.pnl_r),
         'bars_held': int(trade.bars_held),
+        'quality_score': float(trade.quality_score),
     }
 
 
@@ -141,6 +144,7 @@ def _deserialize_backtest_result(raw: str) -> BacktestResult:
                 pnl_pips=float(trade.get('pnl_pips', 0.0)),
                 pnl_r=float(trade.get('pnl_r', 0.0)),
                 bars_held=int(trade.get('bars_held', 0)),
+                quality_score=float(trade.get('quality_score', 0.0)),
             )
         )
 
@@ -179,13 +183,55 @@ def _deserialize_backtest_result(raw: str) -> BacktestResult:
 
 
 def _params_signature(params: StrategyParams) -> str:
+    payload = _strategy_params_to_dict(params)
+    # Stable and deterministic for identical value objects.
+    payload_json = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
+
+
+def _strategy_params_to_dict(params: StrategyParams) -> dict:
     payload = params.__dict__.copy()
     payload['blocked_hours'] = sorted(payload.get('blocked_hours', []) or [])
     payload['blocked_days'] = sorted(payload.get('blocked_days', []) or [])
     payload['zone_windows'] = list(payload.get('zone_windows', ()))
-    # Stable and deterministic for identical value objects.
-    payload_json = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
+    return payload
+
+
+def _profile_name_for_params_hash(params_hash: str) -> str | None:
+    for profile_name, profile in PROFILES.items():
+        if _params_signature(params_from_profile(profile)) == params_hash:
+            return profile_name
+    return None
+
+
+def build_backtest_run_config_json(
+    params: StrategyParams,
+    hourly_days: int,
+    zone_history_days: int,
+    *,
+    requested_profile: str | None = None,
+    starting_balance: float | None = None,
+    risk_pct: float | None = None,
+    selection_label: str | None = None,
+) -> str:
+    """Serialize a self-describing run configuration for cache rows."""
+
+    params_hash = _params_signature(params)
+    payload = {
+        'requested_profile': requested_profile,
+        'resolved_profile': _profile_name_for_params_hash(params_hash),
+        'selection_label': selection_label,
+        'params_hash': params_hash,
+        'strategy_version': BACKTEST_CACHE_VERSION,
+        'hourly_days': int(hourly_days),
+        'zone_history_days': int(zone_history_days),
+        'starting_balance': (
+            None if starting_balance is None else float(starting_balance)
+        ),
+        'risk_pct': None if risk_pct is None else float(risk_pct),
+        'strategy_params': _strategy_params_to_dict(params),
+    }
+    return json.dumps(payload, sort_keys=True)
 
 
 def _normalize_df_for_signature(df: pd.DataFrame) -> pd.DataFrame:
@@ -729,6 +775,7 @@ def _backtest_pair(
     zone_history_days: int,
     force_refresh: bool = False,
     client_id: int | None = None,
+    run_config_json: str | None = None,
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Fetch data and run backtest for a single pair."""
     params_hash = _params_signature(params)
@@ -759,12 +806,24 @@ def _backtest_pair(
             zone_history_days,
         )
         if cached is not None:
-            cached_sig, cached_json, strategy_version = cached
+            cached_sig, cached_json, strategy_version, cached_run_config_json = cached
             if (
                 strategy_version == BACKTEST_CACHE_VERSION
                 and cached_sig == data_sig
             ):
                 try:
+                    if run_config_json is not None and cached_run_config_json != run_config_json:
+                        save_backtest_result(
+                            pair=pair,
+                            params_hash=params_hash,
+                            hourly_days=hourly_days,
+                            zone_history_days=zone_history_days,
+                            data_signature=data_sig,
+                            ticker=pair_info['ticker'],
+                            strategy_version=BACKTEST_CACHE_VERSION,
+                            result_json=cached_json,
+                            run_config_json=run_config_json,
+                        )
                     return pair, _deserialize_backtest_result(cached_json)
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     pass
@@ -780,6 +839,7 @@ def _backtest_pair(
             ticker=pair_info['ticker'],
             strategy_version=BACKTEST_CACHE_VERSION,
             result_json=_serialize_backtest_result(result),
+            run_config_json=run_config_json,
         )
     return pair, result
 
@@ -793,6 +853,7 @@ def _run_backtest_pair_on_core(
     force_refresh: bool,
     client_id: int | None,
     core_id: int | None = None,
+    run_config_json: str | None = None,
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Run a pair backtest in the current process and bind to a dedicated core if possible."""
     if core_id is not None:
@@ -808,6 +869,7 @@ def _run_backtest_pair_on_core(
         zone_history_days=zone_history_days,
         force_refresh=force_refresh,
         client_id=client_id,
+        run_config_json=run_config_json,
     )
 
 
@@ -825,6 +887,7 @@ def run_all_backtests_parallel(
     pairs: Dict = None,
     force_refresh: bool = False,
     base_client_id: int | None = None,
+    run_config_json: str | None = None,
 ) -> Dict[str, BacktestResult]:
     """Run all pair backtests with maximum CPU utilisation.
 
@@ -940,11 +1003,23 @@ def run_all_backtests_parallel(
         data_sig = _data_signature(daily_df, hourly_df)
         cached = load_backtest_result(pair, params_hash, hourly_days, zone_history_days)
         if cached is not None:
-            cached_sig, cached_json, strategy_version = cached
+            cached_sig, cached_json, strategy_version, cached_run_config_json = cached
             if (strategy_version == BACKTEST_CACHE_VERSION
                     and cached_sig == data_sig):
                 try:
                     result = _deserialize_backtest_result(cached_json)
+                    if run_config_json is not None and cached_run_config_json != run_config_json:
+                        save_backtest_result(
+                            pair=pair,
+                            params_hash=params_hash,
+                            hourly_days=hourly_days,
+                            zone_history_days=zone_history_days,
+                            data_signature=data_sig,
+                            ticker=pairs[pair].get('ticker', pair),
+                            strategy_version=BACKTEST_CACHE_VERSION,
+                            result_json=cached_json,
+                            run_config_json=run_config_json,
+                        )
                     results[pair] = result
                     done += 1
                     r = result
@@ -1027,6 +1102,7 @@ def run_all_backtests_parallel(
                     ticker=pairs[pair].get('ticker', pair),
                     strategy_version=BACKTEST_CACHE_VERSION,
                     result_json=_serialize_backtest_result(result),
+                    run_config_json=run_config_json,
                 )
     except (OSError, ValueError) as exc:
         print(f"    Process pool unavailable ({exc}); falling back to sequential.")
@@ -1050,6 +1126,7 @@ def run_all_backtests_parallel(
                 ticker=pairs[pair].get('ticker', pair),
                 strategy_version=BACKTEST_CACHE_VERSION,
                 result_json=_serialize_backtest_result(result),
+                run_config_json=run_config_json,
             )
 
     print(f"    Total compute in {time.time() - t_phase:.1f}s")
@@ -1082,7 +1159,24 @@ def apply_correlation_filter(
         active_correlated = [p for p, t in active if p in correlated or p == pair_id]
 
         if len(active_correlated) >= params.max_correlated_trades:
-            continue
+            if params.correlation_prefer_quality:
+                # Find worst-quality active correlated trade
+                worst_idx = None
+                worst_quality = float('inf')
+                for idx, (p, t) in enumerate(active):
+                    if p in correlated or p == pair_id:
+                        if t.quality_score < worst_quality:
+                            worst_quality = t.quality_score
+                            worst_idx = idx
+                if worst_idx is not None and trade.quality_score > worst_quality:
+                    removed_pair, removed_trade = active[worst_idx]
+                    filtered = [(p, t) for p, t in filtered
+                                if not (p == removed_pair and t is removed_trade)]
+                    active.pop(worst_idx)
+                else:
+                    continue
+            else:
+                continue
 
         filtered.append((pair_id, trade))
         active.append((pair_id, trade))
@@ -1092,7 +1186,7 @@ def apply_correlation_filter(
 
 def calculate_compounding_pnl(
     results: Dict[str, BacktestResult],
-    starting_balance: float = 10000.0,
+    starting_balance: float = 1000.0,
     risk_pct: float = 0.05,
     params: StrategyParams = None,
 ) -> Tuple[List[Tuple[str, Trade, float, float, float]], float]:
@@ -1144,6 +1238,11 @@ def calculate_compounding_pnl(
                 effective_risk = risk_pct - (risk_pct - params.dd_risk_floor / 100.0) * frac
         else:
             effective_risk = risk_pct
+
+        # Quality-based risk scaling
+        if params.quality_sizing:
+            multiplier = params.quality_risk_min + t.quality_score * (params.quality_risk_max - params.quality_risk_min)
+            effective_risk *= multiplier
 
         risk_amt = calculate_risk_amount(balance, effective_risk)
         pnl = risk_amt * t.pnl_r

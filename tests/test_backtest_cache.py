@@ -9,6 +9,7 @@ from fx_sr.backtest import (
     _params_signature,
     _serialize_backtest_result,
     _backtest_pair,
+    build_backtest_run_config_json,
 )
 from fx_sr.backtest import BacktestResult
 from fx_sr.strategy import StrategyParams
@@ -81,6 +82,7 @@ class BacktestCacheTests(unittest.TestCase):
                     self.expected_signature,
                     cached,
                     BACKTEST_CACHE_VERSION,
+                    None,
                 )), \
                 patch('fx_sr.backtest.save_backtest_result') as save_result, \
                 patch('fx_sr.backtest.run_backtest') as run_backtest:
@@ -106,6 +108,7 @@ class BacktestCacheTests(unittest.TestCase):
                     stale_sig,
                     _serialize_backtest_result(stale),
                     BACKTEST_CACHE_VERSION,
+                    None,
                 )), \
                 patch('fx_sr.backtest.run_backtest', return_value=stale) as run_backtest, \
                 patch('fx_sr.backtest.save_backtest_result') as save_result:
@@ -138,6 +141,7 @@ class BacktestCacheTests(unittest.TestCase):
                 self.expected_signature,
                 cached,
                 BACKTEST_CACHE_VERSION,
+                None,
             )
 
             _, result = _backtest_pair(
@@ -153,6 +157,43 @@ class BacktestCacheTests(unittest.TestCase):
         run_backtest.assert_called_once()
         save_result.assert_called_once()
         self.assertEqual(result.total_trades, 0)
+
+    def test_cached_result_refreshes_missing_run_config(self):
+        cached = _serialize_backtest_result(_empty_backtest())
+        run_config_json = build_backtest_run_config_json(
+            self.params,
+            hourly_days=self.hourly_days,
+            zone_history_days=self.zone_history_days,
+            requested_profile='high_volume',
+            starting_balance=1000.0,
+            risk_pct=8.0,
+            selection_label='baseline',
+        )
+        with patch('fx_sr.backtest.fetch_daily_data', return_value=self.daily_df), \
+                patch('fx_sr.backtest.fetch_hourly_data', return_value=self.hourly_df), \
+                patch('fx_sr.backtest.load_backtest_result', return_value=(
+                    self.expected_signature,
+                    cached,
+                    BACKTEST_CACHE_VERSION,
+                    None,
+                )), \
+                patch('fx_sr.backtest.save_backtest_result') as save_result, \
+                patch('fx_sr.backtest.run_backtest') as run_backtest:
+            _, result = _backtest_pair(
+                self.pair,
+                self.info,
+                self.params,
+                hourly_days=self.hourly_days,
+                zone_history_days=self.zone_history_days,
+                force_refresh=False,
+                run_config_json=run_config_json,
+            )
+
+        self.assertEqual(result.total_trades, 0)
+        run_backtest.assert_not_called()
+        save_result.assert_called_once()
+        _, kwargs = save_result.call_args
+        self.assertEqual(kwargs['run_config_json'], run_config_json)
 
 
 if __name__ == '__main__':

@@ -6,26 +6,97 @@ visualization in the browser.
 
 from __future__ import annotations
 
+from collections import Counter
+from dataclasses import replace
 from datetime import date, datetime, timedelta
+from functools import lru_cache
+import json
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 from aiohttp import web
 
-from .backtest import _slice_daily_window, _deserialize_backtest_result, _finalize_trade
+from .backtest import (
+    _slice_daily_window,
+    _deserialize_backtest_result,
+    _finalize_trade,
+    _params_signature,
+    calculate_compounding_pnl,
+)
 from .config import PAIRS, STRATEGY_PRESETS, DEFAULT_ZONE_HISTORY_DAYS
-from .profiles import PROFILES, get_profile
+from .profiles import DEFAULT_PROFILE, PROFILES, get_profile
 from . import db
 from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
 from .levels import detect_zones, SRZone
 from .strategy import (
     Trade, StrategyParams, check_exit, build_trade_from_signal,
-    get_tradeable_zones, select_entry_signal,
+    get_tradeable_zones, params_from_profile, select_entry_signal,
 )
 
 
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
+
+
+def _trade_active_dates(
+    entry_time: pd.Timestamp | str | None,
+    exit_time: pd.Timestamp | str | None,
+) -> list[str]:
+    """Return every calendar date touched by a trade, inclusive."""
+
+    if entry_time is None:
+        return []
+
+    start_date = pd.Timestamp(entry_time).date()
+    end_date = pd.Timestamp(exit_time).date() if exit_time is not None else start_date
+    if end_date < start_date:
+        end_date = start_date
+
+    active_dates: list[str] = []
+    current_date = start_date
+    while current_date <= end_date:
+        active_dates.append(str(current_date))
+        current_date += timedelta(days=1)
+    return active_dates
+
+
+def _trade_realized_date(trade_row: dict) -> str:
+    """Return the date on which the trade result should count for diary P&L."""
+
+    if trade_row.get('exit_time'):
+        return str(trade_row['exit_time'])[:10]
+    if trade_row.get('entry_time'):
+        return str(trade_row['entry_time'])[:10]
+    return ''
+
+
+def _trade_realized_timestamp(trade_row: dict) -> pd.Timestamp | None:
+    """Return the timestamp used for realized-date ordering in UI summaries."""
+
+    value = trade_row.get('exit_time') or trade_row.get('entry_time')
+    if not value:
+        return None
+
+    try:
+        ts = pd.Timestamp(value)
+    except (ValueError, TypeError):
+        return None
+
+    if ts.tzinfo is None:
+        return ts.tz_localize('UTC')
+    return ts.tz_convert('UTC')
+
+
+def _trade_is_active_on_date(trade_row: dict, selected_date: str) -> bool:
+    """Return True when a trade was open at any point on the selected date."""
+
+    active_dates = trade_row.get('active_dates')
+    if not active_dates:
+        active_dates = _trade_active_dates(
+            trade_row.get('entry_time'),
+            trade_row.get('exit_time'),
+        )
+    return selected_date in active_dates
 
 
 def _zone_to_dict(zone: SRZone) -> dict:
@@ -41,17 +112,18 @@ def _zone_to_dict(zone: SRZone) -> dict:
 
 def _trade_to_dict(trade: Trade, pip: float) -> dict:
     d = {
-        'entry_time': str(trade.entry_time),
+        'entry_time': pd.Timestamp(trade.entry_time).isoformat(),
         'entry_price': trade.entry_price,
         'direction': trade.direction,
         'sl_price': trade.sl_price,
         'tp_price': trade.tp_price,
         'zone_upper': trade.zone_upper,
         'zone_lower': trade.zone_lower,
+        'active_dates': _trade_active_dates(trade.entry_time, trade.exit_time),
     }
     if trade.exit_time is not None:
         d.update({
-            'exit_time': str(trade.exit_time),
+            'exit_time': pd.Timestamp(trade.exit_time).isoformat(),
             'exit_price': trade.exit_price,
             'exit_reason': trade.exit_reason,
             'pnl_pips': round(trade.pnl_pips, 1),
@@ -66,11 +138,15 @@ def _trade_row_to_dict(
     trade: Trade,
     decimals: int,
     source_row: dict,
+    *,
+    balance_after: float | None = None,
+    risk_amount: float | None = None,
+    pnl_amount: float | None = None,
 ) -> dict:
     return {
         'pair': pair,
-        'entry_time': str(trade.entry_time),
-        'exit_time': str(trade.exit_time) if trade.exit_time is not None else None,
+        'entry_time': pd.Timestamp(trade.entry_time).isoformat(),
+        'exit_time': pd.Timestamp(trade.exit_time).isoformat() if trade.exit_time is not None else None,
         'direction': trade.direction,
         'entry_price': round(float(trade.entry_price), decimals),
         'exit_price': float(trade.exit_price) if trade.exit_price is not None else None,
@@ -85,10 +161,14 @@ def _trade_row_to_dict(
         'pnl_pips': round(float(trade.pnl_pips), 1),
         'pnl_r': round(float(trade.pnl_r), 2),
         'exit_reason': trade.exit_reason,
+        'active_dates': _trade_active_dates(trade.entry_time, trade.exit_time),
         'hourly_days': source_row['hourly_days'],
         'zone_history_days': source_row['zone_history_days'],
         'strategy_version': source_row['strategy_version'],
         'updated_at': source_row['updated_at'],
+        'risk_amount': round(float(risk_amount), 2) if risk_amount is not None else None,
+        'pnl_amount': round(float(pnl_amount), 2) if pnl_amount is not None else None,
+        'balance_after': round(float(balance_after), 2) if balance_after is not None else None,
     }
 
 
@@ -106,21 +186,325 @@ def _load_latest_cached_backtest_rows(pair: str | None = None) -> list[dict]:
     return list(latest_by_pair.values())
 
 
-def _load_cached_backtest_trades(pair: str | None = None) -> list[dict]:
-    rows = _load_latest_cached_backtest_rows(pair)
-    trades: list[dict] = []
+def _cached_backtest_key(row: dict) -> str:
+    return (
+        f"{row.get('params_hash', '')}|"
+        f"{int(row.get('hourly_days', 0))}|"
+        f"{int(row.get('zone_history_days', 0))}"
+    )
+
+
+def _parse_run_config_json(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _describe_backtest_row(row: dict) -> dict:
+    run_config = _parse_run_config_json(row.get('run_config_json'))
+    matched_profile = _known_compounding_profiles().get(row.get('params_hash'), {})
+    profile_name = (
+        run_config.get('resolved_profile')
+        or run_config.get('requested_profile')
+        or matched_profile.get('profile_name')
+        or ''
+    )
+    selection_label = run_config.get('selection_label') or ''
+    label = profile_name or selection_label or row.get('params_hash', '')[:10] or 'cached run'
+    if selection_label and selection_label not in {'baseline', profile_name}:
+        label = f"{label} [{selection_label}]"
+    return {
+        'key': _cached_backtest_key(row),
+        'label': label,
+        'profile_name': profile_name,
+        'selection_label': selection_label,
+        'params_hash': row.get('params_hash'),
+        'hourly_days': int(row.get('hourly_days', 0) or 0),
+        'zone_history_days': int(row.get('zone_history_days', 0) or 0),
+        'starting_balance': (
+            float(run_config['starting_balance'])
+            if run_config.get('starting_balance') is not None
+            else matched_profile.get('starting_balance')
+        ),
+        'risk_pct': (
+            float(run_config['risk_pct'])
+            if run_config.get('risk_pct') is not None
+            else (
+                float(matched_profile.get('risk_pct', 0.0)) * 100.0
+                if matched_profile.get('risk_pct') is not None
+                else None
+            )
+        ),
+        'updated_at': row.get('updated_at') or '',
+    }
+
+
+def _list_cached_backtests(rows: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
     for row in rows:
+        grouped.setdefault(_cached_backtest_key(row), []).append(row)
+
+    backtests: list[dict] = []
+    for key, grouped_rows in grouped.items():
+        representative = max(grouped_rows, key=lambda item: item.get('updated_at') or '')
+        descriptor = _describe_backtest_row(representative)
+        descriptor['pair_count'] = len({row['pair'] for row in grouped_rows})
+        backtests.append(descriptor)
+
+    backtests.sort(
+        key=lambda item: (
+            0 if item.get('profile_name') == DEFAULT_PROFILE else 1,
+            -(pd.Timestamp(item.get('updated_at') or 0).value if item.get('updated_at') else 0),
+            item.get('label') or '',
+        )
+    )
+    return backtests
+
+
+def _select_cached_backtest_rows(backtest_key: str | None = None) -> tuple[list[dict], list[dict], dict | None]:
+    from .backtest import BACKTEST_CACHE_VERSION
+
+    rows = [
+        row for row in db.load_backtest_results()
+        if row.get('strategy_version') == BACKTEST_CACHE_VERSION
+    ]
+    backtests = _list_cached_backtests(rows)
+    if not backtests:
+        return [], [], None
+
+    selected = None
+    if backtest_key:
+        for candidate in backtests:
+            if candidate['key'] == backtest_key:
+                selected = candidate
+                break
+    if selected is None:
+        selected = backtests[0]
+
+    selected_rows = [
+        row for row in rows
+        if _cached_backtest_key(row) == selected['key']
+    ]
+    latest_by_pair: dict[str, dict] = {}
+    for row in selected_rows:
+        pair_value = row['pair']
+        if pair_value not in latest_by_pair:
+            latest_by_pair[pair_value] = row
+    return list(latest_by_pair.values()), backtests, selected
+
+
+def _trade_compounding_key(
+    pair: str,
+    trade: Trade,
+) -> tuple[str, str, str | None, str, float, float, float]:
+    """Build a stable key for mapping running-balance data back onto trade rows."""
+
+    return (
+        pair,
+        str(trade.entry_time),
+        str(trade.exit_time) if trade.exit_time is not None else None,
+        trade.direction,
+        float(trade.entry_price),
+        float(trade.sl_price),
+        float(trade.tp_price),
+    )
+
+
+@lru_cache(maxsize=1)
+def _known_compounding_profiles() -> dict[str, dict]:
+    """Map profile parameter hashes to the balance assumptions used in the UI."""
+
+    known_profiles: dict[str, dict] = {}
+    for name, profile in PROFILES.items():
+        profile_params = params_from_profile(profile)
+        known_profiles[_params_signature(profile_params)] = {
+            'profile_name': name,
+            'starting_balance': float(profile.get('starting_balance', 1000.0)),
+            'risk_pct': float(profile.get('risk_pct', 5.0)) / 100.0,
+            # The trade list shows all cached trades, so keep the risk model but
+            # disable correlation filtering when calculating the running balance.
+            'params': replace(profile_params, use_correlation_filter=False),
+        }
+    return known_profiles
+
+
+def _default_compounding_profile() -> dict:
+    """Return the fallback balance assumptions for cached trade tables."""
+
+    profile = get_profile(DEFAULT_PROFILE)
+    profile_params = params_from_profile(profile)
+    return {
+        'profile_name': DEFAULT_PROFILE,
+        'starting_balance': float(profile.get('starting_balance', 1000.0)),
+        'risk_pct': float(profile.get('risk_pct', 5.0)) / 100.0,
+        'params': replace(profile_params, use_correlation_filter=False),
+    }
+
+
+def _resolve_trade_table_compounding(rows: list[dict]) -> dict:
+    """Choose the most appropriate compounding settings for the cached rows."""
+
+    known_profiles = _known_compounding_profiles()
+    default_profile = _default_compounding_profile()
+
+    hashes = [row.get('params_hash') for row in rows if row.get('params_hash')]
+    unique_hashes = {params_hash for params_hash in hashes if params_hash}
+    if not hashes:
+        return {
+            **default_profile,
+            'assumed': True,
+            'mixed_params': False,
+        }
+
+    if len(unique_hashes) == 1:
+        matched = known_profiles.get(next(iter(unique_hashes)))
+        if matched is not None:
+            return {
+                **matched,
+                'assumed': False,
+                'mixed_params': False,
+            }
+
+    counts = Counter(hashes)
+    for params_hash, _count in counts.most_common():
+        matched = known_profiles.get(params_hash)
+        if matched is not None:
+            return {
+                **matched,
+                'assumed': True,
+                'mixed_params': len(unique_hashes) > 1,
+            }
+
+    return {
+        **default_profile,
+        'assumed': True,
+        'mixed_params': len(unique_hashes) > 1,
+    }
+
+
+def _build_trade_balance_lookup(results_by_pair: dict[str, object], compounding: dict) -> dict:
+    """Calculate running post-close balances for the cached trade list."""
+
+    if not results_by_pair:
+        return {}
+
+    trade_log, _ = calculate_compounding_pnl(
+        results_by_pair,
+        starting_balance=float(compounding['starting_balance']),
+        risk_pct=float(compounding['risk_pct']),
+        params=compounding['params'],
+    )
+
+    balance_lookup: dict[tuple[str, str, str | None, str, float, float, float], dict] = {}
+    for pair, trade, risk_amount, pnl_amount, balance_after in trade_log:
+        balance_lookup[_trade_compounding_key(pair, trade)] = {
+            'risk_amount': float(risk_amount),
+            'pnl_amount': float(pnl_amount),
+            'balance_after': float(balance_after),
+        }
+    return balance_lookup
+
+
+def _load_cached_backtest_trades(
+    pair: str | None = None,
+    backtest_key: str | None = None,
+) -> tuple[list[dict], dict]:
+    all_rows, _backtests, _selected = _select_cached_backtest_rows(backtest_key=backtest_key)
+    parsed_rows: list[tuple[dict, object, int]] = []
+    results_by_pair: dict[str, object] = {}
+
+    for row in all_rows:
         try:
             result = _deserialize_backtest_result(row['result_json'])
         except (ValueError, TypeError, KeyError):
             continue
 
         decimals = PAIRS.get(row['pair'], {}).get('decimals', 5)
+        parsed_rows.append((row, result, decimals))
+        results_by_pair[row['pair']] = result
+
+    compounding = _resolve_trade_table_compounding([row for row, _, _ in parsed_rows])
+    balance_lookup = _build_trade_balance_lookup(results_by_pair, compounding)
+
+    trades: list[dict] = []
+    for row, result, decimals in parsed_rows:
         for trade in result.trades:
-            trades.append(_trade_row_to_dict(row['pair'], trade, decimals, row))
+            balance_data = balance_lookup.get(_trade_compounding_key(row['pair'], trade), {})
+            trades.append(
+                _trade_row_to_dict(
+                    row['pair'],
+                    trade,
+                    decimals,
+                    row,
+                    balance_after=balance_data.get('balance_after'),
+                    risk_amount=balance_data.get('risk_amount'),
+                    pnl_amount=balance_data.get('pnl_amount'),
+                )
+            )
+
+    if pair is not None:
+        trades = [trade for trade in trades if trade['pair'] == pair]
 
     trades.sort(key=lambda item: item['entry_time'] or '', reverse=True)
-    return trades
+    return trades, {
+        'profile_name': compounding['profile_name'],
+        'starting_balance': round(float(compounding['starting_balance']), 2),
+        'risk_pct': round(float(compounding['risk_pct']) * 100.0, 2),
+        'assumed': bool(compounding.get('assumed')),
+        'mixed_params': bool(compounding.get('mixed_params')),
+    }
+
+
+def _build_account_day_summary(
+    selected_date: date | str,
+    trades: list[dict],
+    compounding: dict,
+) -> dict:
+    """Summarize realized account P&L and balance for a selected calendar day."""
+
+    selected_str = str(selected_date)
+    realized_today: list[dict] = []
+    latest_balance: float | None = None
+    latest_balance_ts: pd.Timestamp | None = None
+
+    for trade in trades:
+        realized_date = _trade_realized_date(trade)
+        if not realized_date:
+            continue
+
+        if realized_date == selected_str:
+            realized_today.append(trade)
+
+        if realized_date > selected_str or trade.get('balance_after') is None:
+            continue
+
+        realized_ts = _trade_realized_timestamp(trade)
+        if realized_ts is None:
+            continue
+
+        if latest_balance_ts is None or realized_ts > latest_balance_ts:
+            latest_balance_ts = realized_ts
+            latest_balance = float(trade['balance_after'])
+
+    day_pnl_amount = round(sum(float(trade.get('pnl_amount') or 0.0) for trade in realized_today), 2)
+    if latest_balance is None:
+        starting_balance = compounding.get('starting_balance')
+        latest_balance = float(starting_balance) if starting_balance is not None else None
+
+    return {
+        'day_pnl_amount': day_pnl_amount,
+        'balance': round(float(latest_balance), 2) if latest_balance is not None else None,
+        'realized_trades': len(realized_today),
+        'profile_name': compounding.get('profile_name'),
+        'starting_balance': compounding.get('starting_balance'),
+        'risk_pct': compounding.get('risk_pct'),
+        'assumed': bool(compounding.get('assumed')),
+        'mixed_params': bool(compounding.get('mixed_params')),
+    }
 
 
 def generate_replay_frames(
@@ -156,7 +540,9 @@ def generate_replay_frames(
     context_bars: list[dict] = []
     completed_trades: list[dict] = []
     day_zones: list[dict] = []
-    bar_index_in_day = 0
+    frame_index = 0
+    selected_day_bar_count = 0
+    carry_trade_entry_time: Optional[pd.Timestamp] = None
 
     for i in range(len(hourly_df)):
         row = hourly_df.iloc[i]
@@ -187,7 +573,7 @@ def generate_replay_frames(
             context_cutoff = target_date - timedelta(days=7)
             if current_date >= context_cutoff:
                 context_bars.append({
-                    'time': str(current_time),
+                    'time': pd.Timestamp(current_time).isoformat(),
                     'open': round(float(row['Open']), decimals),
                     'high': round(float(row['High']), decimals),
                     'low': round(float(row['Low']), decimals),
@@ -214,6 +600,10 @@ def generate_replay_frames(
                 pip=pip,
             )
             if result:
+                was_carry_trade = (
+                    carry_trade_entry_time is not None
+                    and pd.Timestamp(current_trade.entry_time) == carry_trade_entry_time
+                )
                 exit_reason, exit_price = result
                 finished = _finalize_trade(
                     current_trade, current_time, exit_price, exit_reason, bars_held, pip,
@@ -229,14 +619,18 @@ def generate_replay_frames(
                 last_trade_was_loss = finished.pnl_r <= 0
                 current_trade = None
 
-                if is_target:
+                if is_target or was_carry_trade:
                     frames.append(_build_frame(
-                        bar_index_in_day, current_time, row,
+                        frame_index, current_time, row,
                         current_zones, nearest_support, nearest_resistance,
                         signal_event, exit_event, None, list(completed_trades),
                         decimals,
                     ))
-                    bar_index_in_day += 1
+                    frame_index += 1
+                    if is_target:
+                        selected_day_bar_count += 1
+                if was_carry_trade:
+                    carry_trade_entry_time = None
                 continue
 
         # --- check entry ---
@@ -265,12 +659,20 @@ def generate_replay_frames(
                 }
 
         # --- emit frame for target day ---
+        is_carry_continuation = (
+            current_date > target_date
+            and carry_trade_entry_time is not None
+            and current_trade is not None
+            and pd.Timestamp(current_trade.entry_time) == carry_trade_entry_time
+        )
+
         if is_target:
             open_trade = None
             if current_trade is not None:
+                carry_trade_entry_time = pd.Timestamp(current_trade.entry_time)
                 bars_held = i - trade_entry_bar
                 open_trade = {
-                    'entry_time': str(current_trade.entry_time),
+                    'entry_time': pd.Timestamp(current_trade.entry_time).isoformat(),
                     'entry_price': current_trade.entry_price,
                     'direction': current_trade.direction,
                     'sl_price': current_trade.sl_price,
@@ -281,16 +683,37 @@ def generate_replay_frames(
                 }
 
             frames.append(_build_frame(
-                bar_index_in_day, current_time, row,
+                frame_index, current_time, row,
                 current_zones, nearest_support, nearest_resistance,
                 signal_event, exit_event, open_trade, list(completed_trades),
                 decimals,
             ))
-            bar_index_in_day += 1
+            frame_index += 1
+            selected_day_bar_count += 1
+        elif is_carry_continuation:
+            bars_held = i - trade_entry_bar
+            open_trade = {
+                'entry_time': pd.Timestamp(current_trade.entry_time).isoformat(),
+                'entry_price': current_trade.entry_price,
+                'direction': current_trade.direction,
+                'sl_price': current_trade.sl_price,
+                'tp_price': current_trade.tp_price,
+                'zone_upper': current_trade.zone_upper,
+                'zone_lower': current_trade.zone_lower,
+                'bars_held': bars_held,
+            }
+
+            frames.append(_build_frame(
+                frame_index, current_time, row,
+                current_zones, nearest_support, nearest_resistance,
+                signal_event, exit_event, open_trade, list(completed_trades),
+                decimals,
+            ))
+            frame_index += 1
 
     # Summary — separate target-day trades from all trades
     target_str = str(target_date)
-    day_trades = [t for t in completed_trades if str(t.get('entry_time', ''))[:10] == target_str]
+    day_trades = [t for t in completed_trades if _trade_is_active_on_date(t, target_str)]
     wins = sum(1 for t in day_trades if t.get('pnl_pips', 0) > 0)
     losses = sum(1 for t in day_trades if t.get('pnl_pips', 0) <= 0)
     total_pips = sum(t.get('pnl_pips', 0) for t in day_trades)
@@ -311,6 +734,8 @@ def generate_replay_frames(
             'pair': pair,
             'date': str(target_date),
             'total_bars': len(frames),
+            'selected_day_bars': selected_day_bar_count,
+            'replay_bars': len(frames),
             'total_trades': len(day_trades),
             'wins': wins,
             'losses': losses,
@@ -322,6 +747,7 @@ def generate_replay_frames(
             'decimals': decimals,
             'pip': pip,
             'incomplete': incomplete,
+            'continues_after_selected_day': len(frames) > selected_day_bar_count,
         },
     }
 
@@ -334,7 +760,7 @@ def _build_frame(
 ) -> dict:
     return {
         'bar_index': bar_index,
-        'time': str(current_time),
+        'time': pd.Timestamp(current_time).isoformat(),
         'open': round(float(row['Open']), decimals),
         'high': round(float(row['High']), decimals),
         'low': round(float(row['Low']), decimals),
@@ -420,18 +846,22 @@ async def handle_backtest_diary_page(_request: web.Request) -> web.StreamRespons
 async def handle_backtest_trades_api(_request: web.Request) -> web.Response:
     """Return completed backtest trades for all cached pairs."""
     pair_filter = _pair_from_request(_request)
+    backtest_key = (_request.query.get('backtest', '') or '').strip() or None
     if pair_filter is not None and pair_filter not in PAIRS:
         return web.json_response({'error': f'Unknown pair: {pair_filter}'}, status=400)
 
-    trades = _load_cached_backtest_trades(pair=pair_filter)
-    rows = _load_latest_cached_backtest_rows(pair=pair_filter)
-    available_pairs = sorted({row['pair'] for row in rows})
+    selected_rows, backtests, selected_backtest = _select_cached_backtest_rows(backtest_key=backtest_key)
+    trades, compounding = _load_cached_backtest_trades(pair=pair_filter, backtest_key=backtest_key)
+    available_pairs = sorted({row['pair'] for row in selected_rows})
 
     return web.json_response({
         'trades': trades,
         'pairs': available_pairs,
+        'backtests': backtests,
+        'selected_backtest': selected_backtest,
         'pair_filter': pair_filter,
         'count': len(trades),
+        'compounding': compounding,
     })
 
 
@@ -450,18 +880,20 @@ async def handle_backtest_diary_api(_request: web.Request) -> web.Response:
         return web.json_response({'error': f'Invalid date: {date_str}'}, status=400)
     selected_str = str(selected)
 
-    trades = _load_cached_backtest_trades(pair=pair_filter)
+    trades, compounding = _load_cached_backtest_trades(pair=pair_filter)
     matches = []
     for trade in trades:
-        entry_match = (trade['entry_time'] or '').startswith(selected_str)
-        exit_match = (trade['exit_time'] or '').startswith(selected_str) if trade['exit_time'] else False
-        if entry_match or exit_match:
+        if _trade_is_active_on_date(trade, selected_str):
             matches.append(trade)
 
-    wins = sum(1 for trade in matches if trade['pnl_pips'] > 0)
-    losses = len(matches) - wins
-    total_pnl_pips = round(sum(trade['pnl_pips'] for trade in matches), 1)
-    total_pnl_r = round(sum(trade['pnl_r'] for trade in matches), 2)
+    realized_matches = [
+        trade for trade in matches
+        if _trade_realized_date(trade) == selected_str
+    ]
+    wins = sum(1 for trade in realized_matches if trade['pnl_pips'] > 0)
+    losses = sum(1 for trade in realized_matches if trade['pnl_pips'] < 0)
+    total_pnl_pips = round(sum(trade['pnl_pips'] for trade in realized_matches), 1)
+    total_pnl_r = round(sum(trade['pnl_r'] for trade in realized_matches), 2)
 
     return web.json_response({
         'date': selected_str,
@@ -472,6 +904,7 @@ async def handle_backtest_diary_api(_request: web.Request) -> web.Response:
         'losses': losses,
         'total_pnl_pips': total_pnl_pips,
         'total_pnl_r': total_pnl_r,
+        'compounding': compounding,
     })
 
 
@@ -496,6 +929,7 @@ async def handle_replay(request: web.Request) -> web.Response:
     date_str = request.query.get('date', '')
     preset = request.query.get('preset', 'optimized')
     timeframe = request.query.get('tf', '1m')
+    backtest_key = (request.query.get('backtest', '') or '').strip() or None
 
     if pair not in PAIRS:
         return web.json_response({'error': f'Unknown pair: {pair}'}, status=400)
@@ -531,6 +965,8 @@ async def handle_replay(request: web.Request) -> web.Response:
     params = _build_params(preset)
     decimals = PAIRS[pair].get('decimals', 5)
     result = generate_replay_frames(daily_df, hourly_df, pair, target, params, zone_history_days)
+    account_trades, compounding = _load_cached_backtest_trades(backtest_key=backtest_key)
+    result['summary']['account'] = _build_account_day_summary(target, account_trades, compounding)
 
     if not result['frames'] and not result['context_bars']:
         return web.json_response(

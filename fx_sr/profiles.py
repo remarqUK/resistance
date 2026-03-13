@@ -2,7 +2,7 @@
 
 To try different scenarios:
   1. Edit an existing profile or add a new one below
-  2. Run:  python run.py backtest --profile <name> --days 365 --balance 10000 --risk-pct 5
+  2. Run:  python run.py backtest --profile <name> --days 365 --balance 1000 --risk-pct 5
 
 All tunable parameters are defined here. No need to edit any other file.
 """
@@ -61,15 +61,8 @@ BLOCKED_PAIR_DIRECTIONS = {
     ('AUDJPY', 'SHORT'),   # 0% WR
     ('EURCHF', 'LONG'),    # 0% WR
     ('EURCHF', 'SHORT'),   # 0% WR
-    # <25% WR — too low to be profitable
+    # <15% WR
     ('GBPUSD', 'LONG'),    # 13.3% WR
-    ('USDCAD', 'SHORT'),   # 16.1% WR
-    ('EURCAD', 'LONG'),    # 17% WR
-    ('EURCAD', 'SHORT'),   # 17% WR
-    ('GBPCAD', 'LONG'),    # 18% WR
-    ('GBPCAD', 'SHORT'),   # 18% WR
-    ('AUDUSD', 'SHORT'),   # 22.4% WR
-    ('EURGBP', 'SHORT'),   # 25.0% WR
 }
 
 
@@ -114,6 +107,10 @@ CORRELATION_GROUPS = {
 #   min_entry_candle_body_pct  Minimum body/range ratio on entry candle (filters dojis)
 #   momentum_lookback        Bars to check for strong momentum approaching zone
 #   momentum_threshold       Body/range ratio threshold for "strong momentum" candle
+#   max_linger_bars          Skip entry if price overlapped zone this many bars recently (0=off)
+#   linger_lookback          How many bars back to check for lingering (default 8)
+#   zone_exhaustion_threshold  Skip if zone had this many distinct visits recently (0=off)
+#   zone_exhaustion_lookback   1H bars to look back for recent zone visits (default 50)
 #   blocked_hours            UTC hours where entries are blocked (poor historical WR)
 #   blocked_days             Weekdays where entries are blocked (0=Mon, 4=Fri)
 #
@@ -132,6 +129,7 @@ CORRELATION_GROUPS = {
 #   cooldown_bars            Minimum bars between consecutive entries on same pair
 #   max_correlated_trades    Cap on simultaneous trades across correlated pairs
 #   use_correlation_filter   Enable/disable correlation-based position cap
+#   correlation_prefer_quality  When corr cap is hit, swap in higher-quality trade (default False)
 #
 #   Execution model
 #   ---------------
@@ -142,6 +140,12 @@ CORRELATION_GROUPS = {
 #   -------
 #   use_time_filters         Block entries during blocked_hours / blocked_days
 #   use_pair_direction_filter  Block entries for pair+direction combos in BLOCKED_PAIR_DIRECTIONS
+#
+#   Quality-based sizing
+#   --------------------
+#   quality_sizing           Enable quality-based risk scaling (default False)
+#   quality_risk_min         Risk multiplier for lowest quality signal (default 0.5x)
+#   quality_risk_max         Risk multiplier for highest quality signal (default 1.5x)
 #
 #   Backtest settings
 #   -----------------
@@ -193,7 +197,7 @@ PROFILES = {
 
         # Backtest settings
         'hourly_days': 365,
-        'starting_balance': 10000.0,
+        'starting_balance': 1000.0,
         'risk_pct': 5.0,
     },
 
@@ -240,7 +244,7 @@ PROFILES = {
 
         # Backtest settings
         'hourly_days': 365,
-        'starting_balance': 10000.0,
+        'starting_balance': 1000.0,
         'risk_pct': 5.0,
     },
 
@@ -287,12 +291,12 @@ PROFILES = {
 
         # Backtest settings
         'hourly_days': 365,
-        'starting_balance': 10000.0,
+        'starting_balance': 1000.0,
         'risk_pct': 5.0,
     },
 
     'high_volume': {
-        'description': '532 trades, +87710% return, 20.0% DD, max streak 6, 49% WR',
+        'description': '937 trades, +5460142% return, 20.0% DD, max streak 8, 46% WR',
 
         # Zone detection
         'pivot_window': 5,
@@ -303,10 +307,10 @@ PROFILES = {
 
         # Entry rules — relaxed for higher trade volume
         'min_zone_touches': 3,
-        'zone_penetration_pct': 0.42,           # was 0.45 — allows slightly shallower zone entries
+        'zone_penetration_pct': 0.38,           # was 0.42 — more zone entries
         'min_entry_candle_body_pct': 0.05,       # accepts weaker reversal candles
         'momentum_lookback': 2,
-        'momentum_threshold': 0.6,              # was 0.8 — fewer momentum rejections
+        'momentum_threshold': 0.6,              # fewer momentum rejections
         'blocked_hours': [2, 3],
         'blocked_days': [],
 
@@ -334,7 +338,7 @@ PROFILES = {
 
         # Backtest settings
         'hourly_days': 365,
-        'starting_balance': 10000.0,
+        'starting_balance': 1000.0,
         'risk_pct': 8.0,
 
         # Dynamic risk sizing: scale risk down during drawdowns
@@ -387,12 +391,12 @@ PROFILES = {
 
         # Backtest settings
         'hourly_days': 365,
-        'starting_balance': 10000.0,
+        'starting_balance': 1000.0,
         'risk_pct': 5.0,
     },
 }
 
-DEFAULT_PROFILE = 'optimized'
+DEFAULT_PROFILE = 'high_volume'
 
 
 # ============================================================================

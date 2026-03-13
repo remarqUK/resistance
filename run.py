@@ -10,6 +10,7 @@ import time
 from fx_sr import ibkr
 from fx_sr.backtest import (
     apply_correlation_filter,
+    build_backtest_run_config_json,
     calculate_compounding_pnl,
     format_compounding_results,
     format_results,
@@ -235,6 +236,15 @@ def _run_backtests_until_target(
         print(f'    Active params: {_format_param_summary(attempt_params)}')
 
         t0 = time.time()
+        run_config_json = build_backtest_run_config_json(
+            attempt_params,
+            hourly_days=hourly_days,
+            zone_history_days=zone_days,
+            requested_profile=getattr(args, 'profile', None) or args.preset,
+            starting_balance=args.balance,
+            risk_pct=args.risk_pct,
+            selection_label=label,
+        )
         results = run_all_backtests_parallel(
             params=attempt_params,
             hourly_days=hourly_days,
@@ -242,6 +252,7 @@ def _run_backtests_until_target(
             pairs=pairs,
             force_refresh=args.no_cache,
             base_client_id=active_client_id,
+            run_config_json=run_config_json,
         )
         elapsed = time.time() - t0
 
@@ -529,13 +540,13 @@ def _add_risk_sizing_args(
             '--balance',
             type=float,
             default=None,
-            help='Starting balance for compounding/live sizing (for example 10000)',
+            help='Starting balance for compounding/live sizing (default: from profile)',
         )
     parser.add_argument(
         '--risk-pct',
         type=float,
         default=5.0,
-        help='Risk per trade as %% of balance (default: 5)',
+        help='Risk per trade as %% of balance (default: from profile)',
     )
     if include_account_currency:
         parser.add_argument(
@@ -577,6 +588,11 @@ def cmd_backtest(args):
     zone_days = args.zone_history if args.zone_history != DEFAULT_ZONE_HISTORY_DAYS else profile.get('zone_history_days', args.zone_history)
     if args.days == 30:  # argparse default — use profile value
         args.days = profile.get('hourly_days', args.days)
+    # Use profile defaults for balance/risk-pct if not overridden on CLI
+    if args.balance is None:
+        args.balance = profile.get('starting_balance', None)
+    if args.risk_pct == 5.0:  # argparse default — use profile value
+        args.risk_pct = profile.get('risk_pct', 5.0)
 
     profile_name = getattr(args, 'profile', None) or args.preset
     print(f"\n  IBKR client ID: {active_client_id}")
@@ -610,6 +626,15 @@ def cmd_backtest(args):
             hourly_days=args.days,
         )
     else:
+        run_config_json = build_backtest_run_config_json(
+            params,
+            hourly_days=args.days,
+            zone_history_days=zone_days,
+            requested_profile=profile_name,
+            starting_balance=args.balance,
+            risk_pct=args.risk_pct,
+            selection_label='baseline',
+        )
         results = run_all_backtests_parallel(
             params=params,
             hourly_days=args.days,
@@ -617,6 +642,7 @@ def cmd_backtest(args):
             pairs=pairs,
             force_refresh=args.no_cache,
             base_client_id=active_client_id,
+            run_config_json=run_config_json,
         )
         attempt_logs: list[dict[str, float | int | str]] = []
         summary = _portfolio_summary(results, params) if results else {
@@ -849,6 +875,9 @@ def cmd_live(args):
     print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
     live_balance, live_currency = _resolve_live_sizing(args)
+    # Release the main-thread IBKR connection so worker threads in the web
+    # app can reuse the same client_id without TWS rejecting them (Error 326).
+    ibkr.disconnect()
     if live_balance is not None and live_currency:
         print(
             f"  Live sizing: {live_currency} {live_balance:,.2f} balance, "
@@ -952,7 +981,7 @@ def main():
         'Examples:\n'
         '  python run.py download\n'
         '  python run.py download --days 365 --pair EURUSD\n'
-        '  python run.py backtest --days 365 --balance 10000 --risk-pct 5\n'
+        '  python run.py backtest --days 365 --balance 1000 --risk-pct 5\n'
         '  python run.py backtest --profile source\n'
         '  python run.py backtest --profile aggressive\n'
         '  python run.py backtest --profile optimized --rr-ratio 1.5\n'

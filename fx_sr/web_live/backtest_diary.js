@@ -4,6 +4,7 @@ const summaryEl = document.getElementById("summary");
 const selectedDateEl = document.getElementById("selected-date");
 const calendarEl = document.getElementById("diary-calendar");
 const bodyEl = document.getElementById("diary-body");
+const BACKTEST_CURRENCY = "GBP";
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -82,6 +83,13 @@ function formatNumber(value, digits = 2) {
   });
 }
 
+function formatCurrency(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "—";
+  }
+  return `${BACKTEST_CURRENCY} ${formatNumber(value, 2)}`;
+}
+
 function formatTime(isoTime) {
   if (!isoTime) {
     return "—";
@@ -106,24 +114,47 @@ function replayDateForTrade(trade) {
   return "";
 }
 
-function openReplay(pair, date, preset) {
+function tradeActiveDates(trade) {
+  if (Array.isArray(trade?.active_dates) && trade.active_dates.length) {
+    return trade.active_dates
+      .map((value) => String(value))
+      .filter((value) => isIsoDate(value));
+  }
+
+  const dates = new Set();
+  const entryDate = trade?.entry_time ? String(trade.entry_time).slice(0, 10) : "";
+  const exitDate = trade?.exit_time ? String(trade.exit_time).slice(0, 10) : "";
+  if (isIsoDate(entryDate)) dates.add(entryDate);
+  if (isIsoDate(exitDate)) dates.add(exitDate);
+  return Array.from(dates);
+}
+
+function tradeRealizedDate(trade) {
+  const exitDate = trade?.exit_time ? String(trade.exit_time).slice(0, 10) : "";
+  if (isIsoDate(exitDate)) return exitDate;
+  const entryDate = trade?.entry_time ? String(trade.entry_time).slice(0, 10) : "";
+  return isIsoDate(entryDate) ? entryDate : "";
+}
+
+function openReplay(pair, date, preset, entryTime = "") {
   if (!pair || !date) return;
   const params = new URLSearchParams({
     pair: String(pair).toUpperCase(),
     date,
   });
   if (preset) params.set('preset', preset);
+  if (entryTime) params.set('entry', entryTime);
   window.location.href = `/replay?${params.toString()}`;
 }
 
 function showMessage(message) {
-  bodyEl.innerHTML = `<tr><td colspan=\"8\" class=\"empty\">${message}</td></tr>`;
+  bodyEl.innerHTML = `<tr><td colspan=\"9\" class=\"empty\">${message}</td></tr>`;
   summaryEl.textContent = message;
 }
 
 function buildRows(trades, dateFilter = "") {
   if (!trades.length) {
-    bodyEl.innerHTML = `<tr><td colspan="8" class="empty">No trades for this date.</td></tr>`;
+    bodyEl.innerHTML = `<tr><td colspan="9" class="empty">No trades for this date.</td></tr>`;
     return;
   }
 
@@ -135,8 +166,9 @@ function buildRows(trades, dateFilter = "") {
     const exitPrice = trade.exit_price ? formatNumber(trade.exit_price, digits) : "—";
     const safePair = escapeHtml(trade.pair || "");
     const safeDate = escapeHtml(tradeDate);
+    const safeEntry = escapeHtml(trade.entry_time || "");
     return `
-      <tr class="trade-history-row" data-pair="${safePair}" data-date="${safeDate}">
+      <tr class="trade-history-row" data-pair="${safePair}" data-date="${safeDate}" data-entry="${safeEntry}">
         <td><span class="pair-main">${trade.pair || "–"}</span></td>
         <td>${formatTime(trade.entry_time)}</td>
         <td>${trade.exit_time ? formatTime(trade.exit_time) : "—"}</td>
@@ -144,6 +176,7 @@ function buildRows(trades, dateFilter = "") {
         <td>${formatNumber(trade.entry_price, digits)} → ${exitPrice}</td>
         <td class="${pnlClass}">${formatSigned(trade.pnl_pips, 1, "p")}</td>
         <td class="${pnlClass}">${formatSigned(trade.pnl_r, 2, "R")}</td>
+        <td>${formatCurrency(trade.balance_after)}</td>
         <td>${trade.exit_reason || "—"}</td>
       </tr>
     `;
@@ -152,23 +185,19 @@ function buildRows(trades, dateFilter = "") {
   bodyEl.querySelectorAll(".trade-history-row").forEach((row) => {
     const pair = row.dataset.pair || "";
     const date = row.dataset.date || "";
-    row.addEventListener("click", () => openReplay(pair, date));
+    const entry = row.dataset.entry || "";
+    row.addEventListener("click", () => openReplay(pair, date, "", entry));
   });
 }
 
 function buildCalendarState(trades) {
   const dateMap = new Map();
   for (const trade of trades) {
-    const affectedDates = new Set();
-    const entryDate = trade.entry_time ? String(trade.entry_time).slice(0, 10) : "";
-    const exitDate = trade.exit_time ? String(trade.exit_time).slice(0, 10) : "";
-
-    if (entryDate) affectedDates.add(entryDate);
-    if (exitDate) affectedDates.add(exitDate);
-    if (affectedDates.size === 0) continue;
+    const affectedDates = tradeActiveDates(trade);
+    if (!affectedDates.length) continue;
+    const realizedDate = tradeRealizedDate(trade);
 
     for (const date of affectedDates) {
-      if (!isIsoDate(date)) continue;
       if (!dateMap.has(date)) {
         dateMap.set(date, {
           date,
@@ -183,12 +212,14 @@ function buildCalendarState(trades) {
       const row = dateMap.get(date);
       row.trades.push(trade);
       row.count += 1;
-      const pnlPips = Number(trade.pnl_pips) || 0;
-      const pnlR = Number(trade.pnl_r) || 0;
-      row.total_pnl_pips += pnlPips;
-      row.total_pnl_r += pnlR;
-      if (pnlPips > 0) row.wins += 1;
-      if (pnlPips < 0) row.losses += 1;
+      if (date === realizedDate) {
+        const pnlPips = Number(trade.pnl_pips) || 0;
+        const pnlR = Number(trade.pnl_r) || 0;
+        row.total_pnl_pips += pnlPips;
+        row.total_pnl_r += pnlR;
+        if (pnlPips > 0) row.wins += 1;
+        if (pnlPips < 0) row.losses += 1;
+      }
     }
   }
 
@@ -217,9 +248,10 @@ function selectReplayPair(trades) {
 function openReplayForDate(date) {
   const dayData = dateMap.get(date);
   if (!dayData || !dayData.trades.length) return;
+  const firstTrade = dayData.trades[0];
   const pair = selectReplayPair(dayData.trades);
   if (!pair) return;
-  openReplay(pair, date);
+  openReplay(pair, date, "", firstTrade?.entry_time || "");
 }
 
 function monthStartFromDate(date) {
@@ -310,7 +342,11 @@ function renderDay(dayDate, activeMonth) {
   if (hasTrades) dayClasses.push("has-trades");
   if (isSelected) dayClasses.push("selected");
   if (hasTrades) {
-    dayClasses.push(dayState.total_pnl_pips >= 0 ? "up" : "down");
+    if (dayState.total_pnl_pips > 0) {
+      dayClasses.push("up");
+    } else if (dayState.total_pnl_pips < 0) {
+      dayClasses.push("down");
+    }
   }
 
   if (!isCurrentMonth) {
@@ -356,7 +392,7 @@ function renderDateSummary(date, data) {
     total_pnl_r: 0,
   };
 
-  const cls = (selected.total_pnl_pips || 0) >= 0 ? "up" : "down";
+  const cls = (selected.total_pnl_pips || 0) > 0 ? "up" : (selected.total_pnl_pips || 0) < 0 ? "down" : "";
   selectedDateEl.textContent = `${formatDateLabel(date)} · ${selected.count} trade${selected.count === 1 ? "" : "s"}`;
   summaryEl.innerHTML = `
     <strong>${date}</strong> — ${selected.count} trade${selected.count === 1 ? "" : "s"} (W/L ${selected.wins}/${selected.losses})
@@ -369,7 +405,7 @@ function loadDateTrades(date) {
   const dayData = dateMap.get(date);
   if (!dayData) {
     summaryEl.textContent = `${date} — no trades in cache for this day`;
-    bodyEl.innerHTML = `<tr><td colspan="8" class="empty">No trades for this date.</td></tr>`;
+    bodyEl.innerHTML = `<tr><td colspan="9" class="empty">No trades for this date.</td></tr>`;
     return;
   }
 
@@ -381,7 +417,7 @@ function showLoading(message) {
   calendarEl.innerHTML = `<div class=\"empty-card empty\">${message}</div>`;
   monthRangeEl.textContent = "";
   selectedDateEl.textContent = "Loading diary...";
-  bodyEl.innerHTML = `<tr><td colspan="8" class="empty">Load diary to view trades.</td></tr>`;
+  bodyEl.innerHTML = `<tr><td colspan="9" class="empty">Load diary to view trades.</td></tr>`;
   summaryEl.textContent = message;
 }
 
@@ -411,7 +447,7 @@ function loadDiaryData() {
       } else {
         selectedDate = "";
         selectedDateEl.textContent = "No trades available for this cache.";
-        bodyEl.innerHTML = `<tr><td colspan=\"8\" class=\"empty\">No trades available in cache.</td></tr>`;
+        bodyEl.innerHTML = `<tr><td colspan=\"9\" class=\"empty\">No trades available in cache.</td></tr>`;
         summaryEl.textContent = "No cached trades.";
       }
     })

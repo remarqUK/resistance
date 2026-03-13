@@ -58,65 +58,46 @@ This does not create true tick-level path simulation, but it removes the most op
 
 ## Current Default Profile
 
-The repo default profile is the `balanced` preset. Under the new conservative execution model, it no longer beats `source` on return, and it now ties `source` on max drawdown.
+The repo default profile is `high_volume`. It is also the only benchmark maintained as current in the repo docs.
 
 | Parameter | Default |
 |-----------|---------|
-| `rr_ratio` | `1.2` |
+| `rr_ratio` | `1.1` |
 | `sl_buffer_pct` | `0.15` |
-| `early_exit_r` | `0.5` |
-| `cooldown_bars` | `2` |
-| `min_entry_candle_body_pct` | `0.15` |
+| `early_exit_r` | `0.4` |
+| `cooldown_bars` | `1` |
+| `min_entry_candle_body_pct` | `0.05` |
 | `momentum_lookback` | `2` |
-| `max_correlated_trades` | `4` |
-| `blocked_hours` | `{21, 2, 3, 4}` |
-| `blocked_days` | `{0}` |
+| `max_correlated_trades` | `5` |
+| `blocked_hours` | `{2, 3}` |
+| `blocked_days` | `{}` |
+| `risk_pct` | `8.0` |
+| `dynamic_risk` | `enabled` |
+| `dd_risk_start` | `5.0` |
+| `dd_risk_full` | `18.0` |
+| `dd_risk_floor` | `0.5` |
 
 Latest direct CLI 365-day result with that profile:
 
-- Raw signals: `236`
-- Compounded trades: `235`
-- Win rate: `39.6%`
-- Compounded return: `+410.4%`
-- Final balance: `GBP 51,040.66`
-- Max drawdown: `21.3%`
-- Assumptions: `GBP 10,000` starting balance, `5%` risk per trade, `zone_history_days=180`, `0.6` pip spread, and `0.2` pip stop slippage
+- Raw signals: `944`
+- Compounded trades: `944`
+- Win rate: `46.0%`
+- Compounded return: `+4,731,530.9%`
+- Final balance: `GBP 47,316,309.06`
+- Max drawdown: `19.9%`
+- Max losing streak: `8`
+- Assumptions: `GBP 1,000` starting balance, `8%` base risk with drawdown scaling to `0.5%`, `zone_history_days=180`, `0.6` pip spread, and `0.2` pip stop slippage
 
-## Named CLI Presets
+## Other Profiles
 
-The runner now exposes three named presets. Latest direct CLI comparison on March 10, 2026 (`python run.py backtest --preset ... --days 365 --balance 10000 --risk-pct 5`):
+Other profiles remain available in `fx_sr/profiles.py`, but the repo no longer treats their results as the current benchmark.
 
-| Preset | Signals (raw) | Trades (compounded) | Win rate (compounded) | Return (compounding) | Max drawdown | Final balance |
-|--------|----------------|---------------------|-----------------------|----------------------|--------------|---------------|
-| `source` | 242 | 240 | 45.4% | +524.5% | 21.3% | GBP 62,449.46 |
-| `balanced` | 236 | 235 | 39.6% | +410.4% | 21.3% | GBP 51,040.66 |
-| `aggressive` | 250 | 250 | 47.2% | +767.4% | 31.4% | GBP 86,738.13 |
-
-`source` is the closest CLI match to the raw 1:1 playbook and the strongest latest lower-drawdown preset. `balanced` is the current repo default. `aggressive` is the current highest-return shipped preset.
+- `optimized`: strictest filters and lowest trade count
+- `source`: closest to the original NickShawnFX 1:1 playbook
+- `balanced`: conservative fixed-risk alternative
+- `aggressive`: higher-return fixed-risk variant with materially higher drawdown risk
 
 Explicit strategy flags still override any preset values. For example, `--preset source --rr-ratio 1.2` keeps the source preset but replaces only the reward multiple.
-
-## Source-like Profile
-
-If you want the runner to more closely mirror the raw 1:1 playbook from the videos, use:
-
-```bash
-python run.py backtest --preset source
-```
-
-Latest direct CLI result for `source`: `242` raw signals, `240` compounded trades, `45.4%` compounded win rate, `+524.5%` compounded return, `21.3%` max drawdown, and final balance `GBP 62,449.46`. It still keeps the corrected rolling `zone_history_days` window and active early-exit threshold.
-
-## Higher-Return Variant
-
-The `aggressive` preset is the current highest-return shipped profile:
-
-- `rr_ratio=1.2`
-- `early_exit_r=0.5`
-- `sl_buffer_pct=0.10`
-- `min_entry_candle_body_pct=0.10`
-- `max_correlated_trades=4`
-
-Latest direct CLI result for `aggressive`: `250` raw signals, `250` compounded trades, `47.2%` compounded win rate, `+767.4%` compounded return, `31.4%` max drawdown, and final balance `GBP 86,738.13`.
 
 ## Parameter Sweep
 

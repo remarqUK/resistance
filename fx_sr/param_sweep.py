@@ -1,4 +1,4 @@
-"""Parameter sweep runner aligned with the current tuned baseline."""
+"""Parameter sweep runner — uses profiles.py as the baseline."""
 
 import os
 import sys
@@ -6,32 +6,16 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fx_sr.config import PAIRS
+from fx_sr.profiles import PAIRS, get_profile, DEFAULT_PROFILE
 from fx_sr.data import fetch_daily_data, fetch_hourly_data
-from fx_sr.strategy import StrategyParams
-from fx_sr.backtest import run_backtest_fast, precompute_zone_cache, calculate_compounding_pnl
+from fx_sr.strategy import StrategyParams, params_from_profile
+from fx_sr.backtest import run_backtest_fast, precompute_zone_cache_parallel, calculate_compounding_pnl
 
-HOURLY_DAYS = 365
-ZONE_HISTORY_DAYS = 180
-STARTING_BALANCE = 10000.0
-RISK_PCT = 0.05
-
-_BASELINE = StrategyParams()
-DEFAULTS = {
-    'rr_ratio': _BASELINE.rr_ratio,
-    'early_exit_r': _BASELINE.early_exit_r,
-    'sl_buffer_pct': _BASELINE.sl_buffer_pct,
-    'cooldown_bars': _BASELINE.cooldown_bars,
-    'min_entry_candle_body_pct': _BASELINE.min_entry_candle_body_pct,
-    'max_correlated_trades': _BASELINE.max_correlated_trades,
-    'momentum_lookback': _BASELINE.momentum_lookback,
-    'spread_pips': _BASELINE.spread_pips,
-    'stop_slippage_pips': _BASELINE.stop_slippage_pips,
-    'use_time_filters': _BASELINE.use_time_filters,
-    'use_pair_direction_filter': _BASELINE.use_pair_direction_filter,
-    'blocked_hours': _BASELINE.blocked_hours,
-    'blocked_days': _BASELINE.blocked_days,
-}
+_PROFILE = get_profile()
+HOURLY_DAYS = _PROFILE['hourly_days']
+ZONE_HISTORY_DAYS = _PROFILE['zone_history_days']
+STARTING_BALANCE = _PROFILE['starting_balance']
+RISK_PCT = _PROFILE['risk_pct'] / 100.0
 
 PARAMS = {
     'rr_ratio': [1.0, 1.2, 1.5, 2.0],
@@ -64,8 +48,7 @@ COMBOS = [
 
 def run_sweep_iteration(data, zone_cache, overrides):
     """Run all pair backtests with given param overrides using cached zones."""
-    merged = {**DEFAULTS, **overrides}
-    params = StrategyParams(**merged)
+    params = params_from_profile(_PROFILE, **overrides)
 
     results = {}
     for pair, (daily_df, hourly_df) in data.items():
@@ -108,6 +91,7 @@ def run_sweep_iteration(data, zone_cache, overrides):
 
 
 if __name__ == '__main__':
+    print(f'  Profile: {DEFAULT_PROFILE}')
     print('  Loading data from SQLite cache...')
     t0 = time.time()
     data = {}
@@ -120,7 +104,7 @@ if __name__ == '__main__':
 
     print('\n  Pre-computing zones for all pairs and dates...')
     t1 = time.time()
-    zone_cache = precompute_zone_cache(data, zone_history_days=ZONE_HISTORY_DAYS)
+    zone_cache = precompute_zone_cache_parallel(data, zone_history_days=ZONE_HISTORY_DAYS)
     print(f'  Zone cache built: {len(zone_cache)} entries in {time.time() - t1:.1f}s\n')
 
     print('=' * 100)
@@ -137,7 +121,7 @@ if __name__ == '__main__':
             result = run_sweep_iteration(data, zone_cache, {param_name: value})
             elapsed = time.time() - ts
             if result:
-                marker = ' <-- current' if value == DEFAULTS[param_name] else ''
+                marker = ' <-- current' if value == _PROFILE.get(param_name) else ''
                 print(
                     f"  {value:>8} {result['trades']:>7} {result['wr']:>6.1f}% "
                     f"{result['ret']:>+8.1f}%  GBP {result['final']:>10,.0f} "

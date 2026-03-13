@@ -17,8 +17,8 @@ import pandas as pd
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data
 from .db import get_db_path
-from .levels import detect_zones, get_nearest_zones, SRZone
-from .strategy import Trade, StrategyParams, check_exit, get_market_exit_price
+from .levels import detect_zones, SRZone
+from .strategy import Trade, StrategyParams, check_exit, get_market_exit_price, get_tradeable_zones
 from . import ibkr
 
 
@@ -65,6 +65,15 @@ def pair_ticker(pair: str) -> Optional[str]:
 _TABLE_INIT = False
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, required_columns: Dict[str, str]):
+    """Add any missing columns required by the current schema."""
+
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for column_name, column_ddl in required_columns.items():
+        if column_name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_ddl}")
+
+
 def _ensure_table(db_path: str = None):
     """Create the open_trades table if it doesn't exist (once per session)."""
     global _TABLE_INIT
@@ -73,27 +82,37 @@ def _ensure_table(db_path: str = None):
     if db_path is None:
         db_path = get_db_path()
     conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS open_trades (
-            pair          TEXT NOT NULL,
-            direction     TEXT NOT NULL,
-            entry_time    TEXT NOT NULL,
-            entry_price   REAL NOT NULL,
-            sl_price      REAL NOT NULL,
-            tp_price      REAL NOT NULL,
-            zone_upper    REAL NOT NULL,
-            zone_lower    REAL NOT NULL,
-            zone_strength TEXT NOT NULL,
-            risk          REAL NOT NULL,
-            bars_monitored INTEGER DEFAULT 0,
-            ibkr_avg_cost  REAL,
-            ibkr_size      REAL,
-            created_at    TEXT NOT NULL,
-            PRIMARY KEY (pair, direction)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS open_trades (
+                pair          TEXT NOT NULL,
+                direction     TEXT NOT NULL,
+                entry_time    TEXT NOT NULL,
+                entry_price   REAL NOT NULL,
+                sl_price      REAL NOT NULL,
+                tp_price      REAL NOT NULL,
+                zone_upper    REAL NOT NULL,
+                zone_lower    REAL NOT NULL,
+                zone_strength TEXT NOT NULL,
+                risk          REAL NOT NULL,
+                bars_monitored INTEGER DEFAULT 0,
+                ibkr_avg_cost  REAL,
+                ibkr_size      REAL,
+                last_processed_bar_time TEXT,
+                created_at    TEXT NOT NULL,
+                PRIMARY KEY (pair, direction)
+            )
+        """)
+        _ensure_columns(
+            conn,
+            'open_trades',
+            {
+                'last_processed_bar_time': 'TEXT',
+            },
         )
-    """)
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
     _TABLE_INIT = True
 
 
@@ -103,24 +122,33 @@ def _db_execute(sql: str, params: tuple = (), db_path: str = None):
         db_path = get_db_path()
     _ensure_table(db_path)
     conn = sqlite3.connect(db_path)
-    conn.execute(sql, params)
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
 
 
-def _save_trade(pair: str, trade: Trade, ibkr_avg_cost: float, ibkr_size: float):
+def _save_trade(
+    pair: str,
+    trade: Trade,
+    ibkr_avg_cost: float,
+    ibkr_size: float,
+    last_processed_bar_time: Optional[pd.Timestamp] = None,
+):
     """Save or update a tracked trade in the DB."""
     _db_execute(
         """INSERT OR REPLACE INTO open_trades
            (pair, direction, entry_time, entry_price, sl_price, tp_price,
             zone_upper, zone_lower, zone_strength, risk, bars_monitored,
-            ibkr_avg_cost, ibkr_size, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+            ibkr_avg_cost, ibkr_size, last_processed_bar_time, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
         (
             pair, trade.direction, str(trade.entry_time),
             trade.entry_price, trade.sl_price, trade.tp_price,
             trade.zone_upper, trade.zone_lower, trade.zone_strength,
             trade.risk, ibkr_avg_cost, ibkr_size,
+            str(last_processed_bar_time) if last_processed_bar_time is not None else None,
             datetime.now().isoformat(),
         ),
     )
@@ -134,12 +162,14 @@ def _load_trades() -> Dict[str, dict]:
 
     _ensure_table(db_path)
     conn = sqlite3.connect(db_path)
-    rows = conn.execute(
-        "SELECT pair, direction, entry_time, entry_price, sl_price, tp_price, "
-        "zone_upper, zone_lower, zone_strength, risk, bars_monitored, "
-        "ibkr_avg_cost, ibkr_size FROM open_trades"
-    ).fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT pair, direction, entry_time, entry_price, sl_price, tp_price, "
+            "zone_upper, zone_lower, zone_strength, risk, bars_monitored, "
+            "ibkr_avg_cost, ibkr_size, last_processed_bar_time FROM open_trades"
+        ).fetchall()
+    finally:
+        conn.close()
 
     result = {}
     for r in rows:
@@ -156,6 +186,7 @@ def _load_trades() -> Dict[str, dict]:
             'bars_monitored': r[10],
             'ibkr_avg_cost': r[11],
             'ibkr_size': r[12],
+            'last_processed_bar_time': pd.Timestamp(r[13]) if r[13] else None,
         }
     return result
 
@@ -168,12 +199,23 @@ def _remove_trade(pair: str, direction: str):
                      (pair, direction))
 
 
-def _increment_bars(pair: str, direction: str):
-    """Increment bars_monitored counter for a tracked trade."""
+def _save_bar_tracking(
+    pair: str,
+    direction: str,
+    bars_monitored: int,
+    last_processed_bar_time: Optional[pd.Timestamp],
+):
+    """Persist the latest processed hourly bar and monitored-bar count."""
+
     _db_execute(
-        "UPDATE open_trades SET bars_monitored = bars_monitored + 1 "
-        "WHERE pair=? AND direction=?",
-        (pair, direction),
+        "UPDATE open_trades SET bars_monitored = ?, last_processed_bar_time = ? "
+        "WHERE pair = ? AND direction = ?",
+        (
+            int(bars_monitored),
+            str(last_processed_bar_time) if last_processed_bar_time is not None else None,
+            pair,
+            direction,
+        ),
     )
 
 
@@ -220,7 +262,7 @@ def _build_trade_from_position(
         return None
 
     zones = detect_zones(daily_df)
-    nearest_sup, nearest_res = get_nearest_zones(zones, avg_cost, major_only=True)
+    nearest_sup, nearest_res = get_tradeable_zones(zones, avg_cost)
 
     # Pick zone matching direction, fallback to other, fallback to synthetic
     zone = None
@@ -305,14 +347,60 @@ def sync_positions(
                     'bars_monitored': 0,
                     'ibkr_avg_cost': pos['avg_cost'],
                     'ibkr_size': pos['size'],
+                    'last_processed_bar_time': None,
                 }
 
     return db_trades
 
 
+def _align_timestamp_to_bar(
+    value: Optional[pd.Timestamp],
+    reference_bar_time: pd.Timestamp,
+) -> Optional[pd.Timestamp]:
+    """Align a persisted timestamp to the timezone of the fetched hourly bars."""
+
+    if value is None:
+        return None
+
+    ts = pd.Timestamp(value)
+    if reference_bar_time.tzinfo is not None and ts.tzinfo is None:
+        return ts.tz_localize(reference_bar_time.tzinfo)
+    if reference_bar_time.tzinfo is None and ts.tzinfo is not None:
+        return ts.tz_convert(None)
+    return ts
+
+
+def _tracking_history_days(last_processed_bar_time: Optional[pd.Timestamp]) -> int:
+    """Return enough hourly history to cover unseen bars since the last processed bar."""
+
+    if last_processed_bar_time is None:
+        return 2
+
+    ts = pd.Timestamp(last_processed_bar_time)
+    now = pd.Timestamp.now(tz=ts.tzinfo) if ts.tzinfo is not None else pd.Timestamp.now()
+    age_days = max((now - ts).total_seconds(), 0.0) / 86400.0
+    return max(2, min(14, int(age_days) + 2))
+
+
+def _unseen_hourly_bars(
+    hourly_df: pd.DataFrame,
+    last_processed_bar_time: Optional[pd.Timestamp],
+) -> pd.DataFrame:
+    """Return the hourly bars that still need exit evaluation."""
+
+    if hourly_df.empty:
+        return hourly_df.iloc[0:0]
+    if last_processed_bar_time is None:
+        return hourly_df.tail(1)
+
+    aligned_last_processed = _align_timestamp_to_bar(last_processed_bar_time, hourly_df.index[-1])
+    return hourly_df[hourly_df.index > aligned_last_processed]
+
+
 def check_position_exits(
     tracked: Dict[str, dict],
     params: StrategyParams = None,
+    hourly_data_cache: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> tuple:
     """Check each tracked trade for exit signals.
 
@@ -330,17 +418,25 @@ def check_position_exits(
         pair = info['pair']
         trade = info['trade']
         bars = info['bars_monitored']
+        last_processed_bar_time = info.get('last_processed_bar_time')
 
         ticker = pair_ticker(pair)
         if not ticker:
             continue
 
-        hourly_df = fetch_hourly_data(ticker, days=1)
+        if hourly_data_cache is not None and ticker in hourly_data_cache:
+            hourly_df = hourly_data_cache[ticker]
+        else:
+            hourly_df = fetch_hourly_data(ticker, days=_tracking_history_days(last_processed_bar_time))
+            if hourly_data_cache is not None:
+                hourly_data_cache[ticker] = hourly_df
         if hourly_df.empty:
             continue
 
         last_bar = hourly_df.iloc[-1]
         bar_time = hourly_df.index[-1]
+        aligned_last_processed = _align_timestamp_to_bar(last_processed_bar_time, bar_time)
+        unseen_bars = _unseen_hourly_bars(hourly_df, aligned_last_processed)
         current_price = float(last_bar['Close'])
         pnl_pips = calc_pnl_pips(trade, current_price, pair_pip(pair), params)
 
@@ -349,32 +445,47 @@ def check_position_exits(
             'pnl_pips': pnl_pips,
         }
 
-        result = check_exit(
-            trade,
-            bar_high=float(last_bar['High']),
-            bar_low=float(last_bar['Low']),
-            bar_close=current_price,
-            bar_time=bar_time,
-            bars_held=bars,
-            params=params,
-            pip=pair_pip(pair),
-        )
+        if not unseen_bars.empty:
+            alert_payload = None
+            processed_count = 0
+            processed_bar_time = aligned_last_processed
+            for idx, (unseen_time, unseen_bar) in enumerate(unseen_bars.iterrows(), start=1):
+                bars_held = bars if aligned_last_processed is None else bars + idx
+                unseen_close = float(unseen_bar['Close'])
+                result = check_exit(
+                    trade,
+                    bar_high=float(unseen_bar['High']),
+                    bar_low=float(unseen_bar['Low']),
+                    bar_close=unseen_close,
+                    bar_time=unseen_time,
+                    bars_held=bars_held,
+                    params=params,
+                    pip=pair_pip(pair),
+                )
+                if result:
+                    exit_reason, exit_price = result
+                    alert_payload = {
+                        'pair': pair,
+                        'direction': trade.direction,
+                        'exit_reason': exit_reason,
+                        'exit_price': exit_price,
+                        'entry_price': trade.entry_price,
+                        'current_price': unseen_close,
+                        'pnl_pips': calc_pnl_pips(trade, unseen_close, pair_pip(pair), params),
+                        'bars_monitored': bars_held,
+                    }
+                    processed_count = 0 if aligned_last_processed is None else idx
+                    processed_bar_time = unseen_time
+                    break
+                processed_count = 0 if aligned_last_processed is None else idx
+                processed_bar_time = unseen_time
 
-        if result:
-            exit_reason, exit_price = result
-            alerts.append({
-                'pair': pair,
-                'direction': trade.direction,
-                'exit_reason': exit_reason,
-                'exit_price': exit_price,
-                'entry_price': trade.entry_price,
-                'current_price': current_price,
-                'pnl_pips': pnl_pips,
-                'bars_monitored': bars,
-            })
+            if alert_payload:
+                alerts.append(alert_payload)
 
-        _increment_bars(pair, trade.direction)
-        info['bars_monitored'] = bars + 1
+            info['bars_monitored'] = bars + processed_count
+            info['last_processed_bar_time'] = processed_bar_time
+            _save_bar_tracking(pair, trade.direction, info['bars_monitored'], processed_bar_time)
 
     return alerts, snapshots
 

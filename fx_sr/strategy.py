@@ -31,19 +31,7 @@ from .config import (
     DEFAULT_PIVOT_WINDOW,
     DEFAULT_CLUSTER_TOL,
 )
-
-
-# Correlation groups: pairs sharing a currency tend to move together
-CORRELATION_GROUPS = {
-    'USD': ['EURUSD', 'GBPUSD', 'AUDUSD', 'NZDUSD', 'USDCHF', 'USDCAD', 'USDJPY'],
-    'JPY': ['USDJPY', 'EURJPY', 'GBPJPY', 'AUDJPY', 'CADJPY', 'CHFJPY', 'NZDJPY'],
-    'EUR': ['EURUSD', 'EURGBP', 'EURJPY', 'EURAUD', 'EURCAD', 'EURCHF'],
-    'GBP': ['GBPUSD', 'EURGBP', 'GBPJPY', 'GBPAUD', 'GBPCAD', 'GBPCHF'],
-    'AUD': ['AUDUSD', 'AUDJPY', 'EURAUD', 'GBPAUD', 'AUDNZD', 'AUDCAD'],
-    'CAD': ['USDCAD', 'CADJPY', 'EURCAD', 'GBPCAD', 'AUDCAD'],
-    'CHF': ['USDCHF', 'CHFJPY', 'EURCHF', 'GBPCHF'],
-    'NZD': ['NZDUSD', 'NZDJPY', 'AUDNZD'],
-}
+from .profiles import CORRELATION_GROUPS
 
 
 def get_correlated_pairs(pair: str) -> set:
@@ -91,32 +79,7 @@ class Trade:
     bars_held: int = 0      # 1H bars the trade was open
 
 
-"""Pair+direction combos with historically poor win rates (<29%)."""
-BLOCKED_PAIR_DIRECTIONS = {
-    ('USDCAD', 'SHORT'),   # 16.1% WR
-    ('USDCAD', 'LONG'),    # 0% WR (30-day)
-    ('AUDUSD', 'SHORT'),   # 22.4% WR
-    ('EURGBP', 'SHORT'),   # 25.0% WR
-    ('USDCHF', 'LONG'),    # 28.6% WR
-    ('GBPUSD', 'SHORT'),   # 28.6% WR
-    ('NZDUSD', 'LONG'),    # 0% WR (30-day)
-    ('NZDUSD', 'SHORT'),   # 0% WR (30-day)
-    ('GBPJPY', 'LONG'),    # 0% WR (30-day)
-    ('GBPJPY', 'SHORT'),   # 0% WR (30-day)
-    # New crosses — poor performers
-    ('GBPCAD', 'LONG'),    # 18% WR
-    ('GBPCAD', 'SHORT'),   # 18% WR
-    ('CADJPY', 'LONG'),    # 29% WR
-    ('CADJPY', 'SHORT'),   # 29% WR
-    ('EURCAD', 'LONG'),    # 17% WR
-    ('EURCAD', 'SHORT'),   # 17% WR
-    ('AUDJPY', 'LONG'),    # 0% WR
-    ('AUDJPY', 'SHORT'),   # 0% WR
-    ('EURCHF', 'LONG'),    # 0% WR
-    ('EURCHF', 'SHORT'),   # 0% WR
-    ('AUDCAD', 'LONG'),    # 33% WR marginal
-    ('AUDCAD', 'SHORT'),   # 33% WR marginal
-}
+from .profiles import BLOCKED_PAIR_DIRECTIONS
 
 """Default hours with historically poor win rates (<25%)."""
 DEFAULT_BLOCKED_HOURS: FrozenSet[int] = frozenset({2, 3})  # 02:00-03:00 UTC
@@ -156,6 +119,54 @@ class StrategyParams:
     min_entry_candle_body_pct: float = DEFAULT_MIN_ENTRY_CANDLE_BODY_PCT  # min body/range ratio for entry candle
     blocked_hours: FrozenSet[int] = DEFAULT_BLOCKED_HOURS
     blocked_days: FrozenSet[int] = DEFAULT_BLOCKED_DAYS
+    streak_pause_trigger: int = 0              # pause entries after this many consecutive portfolio losses (0=off)
+    streak_pause_hours: int = 24               # hours to skip entries after streak trigger fires
+    loss_cooldown_bars: int = 0                # extra cooldown bars after a losing trade on the same pair (0=off)
+    dynamic_risk: bool = False                 # enable equity-curve dynamic risk sizing
+    dd_risk_start: float = 5.0                 # DD% at which risk starts scaling down
+    dd_risk_full: float = 18.0                 # DD% at which risk hits the floor
+    dd_risk_floor: float = 0.5                 # minimum risk% during deep drawdown
+
+
+def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
+    """Build a StrategyParams from a profile dict (from profiles.py).
+
+    Any keyword arguments override the profile values.
+    """
+    merged = {**profile, **overrides}
+    return StrategyParams(
+        rr_ratio=merged['rr_ratio'],
+        sl_buffer_pct=merged['sl_buffer_pct'],
+        early_exit_r=merged['early_exit_r'],
+        spread_pips=merged['spread_pips'],
+        stop_slippage_pips=merged['stop_slippage_pips'],
+        min_zone_touches=merged.get('min_zone_touches', 3),
+        zone_penetration_pct=merged.get('zone_penetration_pct', 0.50),
+        pivot_window=merged.get('pivot_window', DEFAULT_PIVOT_WINDOW),
+        cluster_tolerance=merged.get('cluster_tolerance', DEFAULT_CLUSTER_TOL),
+        zone_windows=(merged.get('zone_history_days', 180),),
+        cooldown_bars=merged['cooldown_bars'],
+        max_hold_bars=merged.get('max_hold_bars', 72),
+        sideways_bars=merged.get('sideways_bars', 15),
+        sideways_threshold=merged.get('sideways_threshold', 0.3),
+        momentum_lookback=merged['momentum_lookback'],
+        momentum_threshold=merged.get('momentum_threshold', 0.7),
+        friday_tp_pct=merged.get('friday_tp_pct', 0.70),
+        use_correlation_filter=merged.get('use_correlation_filter', True),
+        max_correlated_trades=merged['max_correlated_trades'],
+        use_pair_direction_filter=merged.get('use_pair_direction_filter', True),
+        use_time_filters=merged.get('use_time_filters', True),
+        min_entry_candle_body_pct=merged['min_entry_candle_body_pct'],
+        blocked_hours=frozenset(merged.get('blocked_hours', [2, 3])),
+        blocked_days=frozenset(merged.get('blocked_days', [])),
+        streak_pause_trigger=merged.get('streak_pause_trigger', 0),
+        streak_pause_hours=merged.get('streak_pause_hours', 24),
+        loss_cooldown_bars=merged.get('loss_cooldown_bars', 0),
+        dynamic_risk=merged.get('dynamic_risk', False),
+        dd_risk_start=merged.get('dd_risk_start', 5.0),
+        dd_risk_full=merged.get('dd_risk_full', 18.0),
+        dd_risk_floor=merged.get('dd_risk_floor', 0.5),
+    )
 
 
 def get_pair_pip(pair: str) -> float:
@@ -317,6 +328,142 @@ def check_momentum_filter(
 
     # If majority of recent candles are strong momentum toward zone, skip
     return strong_count >= lookback
+
+
+def get_tradeable_zones(
+    zones: List[SRZone],
+    current_price: float,
+) -> tuple[Optional[SRZone], Optional[SRZone]]:
+    """Return the nearest major support/resistance zones for the current price.
+
+    Zone selection is based on the zone's assigned type, not only on whether the
+    current price is above or below the midpoint. That keeps a zone eligible even
+    when price has already penetrated into it, which is required by the entry
+    rules.
+    """
+
+    major_zones = [zone for zone in zones if zone.strength == 'major']
+    support = _select_nearest_zone_by_type(major_zones, 'support', current_price)
+    resistance = _select_nearest_zone_by_type(major_zones, 'resistance', current_price)
+    return support, resistance
+
+
+def _select_nearest_zone_by_type(
+    zones: List[SRZone],
+    zone_type: str,
+    current_price: float,
+) -> Optional[SRZone]:
+    """Pick the nearest zone of the requested type for the current price."""
+
+    typed = [zone for zone in zones if zone.zone_type == zone_type]
+    if not typed:
+        return None
+
+    if zone_type == 'support':
+        below = [zone for zone in typed if zone.midpoint <= current_price]
+        if below:
+            return max(below, key=lambda zone: zone.midpoint)
+    else:
+        above = [zone for zone in typed if zone.midpoint >= current_price]
+        if above:
+            return min(above, key=lambda zone: zone.midpoint)
+
+    return min(typed, key=lambda zone: abs(zone.midpoint - current_price))
+
+
+def is_entry_time_blocked(
+    entry_time: pd.Timestamp,
+    params: StrategyParams,
+) -> bool:
+    """Return True when the strategy blocks new entries at this timestamp."""
+
+    if not params.use_time_filters:
+        return False
+
+    entry_hour = entry_time.hour if hasattr(entry_time, 'hour') else 0
+    entry_weekday = entry_time.weekday() if hasattr(entry_time, 'weekday') else 0
+    return entry_hour in params.blocked_hours or entry_weekday in params.blocked_days
+
+
+def is_pair_direction_blocked(
+    pair: str,
+    direction: str,
+    params: StrategyParams,
+) -> bool:
+    """Return True when the pair-direction historical filter blocks an entry."""
+
+    return params.use_pair_direction_filter and (pair, direction) in BLOCKED_PAIR_DIRECTIONS
+
+
+def is_pair_fully_blocked(pair: str, params: StrategyParams) -> bool:
+    """Return True when both directions for the pair are blocked."""
+
+    return (
+        params.use_pair_direction_filter
+        and is_pair_direction_blocked(pair, 'LONG', params)
+        and is_pair_direction_blocked(pair, 'SHORT', params)
+    )
+
+
+def select_entry_signal(
+    hourly_df: pd.DataFrame,
+    bar_idx: int,
+    pair: str,
+    params: StrategyParams,
+    support_zone: Optional[SRZone],
+    resistance_zone: Optional[SRZone],
+) -> Optional[Signal]:
+    """Evaluate the full shared entry rule-set for one hourly bar."""
+
+    current_time = hourly_df.index[bar_idx]
+    if is_entry_time_blocked(current_time, params):
+        return None
+
+    row = hourly_df.iloc[bar_idx]
+    for zone in (support_zone, resistance_zone):
+        if zone is None:
+            continue
+        if check_momentum_filter(hourly_df, bar_idx, zone, params):
+            continue
+
+        signal = generate_signal(
+            bar_open=row['Open'],
+            bar_close=row['Close'],
+            bar_high=row['High'],
+            bar_low=row['Low'],
+            zone=zone,
+            pair=pair,
+            time=current_time,
+            params=params,
+        )
+        if signal is None:
+            continue
+        if is_pair_direction_blocked(pair, signal.direction, params):
+            continue
+        return signal
+
+    return None
+
+
+def build_trade_from_signal(signal: Signal) -> Trade:
+    """Create an open trade object from a generated signal."""
+
+    if signal.direction == 'LONG':
+        risk = signal.entry_price - signal.sl_price
+    else:
+        risk = signal.sl_price - signal.entry_price
+
+    return Trade(
+        entry_time=signal.time,
+        entry_price=signal.entry_price,
+        direction=signal.direction,
+        sl_price=signal.sl_price,
+        tp_price=signal.tp_price,
+        zone_upper=signal.zone_upper,
+        zone_lower=signal.zone_lower,
+        zone_strength=signal.zone_strength,
+        risk=risk,
+    )
 
 
 def check_exit(

@@ -124,6 +124,27 @@
     font-size: 0.84rem;
   }
   .trade-row:last-child { border-bottom: none; }
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 0.84rem;
+    line-height: 1.4;
+  }
+  .info-row .info-label {
+    color: var(--muted);
+    font-weight: 600;
+    min-width: 70px;
+  }
+  .info-section-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    margin-top: 8px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid var(--line);
+  }
 
   .error-banner {
     padding: 14px 18px;
@@ -168,19 +189,16 @@
         <input type="date" id="date-input">
       </div>
       <div class="field">
-        <label for="preset-select">Preset</label>
+        <label for="preset-select">Profile</label>
         <select id="preset-select">
-          <option value="optimized" selected>Optimized</option>
-          <option value="balanced">Balanced</option>
-          <option value="aggressive">Aggressive</option>
-          <option value="source">Source</option>
+          <option value="high_volume" selected>high_volume</option>
         </select>
       </div>
       <div class="field">
         <label for="tf-select">Timeframe</label>
         <select id="tf-select">
           <option value="1m">1 min</option>
-          <option value="1h">1 hour</option>
+          <option value="1h" selected>1 hour</option>
         </select>
       </div>
       <button class="btn btn-primary" id="load-btn">Load</button>
@@ -193,40 +211,25 @@
 
     <div id="chart-container"></div>
 
-    <div class="playback-row" id="playback-row" style="display:none">
-      <button class="btn-icon" id="step-back" title="Step back">&#9664;&#9664;</button>
-      <button class="btn-icon" id="play-pause" title="Play / Pause">&#9654;</button>
-      <button class="btn-icon" id="step-fwd" title="Step forward">&#9654;&#9654;</button>
-      <input type="range" class="scrubber" id="scrubber" min="0" value="0">
-      <span class="bar-label" id="bar-label">0 / 0</span>
-      <div class="field" style="min-width:auto">
-        <label for="speed-select">Speed</label>
-        <select id="speed-select">
-          <option value="0.5">0.5x</option>
-          <option value="1" selected>1x</option>
-          <option value="2">2x</option>
-          <option value="5">5x</option>
-        </select>
-      </div>
-    </div>
+    <div id="playback-row" style="display:none"></div>
   </div>
 
   <div class="info-grid" id="info-grid" style="display:none">
-    <div class="info-card" id="bar-info">
-      <h3>Current Bar</h3>
-      <div id="bar-details"></div>
+    <div class="info-card">
+      <h3>Simulated Trades</h3>
+      <div class="trade-list" id="trade-list"></div>
     </div>
     <div class="info-card" id="trade-info">
       <h3>Trade State</h3>
       <div id="trade-details"></div>
     </div>
-    <div class="info-card">
-      <h3>Completed Trades</h3>
-      <div class="trade-list" id="trade-list"></div>
-    </div>
     <div class="info-card" id="summary-info">
       <h3>Day Summary</h3>
       <div id="summary-details"></div>
+    </div>
+    <div class="info-card" id="bar-info">
+      <h3>Current Bar</h3>
+      <div id="bar-details"></div>
     </div>
   </div>
 

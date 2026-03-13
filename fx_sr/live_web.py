@@ -87,6 +87,7 @@ class LiveDashboardHub:
         )
         self._quote_stop = threading.Event()
         self._quote_thread: Optional[threading.Thread] = None
+        self._pending_tasks: set[asyncio.Task] = set()
 
     def _ws_url(self) -> str:
         return f'ws://127.0.0.1:{self.port}/ws'
@@ -181,6 +182,8 @@ class LiveDashboardHub:
             'resistance_lower': row.resistance_lower,
             'resistance_upper': row.resistance_upper,
             'resistance_strength': row.resistance_strength,
+            'support_dist_pct': row.support_dist_pct,
+            'resistance_dist_pct': row.resistance_dist_pct,
             'signal': None,
         }
         if row.signal is not None:
@@ -389,10 +392,14 @@ class LiveDashboardHub:
 
         if self._loop is None:
             return
-        self._loop.call_soon_threadsafe(
-            asyncio.create_task,
-            self._handle_quote_update(pair, price),
-        )
+        self._loop.call_soon_threadsafe(self._create_tracked_task, pair, price)
+
+    def _create_tracked_task(self, pair: str, price: float) -> None:
+        """Create an asyncio task and track it so it can be cleaned up."""
+
+        task = asyncio.create_task(self._handle_quote_update(pair, price))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     def _run_quote_stream(self) -> None:
         """Run the blocking IBKR quote subscription loop in a side thread."""
@@ -500,7 +507,15 @@ class LiveDashboardHub:
                 pass
 
         if self._quote_thread is not None and self._quote_thread.is_alive():
-            await asyncio.to_thread(self._quote_thread.join, 3)
+            await asyncio.to_thread(self._quote_thread.join, 5)
+            if self._quote_thread.is_alive():
+                # Thread didn't exit — force-disconnect IBKR to unblock it
+                ibkr.disconnect()
+
+        # Cancel any in-flight quote update tasks
+        for task in list(self._pending_tasks):
+            task.cancel()
+        self._pending_tasks.clear()
 
         self._scan_executor.shutdown(wait=False)
 
@@ -586,14 +601,25 @@ def run_live_web_app(
         client_id=client_id,
         port=port,
     )
-    from .replay import handle_replay, handle_replay_dates, handle_replay_page, handle_replay_refresh
+    from .replay import handle_replay, handle_replay_dates, handle_replay_page, handle_replay_refresh, handle_replay_presets
+    from .replay import (
+        handle_backtest_trades_api,
+        handle_backtest_trades_page,
+        handle_backtest_diary_api,
+        handle_backtest_diary_page,
+    )
 
     app.router.add_get('/', _index)
     app.router.add_get('/ws', _websocket)
     app.router.add_get('/replay', handle_replay_page)
+    app.router.add_get('/backtest-trades', handle_backtest_trades_page)
+    app.router.add_get('/api/backtest/trades', handle_backtest_trades_api)
+    app.router.add_get('/backtest-diary', handle_backtest_diary_page)
+    app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)
     app.router.add_get('/api/replay', handle_replay)
     app.router.add_get('/api/replay/dates', handle_replay_dates)
     app.router.add_post('/api/replay/refresh', handle_replay_refresh)
+    app.router.add_get('/api/replay/presets', handle_replay_presets)
     app.router.add_static('/static/', str(WEB_DIR), show_index=False)
     app.on_startup.append(_startup)
     app.on_cleanup.append(_cleanup)

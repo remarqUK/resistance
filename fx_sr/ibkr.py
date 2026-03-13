@@ -62,6 +62,7 @@ TICKER_TO_PAIR = {
     'NZDJPY=X': 'NZDJPY',
     'AUDCAD=X': 'AUDCAD',
 }
+PAIR_TO_TICKER = {pair: ticker for ticker, pair in TICKER_TO_PAIR.items()}
 
 # TWS connection settings
 DEFAULT_TWS_HOST = '127.0.0.1'
@@ -105,7 +106,17 @@ def _get_thread_connection_state() -> tuple[object | None, bool, int | None]:
 
 
 def _set_thread_connection_state(ib, connected: bool, client_id: Optional[int]) -> None:
-    """Persist the current thread's IBKR connection state."""
+    """Persist the current thread's IBKR connection state.
+
+    Disconnects any existing connection held by this thread before replacing it.
+    """
+    old_ib = getattr(_THREAD_STATE, 'ib', None)
+    if old_ib is not None and old_ib is not ib:
+        try:
+            if old_ib.isConnected():
+                old_ib.disconnect()
+        except Exception:
+            pass
     _THREAD_STATE.ib = ib
     _THREAD_STATE.connected = connected
     _THREAD_STATE.client_id = client_id
@@ -133,25 +144,38 @@ def configure_connection(
         disconnect()
 
 
-def _get_connection(client_id: Optional[int] = None):
-    """Get or create a TWS connection. Returns (ib, connected) tuple."""
+def _get_connection(client_id: Optional[int] = None, retries: int = 3):
+    """Get or create a TWS connection. Returns (ib, connected) tuple.
+
+    Retries on client-ID-in-use errors (Error 326) to handle stale TWS sockets.
+    """
     resolved_client_id = _resolve_client_id(client_id)
     ib, connected, active_client_id = _get_thread_connection_state()
 
     if connected and ib and ib.isConnected() and active_client_id == resolved_client_id:
         return ib, True
 
-    try:
-        from ib_async import IB
-        if ib and ib.isConnected():
-            ib.disconnect()
-        ib = IB()
-        ib.connect(TWS_HOST, TWS_PORT, clientId=resolved_client_id, timeout=5)
-        _set_thread_connection_state(ib, True, resolved_client_id)
-        return ib, True
-    except Exception:
-        _set_thread_connection_state(None, False, resolved_client_id)
-        return None, False
+    from ib_async import IB
+
+    for attempt in range(retries):
+        try:
+            if ib and ib.isConnected():
+                ib.disconnect()
+            ib = IB()
+            ib.connect(TWS_HOST, TWS_PORT, clientId=resolved_client_id, timeout=5)
+            _set_thread_connection_state(ib, True, resolved_client_id)
+            return ib, True
+        except Exception as exc:
+            # Error 326 = client ID already in use — TWS hasn't released the old socket yet
+            if 'client id' in str(exc).lower() or '326' in str(exc):
+                if attempt < retries - 1:
+                    time.sleep(2)
+                    continue
+            _set_thread_connection_state(None, False, resolved_client_id)
+            return None, False
+
+    _set_thread_connection_state(None, False, resolved_client_id)
+    return None, False
 
 
 def disconnect():
@@ -428,6 +452,186 @@ def _ticker_mid_price(ticker) -> Optional[float]:
     return None
 
 
+def _extract_dom_levels(dom_levels, side: str, max_levels: int) -> list[dict]:
+    """Normalize IB market-depth rows into plain dictionaries."""
+    rows: list[dict] = []
+    for level_no, dom_level in enumerate(list(dom_levels)[:max_levels], start=1):
+        price = getattr(dom_level, 'price', None)
+        if price is None or price <= 0:
+            continue
+
+        size = getattr(dom_level, 'size', None)
+        rows.append(
+            {
+                'side': side,
+                'level': level_no,
+                'price': float(price),
+                'size': float(size) if size is not None else None,
+                'market_maker': getattr(dom_level, 'marketMaker', '') or '',
+            }
+        )
+    return rows
+
+
+def _build_market_depth_snapshot(pair: str, ticker, depth: int) -> Optional[dict]:
+    """Build a serializable L2 snapshot from an IB market-depth ticker."""
+    bids = _extract_dom_levels(getattr(ticker, 'domBids', []), 'BID', depth)
+    asks = _extract_dom_levels(getattr(ticker, 'domAsks', []), 'ASK', depth)
+
+    best_bid = bids[0]['price'] if bids else None
+    if best_bid is None:
+        ticker_bid = getattr(ticker, 'bid', None)
+        if ticker_bid is not None and ticker_bid > 0:
+            best_bid = float(ticker_bid)
+
+    best_ask = asks[0]['price'] if asks else None
+    if best_ask is None:
+        ticker_ask = getattr(ticker, 'ask', None)
+        if ticker_ask is not None and ticker_ask > 0:
+            best_ask = float(ticker_ask)
+
+    mid_price = _ticker_mid_price(ticker)
+    if mid_price is None and best_bid is not None and best_ask is not None:
+        mid_price = float((best_bid + best_ask) / 2.0)
+
+    if not bids and not asks and best_bid is None and best_ask is None and mid_price is None:
+        return None
+
+    spread = (
+        float(best_ask - best_bid)
+        if best_bid is not None and best_ask is not None
+        else None
+    )
+    return {
+        'pair': pair,
+        'ticker': PAIR_TO_TICKER.get(pair, pair),
+        'captured_at': pd.Timestamp.now(tz='UTC'),
+        'depth_requested': int(depth),
+        'best_bid': best_bid,
+        'best_ask': best_ask,
+        'mid_price': mid_price,
+        'spread': spread,
+        'bids': bids,
+        'asks': asks,
+    }
+
+
+def fetch_market_depth_snapshot(
+    ticker_symbol: str,
+    depth: int = 5,
+    wait_seconds: float = 2.0,
+    client_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Fetch a one-shot L2 snapshot from TWS."""
+    pair = _ticker_to_pair(ticker_symbol)
+    if not pair:
+        return None
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection(client_id=client_id)
+        if not connected or ib is None:
+            return None
+
+        contract = None
+        try:
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
+            ticker = ib.reqMktDepth(contract, numRows=max(int(depth), 1), isSmartDepth=False)
+
+            deadline = time.monotonic() + max(float(wait_seconds), 0.1)
+            snapshot = None
+            while time.monotonic() < deadline:
+                if hasattr(ib, 'waitOnUpdate'):
+                    ib.waitOnUpdate(timeout=0.2)
+                elif hasattr(ib, 'sleep'):
+                    ib.sleep(0.2)
+                else:
+                    time.sleep(0.2)
+
+                snapshot = _build_market_depth_snapshot(pair, ticker, max(int(depth), 1))
+                if snapshot is not None and (snapshot['bids'] or snapshot['asks']):
+                    break
+
+            return snapshot
+        except Exception as e:
+            print(f"    Warning: failed to fetch L2 depth for {pair}: {e}")
+            return None
+        finally:
+            if contract is not None:
+                try:
+                    ib.cancelMktDepth(contract, isSmartDepth=False)
+                except Exception:
+                    pass
+
+
+def stream_market_depth(
+    pairs: list[str],
+    on_snapshot: Callable[[dict], None],
+    stop_event: threading.Event,
+    depth: int = 5,
+    interval_seconds: float = 1.0,
+    client_id: Optional[int] = None,
+) -> None:
+    """Maintain IBKR depth subscriptions and emit periodic L2 snapshots."""
+    if not pairs:
+        return
+
+    ib, connected = _get_connection(client_id=client_id)
+    if not connected or ib is None:
+        return
+
+    subscriptions: list[tuple[object, object, str]] = []
+    depth_rows = max(int(depth), 1)
+    interval = max(float(interval_seconds), 0.1)
+
+    try:
+        for pair in pairs:
+            try:
+                contract = _make_contract(pair)
+                ib.qualifyContracts(contract)
+                ticker = ib.reqMktDepth(contract, numRows=depth_rows, isSmartDepth=False)
+                ib.sleep(0.1)
+                subscriptions.append((contract, ticker, pair))
+            except Exception:
+                continue
+
+        if not subscriptions:
+            print("    Warning: no market depth subscriptions succeeded")
+            return
+
+        next_emit = time.monotonic()
+        while not stop_event.is_set():
+            try:
+                if hasattr(ib, 'waitOnUpdate'):
+                    ib.waitOnUpdate(timeout=min(interval, 1.0))
+                elif hasattr(ib, 'sleep'):
+                    ib.sleep(min(interval, 1.0))
+                else:
+                    time.sleep(min(interval, 1.0))
+            except Exception:
+                time.sleep(min(interval, 1.0))
+
+            if time.monotonic() < next_emit:
+                continue
+            next_emit = time.monotonic() + interval
+
+            for _, ticker, pair in subscriptions:
+                snapshot = _build_market_depth_snapshot(pair, ticker, depth_rows)
+                if snapshot is None:
+                    continue
+                try:
+                    on_snapshot(snapshot)
+                except Exception:
+                    continue
+    finally:
+        for contract, _, _ in subscriptions:
+            try:
+                ib.cancelMktDepth(contract, isSmartDepth=False)
+            except Exception:
+                continue
+        disconnect()
+
+
 def stream_live_quotes(
     pairs: list[str],
     on_price: Callable[[str, float], None],
@@ -443,18 +647,34 @@ def stream_live_quotes(
     if not connected or ib is None:
         return
 
+    # Cancel any stale subscriptions left over from a previous session
+    for existing_ticker in list(ib.tickers()):
+        try:
+            ib.cancelMktData(existing_ticker.contract)
+        except Exception:
+            pass
+
     subscriptions: list[tuple[object, object, str]] = []
     last_prices: dict[str, float] = {}
+    max_ticker_errors: set[str] = set()
 
     try:
         for pair in pairs:
+            if pair in max_ticker_errors:
+                continue
             try:
                 contract = _make_contract(pair)
                 ib.qualifyContracts(contract)
                 ticker = ib.reqMktData(contract, '', False, False)
+                # Give IB a moment to reject with Error 101 before continuing
+                ib.sleep(0.1)
                 subscriptions.append((contract, ticker, pair))
             except Exception:
                 continue
+
+        if not subscriptions:
+            print("    Warning: no quote subscriptions succeeded (ticker limit reached)")
+            return
 
         while not stop_event.is_set():
             try:
@@ -614,4 +834,84 @@ def submit_fx_market_order(
             }
         except Exception as e:
             print(f"    Warning: failed to submit FX order for {pair}: {e}")
+            return None
+
+
+def submit_fx_market_bracket_order(
+    pair: str,
+    direction: str,
+    quantity: int,
+    take_profit_price: float,
+    stop_loss_price: float,
+    order_ref: str = '',
+) -> Optional[dict]:
+    """Submit a market-entry FX bracket order with attached TP/SL protection."""
+
+    if quantity <= 0:
+        return None
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None
+
+        try:
+            from ib_async import LimitOrder, MarketOrder, StopOrder
+
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
+
+            action = 'BUY' if direction == 'LONG' else 'SELL'
+            reverse_action = 'SELL' if action == 'BUY' else 'BUY'
+
+            parent_order_id = ib.client.getReqId()
+            parent = MarketOrder(
+                action,
+                int(quantity),
+                orderId=parent_order_id,
+                orderRef=order_ref,
+                transmit=False,
+            )
+            take_profit = LimitOrder(
+                reverse_action,
+                int(quantity),
+                float(take_profit_price),
+                orderId=ib.client.getReqId(),
+                parentId=parent_order_id,
+                orderRef=f'{order_ref}:tp' if order_ref else '',
+                transmit=False,
+            )
+            stop_loss = StopOrder(
+                reverse_action,
+                int(quantity),
+                float(stop_loss_price),
+                orderId=ib.client.getReqId(),
+                parentId=parent_order_id,
+                orderRef=f'{order_ref}:sl' if order_ref else '',
+                transmit=True,
+            )
+
+            parent_trade = ib.placeOrder(contract, parent)
+            tp_trade = ib.placeOrder(contract, take_profit)
+            sl_trade = ib.placeOrder(contract, stop_loss)
+            if hasattr(ib, 'sleep'):
+                ib.sleep(1)
+
+            parent_live_order = getattr(parent_trade, 'order', None)
+            parent_status = getattr(parent_trade, 'orderStatus', None)
+            tp_live_order = getattr(tp_trade, 'order', None)
+            sl_live_order = getattr(sl_trade, 'order', None)
+
+            return {
+                'pair': pair,
+                'direction': direction,
+                'quantity': int(quantity),
+                'order_id': getattr(parent_live_order, 'orderId', None),
+                'status': getattr(parent_status, 'status', None),
+                'avg_fill_price': getattr(parent_status, 'avgFillPrice', None),
+                'take_profit_order_id': getattr(tp_live_order, 'orderId', None),
+                'stop_loss_order_id': getattr(sl_live_order, 'orderId', None),
+            }
+        except Exception as e:
+            print(f"    Warning: failed to submit FX bracket order for {pair}: {e}")
             return None

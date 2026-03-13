@@ -2,14 +2,18 @@
 """FX support/resistance trading tool - CLI entry point."""
 
 import argparse
+from dataclasses import replace
 import os
 import sys
+import time
 
 from fx_sr import ibkr
 from fx_sr.backtest import (
+    apply_correlation_filter,
     calculate_compounding_pnl,
     format_compounding_results,
     format_results,
+    _params_signature,
     run_all_backtests_parallel,
 )
 from fx_sr.config import (
@@ -34,10 +38,12 @@ from fx_sr.live import (
     scan_opportunities,
     show_zones,
 )
+from fx_sr.profiles import PROFILES, DEFAULT_PROFILE, get_profile
 from fx_sr.strategy import (
     DEFAULT_BLOCKED_DAYS,
     DEFAULT_BLOCKED_HOURS,
     StrategyParams,
+    params_from_profile,
 )
 
 
@@ -81,68 +87,335 @@ def _format_param_summary(params: StrategyParams) -> str:
 
 
 def _format_preset_label(preset_name: str) -> str:
-    return f"{preset_name} ({STRATEGY_PRESET_DESCRIPTIONS[preset_name]})"
+    desc = PROFILES.get(preset_name, {}).get('description', STRATEGY_PRESET_DESCRIPTIONS.get(preset_name, ''))
+    return f"{preset_name} ({desc})"
+
+
+def _portfolio_summary(
+    results: dict[str, object],
+    params: StrategyParams,
+) -> dict[str, float | int]:
+    """Return aggregate stats using portfolio-filtered trade counts."""
+    raw_total_trades = 0
+    raw_total_wins = 0
+    raw_total_pnl = 0.0
+    all_trades = []
+
+    for pair, result in results.items():
+        raw_total_trades += result.total_trades
+        raw_total_wins += result.winning_trades
+        raw_total_pnl += result.total_pnl_pips
+        for trade in result.trades:
+            all_trades.append((pair, trade))
+
+    all_trades.sort(key=lambda item: item[1].entry_time)
+    filtered_trades = apply_correlation_filter(all_trades, params=params)
+    total_trades = len(filtered_trades)
+    total_wins = sum(1 for _, trade in filtered_trades if trade.pnl_pips > 0)
+    total_pnl = sum(trade.pnl_pips for _, trade in filtered_trades)
+    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
+    raw_win_rate = (raw_total_wins / raw_total_trades * 100) if raw_total_trades > 0 else 0.0
+    return {
+        'total_trades': total_trades,
+        'total_wins': total_wins,
+        'total_pnl': total_pnl,
+        'win_rate': win_rate,
+        'raw_total_trades': raw_total_trades,
+        'raw_total_wins': raw_total_wins,
+        'raw_total_pnl': raw_total_pnl,
+        'raw_win_rate': raw_win_rate,
+    }
+
+
+def _build_target_trade_profile_attempts(base_params: StrategyParams) -> list[tuple[str, StrategyParams]]:
+    """Build progressively relaxed parameter sets to reach a trade-count target."""
+    attempts: list[tuple[str, StrategyParams]] = []
+    seen: set[str] = set()
+
+    def add(label: str, params: StrategyParams):
+        sig = _params_signature(params)
+        if sig in seen:
+            return
+        seen.add(sig)
+        attempts.append((label, params))
+
+    current = replace(base_params)
+    add('baseline', current)
+
+    # Aggressively open up entries first, then filters and exposure caps.
+    if current.min_entry_candle_body_pct > 0.0:
+        current = replace(current, min_entry_candle_body_pct=0.0)
+        add('min_entry_body=0.0', current)
+
+    if current.min_zone_touches > 2:
+        current = replace(current, min_zone_touches=2)
+        add('min_zone_touches=2', current)
+
+    if current.momentum_threshold > 0.0:
+        current = replace(current, momentum_threshold=0.0)
+        add('momentum_filter=off', current)
+
+    if current.momentum_lookback > 1:
+        current = replace(current, momentum_lookback=1)
+        add('momentum_lookback=1', current)
+
+    if current.zone_penetration_pct > 0.25:
+        current = replace(current, zone_penetration_pct=0.25)
+        add('zone_penetration=25%', current)
+
+    if current.zone_penetration_pct > 0.10:
+        current = replace(current, zone_penetration_pct=0.10)
+        add('zone_penetration=10%', current)
+
+    if current.cooldown_bars > 0:
+        current = replace(current, cooldown_bars=0)
+        add('cooldown=0', current)
+
+    for corr in range(max(1, current.max_correlated_trades), 12 + 1):
+        if corr == current.max_correlated_trades:
+            continue
+        current = replace(current, max_correlated_trades=corr)
+        add(f'max_correlated_trades={corr}', current)
+
+    if current.use_time_filters:
+        current = replace(current, use_time_filters=False)
+        add('time_filters=off', current)
+
+    if current.use_pair_direction_filter:
+        current = replace(current, use_pair_direction_filter=False)
+        add('pair_direction_filter=off', current)
+
+    if current.min_zone_touches > 1:
+        current = replace(current, min_zone_touches=1)
+        add('min_zone_touches=1', current)
+
+    if current.max_correlated_trades < len(PAIRS):
+        current = replace(current, max_correlated_trades=len(PAIRS))
+        add(f'max_correlated_trades={len(PAIRS)}', current)
+
+    return attempts
+
+
+def _run_backtests_until_target(
+    params: StrategyParams,
+    target_trades: int,
+    args,
+    pairs: dict,
+    zone_days: int,
+    active_client_id: int,
+    hourly_days: int,
+) -> tuple[
+    dict[str, object],
+    StrategyParams,
+    list[dict[str, float | int | str]],
+    dict[str, float | int],
+    str,
+]:
+    """Run successive relaxations until target trades are reached."""
+    attempts = _build_target_trade_profile_attempts(params)
+    print(f'\n  Target trade mode enabled: need >= {target_trades} total trades')
+    print(
+        f'  Profit floor: >= {args.target_profit_floor:.2f}x baseline, '
+        f'Win-rate floor: >= {args.target_win_rate_floor:.2f}x baseline'
+    )
+
+    baseline_summary = None
+    best_any: tuple[str, dict[str, object], StrategyParams, dict[str, float | int]] | None = None
+    best_above_target: tuple[str, dict[str, object], StrategyParams, dict[str, float | int]] | None = None
+    best_below_target: tuple[str, dict[str, object], StrategyParams, dict[str, float | int]] | None = None
+    attempt_logs: list[dict[str, float | int | str]] = []
+
+    for idx, (label, attempt_params) in enumerate(attempts, 1):
+        print(
+            f'\n  Attempt {idx}/{len(attempts)}: {label}'
+            f' | corr={attempt_params.max_correlated_trades}, body={attempt_params.min_entry_candle_body_pct}, '
+            f'momentum={attempt_params.momentum_lookback}, time_filters={attempt_params.use_time_filters}, '
+            f'pair_dir_filter={attempt_params.use_pair_direction_filter}'
+        )
+        print(f'    Active params: {_format_param_summary(attempt_params)}')
+
+        t0 = time.time()
+        results = run_all_backtests_parallel(
+            params=attempt_params,
+            hourly_days=hourly_days,
+            zone_history_days=zone_days,
+            pairs=pairs,
+            force_refresh=args.no_cache,
+            base_client_id=active_client_id,
+        )
+        elapsed = time.time() - t0
+
+        if not results:
+            print(f'    Completed in {elapsed:.1f}s with no results.')
+            continue
+
+        summary = _portfolio_summary(results, attempt_params)
+        summary_line = (
+            f"portfolio_trades={summary['total_trades']} "
+            f"wr={summary['win_rate']:.1f}% "
+            f"pnl={summary['total_pnl']:.1f} "
+            f"(raw={summary['raw_total_trades']} trades, {summary['raw_total_pnl']:.1f} pips)"
+        )
+        attempt_logs.append({
+            'label': label,
+            'trades': summary['total_trades'],
+            'win_rate': summary['win_rate'],
+            'total_pnl': summary['total_pnl'],
+            'raw_trades': summary['raw_total_trades'],
+            'raw_total_pnl': summary['raw_total_pnl'],
+            'elapsed_s': elapsed,
+        })
+        print(f'    Completed in {elapsed:.1f}s | {summary_line}')
+
+        if idx == 1:
+            baseline_summary = summary
+
+        if baseline_summary is None:
+            baseline_summary = summary
+
+        min_pnl = baseline_summary['total_pnl'] * args.target_profit_floor
+        min_wr = baseline_summary['win_rate'] * args.target_win_rate_floor
+
+        qualifies = (
+            summary['total_trades'] >= target_trades
+            and summary['total_pnl'] >= min_pnl
+            and summary['win_rate'] >= min_wr
+        )
+
+        best_any_candidate = (
+            best_any is None
+            or summary['total_trades'] > best_any[3]['total_trades']
+            or (
+                summary['total_trades'] == best_any[3]['total_trades']
+                and summary['total_pnl'] > best_any[3]['total_pnl']
+            )
+        )
+        if best_any_candidate:
+            best_any = (label, results, attempt_params, summary)
+
+        if qualifies:
+            best_above_candidate = (
+                best_above_target is None
+                or summary['total_trades'] < best_above_target[3]['total_trades']
+                or (
+                    summary['total_trades'] == best_above_target[3]['total_trades']
+                    and summary['total_pnl'] > best_above_target[3]['total_pnl']
+                )
+            )
+            if best_above_candidate:
+                best_above_target = (label, results, attempt_params, summary)
+        elif (
+            summary['total_pnl'] >= min_pnl
+            and summary['win_rate'] >= min_wr
+        ):
+            best_below_candidate = (
+                best_below_target is None
+                or summary['total_trades'] > best_below_target[3]['total_trades']
+                or (
+                    summary['total_trades'] == best_below_target[3]['total_trades']
+                    and summary['total_pnl'] > best_below_target[3]['total_pnl']
+                )
+            )
+            if best_below_candidate:
+                best_below_target = (label, results, attempt_params, summary)
+
+    if best_above_target is not None:
+        print(f'\n  Closest profitable profile meeting target: "{best_above_target[0]}".')
+        return (
+            best_above_target[1],
+            best_above_target[2],
+            attempt_logs,
+            best_above_target[3],
+            best_above_target[0],
+        )
+
+    if best_below_target is not None:
+        print(
+            '\n  Unable to meet target while holding the profitability floor.'
+            f' Using highest-frequency profitable attempt: {best_below_target[0]}'
+        )
+        return (
+            best_below_target[1],
+            best_below_target[2],
+            attempt_logs,
+            best_below_target[3],
+            best_below_target[0],
+        )
+
+    if best_any is not None:
+        print(
+            '\n  No attempt preserved the profitability floor.'
+            f' Using best available attempt: {best_any[0]}'
+        )
+        return best_any[1], best_any[2], attempt_logs, best_any[3], best_any[0]
+
+    return (
+        {},
+        params,
+        attempt_logs,
+        {
+            'total_trades': 0,
+            'total_wins': 0,
+            'total_pnl': 0.0,
+            'win_rate': 0.0,
+            'raw_total_trades': 0,
+            'raw_total_wins': 0,
+            'raw_total_pnl': 0.0,
+            'raw_win_rate': 0.0,
+        },
+        'baseline',
+    )
 
 
 def _build_strategy_params(args) -> StrategyParams:
-    preset = STRATEGY_PRESETS[args.preset]
-    blocked_hours = (
-        frozenset(args.blocked_hours)
-        if getattr(args, 'blocked_hours', None) is not None
-        else DEFAULT_BLOCKED_HOURS
-    )
-    blocked_days = (
-        frozenset(args.blocked_days)
-        if getattr(args, 'blocked_days', None) is not None
-        else DEFAULT_BLOCKED_DAYS
-    )
+    # Use --profile if provided, otherwise fall back to --preset
+    profile_name = getattr(args, 'profile', None) or args.preset
+    profile = get_profile(profile_name)
 
-    return StrategyParams(
-        rr_ratio=args.rr_ratio if args.rr_ratio is not None else preset['rr_ratio'],
-        sl_buffer_pct=args.sl_buffer if args.sl_buffer is not None else preset['sl_buffer_pct'],
-        early_exit_r=args.early_exit if args.early_exit is not None else preset['early_exit_r'],
-        cooldown_bars=args.cooldown_bars if args.cooldown_bars is not None else preset['cooldown_bars'],
-        min_entry_candle_body_pct=(
-            args.min_entry_body
-            if args.min_entry_body is not None
-            else preset['min_entry_candle_body_pct']
-        ),
-        momentum_lookback=(
-            args.momentum_lookback
-            if args.momentum_lookback is not None
-            else preset['momentum_lookback']
-        ),
-        max_correlated_trades=(
-            args.max_correlated_trades
-            if args.max_correlated_trades is not None
-            else preset['max_correlated_trades']
-        ),
-        spread_pips=(
-            args.spread_pips
-            if args.spread_pips is not None
-            else DEFAULT_EXECUTION_SPREAD_PIPS
-        ),
-        stop_slippage_pips=(
-            args.stop_slippage_pips
-            if args.stop_slippage_pips is not None
-            else DEFAULT_STOP_SLIPPAGE_PIPS
-        ),
-        zone_penetration_pct=preset.get('zone_penetration_pct', 0.50),
-        momentum_threshold=preset.get('momentum_threshold', 0.7),
-        friday_tp_pct=preset.get('friday_tp_pct', 0.70),
-        use_time_filters=not args.no_time_filters,
-        use_pair_direction_filter=not args.no_pair_direction_filter,
-        blocked_hours=blocked_hours,
-        blocked_days=blocked_days,
-    )
+    # CLI overrides take precedence over profile values
+    overrides = {}
+    if args.rr_ratio is not None:
+        overrides['rr_ratio'] = args.rr_ratio
+    if args.sl_buffer is not None:
+        overrides['sl_buffer_pct'] = args.sl_buffer
+    if args.early_exit is not None:
+        overrides['early_exit_r'] = args.early_exit
+    if args.cooldown_bars is not None:
+        overrides['cooldown_bars'] = args.cooldown_bars
+    if args.min_entry_body is not None:
+        overrides['min_entry_candle_body_pct'] = args.min_entry_body
+    if args.momentum_lookback is not None:
+        overrides['momentum_lookback'] = args.momentum_lookback
+    if args.max_correlated_trades is not None:
+        overrides['max_correlated_trades'] = args.max_correlated_trades
+    if args.spread_pips is not None:
+        overrides['spread_pips'] = args.spread_pips
+    if args.stop_slippage_pips is not None:
+        overrides['stop_slippage_pips'] = args.stop_slippage_pips
+    if args.no_time_filters:
+        overrides['use_time_filters'] = False
+    if args.no_pair_direction_filter:
+        overrides['use_pair_direction_filter'] = False
+    if getattr(args, 'blocked_hours', None) is not None:
+        overrides['blocked_hours'] = args.blocked_hours
+    if getattr(args, 'blocked_days', None) is not None:
+        overrides['blocked_days'] = args.blocked_days
+
+    return params_from_profile(profile, **overrides)
 
 
 def _add_strategy_args(parser):
     parser.add_argument(
+        '--profile',
+        choices=tuple(PROFILES.keys()),
+        default=None,
+        help=f'Strategy profile from profiles.py (default: {DEFAULT_PROFILE}). Overrides --preset.',
+    )
+    parser.add_argument(
         '--preset',
         choices=tuple(STRATEGY_PRESETS.keys()),
         default=DEFAULT_STRATEGY_PRESET,
-        help=f'Named strategy preset (default: {DEFAULT_STRATEGY_PRESET})',
+        help=f'Named strategy preset (default: {DEFAULT_STRATEGY_PRESET}). Use --profile instead.',
     )
     parser.add_argument(
         '--rr-ratio',
@@ -269,7 +542,7 @@ def _add_risk_sizing_args(
             '--account-currency',
             type=str,
             default=None,
-            help='Account currency for live sizing (default: use IBKR NetLiquidation currency or GBP)',
+            help='Account currency for live sizing (default: --account-currency, IBKR_ACCOUNT_CURRENCY, or IBKR NetLiquidation currency when not BASE)',
         )
 
 
@@ -277,7 +550,12 @@ def _resolve_live_sizing(args) -> tuple[float | None, str | None]:
     """Resolve balance/currency used for live signal sizing."""
 
     balance = args.balance
-    currency = args.account_currency.upper() if getattr(args, 'account_currency', None) else None
+    env_currency = os.getenv('IBKR_ACCOUNT_CURRENCY')
+    currency = (
+        args.account_currency.upper()
+        if getattr(args, 'account_currency', None)
+        else (env_currency.upper() if env_currency else None)
+    )
 
     if balance is None:
         balance, fetched_currency = ibkr.fetch_account_net_liquidation()
@@ -291,29 +569,86 @@ def cmd_backtest(args):
     """Run backtesting mode."""
 
     active_client_id = _configure_ibkr(args)
+    profile_name = getattr(args, 'profile', None) or args.preset
+    profile = get_profile(profile_name)
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
-    zone_days = args.zone_history
+    # Use profile defaults for days/zone-history if not overridden on CLI
+    zone_days = args.zone_history if args.zone_history != DEFAULT_ZONE_HISTORY_DAYS else profile.get('zone_history_days', args.zone_history)
+    if args.days == 30:  # argparse default — use profile value
+        args.days = profile.get('hourly_days', args.days)
 
+    profile_name = getattr(args, 'profile', None) or args.preset
     print(f"\n  IBKR client ID: {active_client_id}")
-    print(f"  Strategy preset: {_format_preset_label(args.preset)}")
+    print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
     print(
         f"  Backtest: {len(pairs)} pair(s), {args.days} days hourly, "
         f"{zone_days} days daily zones"
     )
 
-    import time
     t0 = time.time()
 
-    results = run_all_backtests_parallel(
-        params=params,
-        hourly_days=args.days,
-        zone_history_days=zone_days,
-        pairs=pairs,
-        force_refresh=args.no_cache,
-        base_client_id=active_client_id,
-    )
+    if args.target_trades is not None:
+        if args.target_trades < 0:
+            print(f'  target_trades must be >= 0 (got {args.target_trades})')
+            sys.exit(1)
+        if args.target_profit_floor <= 0:
+            print(f'  target_profit_floor must be > 0 (got {args.target_profit_floor})')
+            sys.exit(1)
+        if args.target_win_rate_floor <= 0:
+            print(f'  target_win_rate_floor must be > 0 (got {args.target_win_rate_floor})')
+            sys.exit(1)
+
+        results, params, attempt_logs, summary, selected_label = _run_backtests_until_target(
+            params=params,
+            target_trades=args.target_trades,
+            args=args,
+            pairs=pairs,
+            zone_days=zone_days,
+            active_client_id=active_client_id,
+            hourly_days=args.days,
+        )
+    else:
+        results = run_all_backtests_parallel(
+            params=params,
+            hourly_days=args.days,
+            zone_history_days=zone_days,
+            pairs=pairs,
+            force_refresh=args.no_cache,
+            base_client_id=active_client_id,
+        )
+        attempt_logs: list[dict[str, float | int | str]] = []
+        summary = _portfolio_summary(results, params) if results else {
+            'total_trades': 0,
+            'total_wins': 0,
+            'total_pnl': 0.0,
+            'win_rate': 0.0,
+            'raw_total_trades': 0,
+            'raw_total_wins': 0,
+            'raw_total_pnl': 0.0,
+            'raw_win_rate': 0.0,
+        }
+        selected_label = 'baseline'
+        attempt_logs.append({
+            'label': selected_label,
+            'trades': summary['total_trades'],
+            'win_rate': summary['win_rate'],
+            'total_pnl': summary['total_pnl'],
+            'raw_trades': summary['raw_total_trades'],
+            'raw_total_pnl': summary['raw_total_pnl'],
+            'elapsed_s': time.time() - t0,
+        })
+
+    if results:
+        print(
+            f"\n  Selected profile: {selected_label} "
+            f"({summary.get('total_trades', 0)} portfolio trades, "
+            f"{summary.get('win_rate', 0.0):.1f}% WR, "
+            f"{summary.get('total_pnl', 0.0):.1f} pips; "
+            f"raw={summary.get('raw_total_trades', 0)} trades, "
+            f"{summary.get('raw_total_pnl', 0.0):.1f} pips)"
+        )
 
     elapsed = time.time() - t0
 
@@ -322,7 +657,7 @@ def cmd_backtest(args):
         sys.exit(1)
 
     print(f'\n  Completed in {elapsed:.1f}s')
-    print(f'\n{format_results(results)}')
+    print(f'\n{format_results(results, params=params)}')
 
     if args.balance:
         risk_pct = args.risk_pct / 100.0
@@ -395,6 +730,66 @@ def cmd_download(args):
             )
 
 
+def cmd_l2(args):
+    """Capture or inspect L2 market-depth snapshots."""
+
+    from fx_sr import db as db_module
+    from fx_sr.l2 import (
+        capture_l2_once,
+        capture_l2_stream,
+        format_l2_capture_summary,
+        format_l2_library_summary,
+        format_l2_snapshot,
+    )
+
+    active_client_id = _configure_ibkr(args)
+    pairs = _resolve_pairs(args.pair)
+
+    print(f"\n  IBKR client ID: {active_client_id}")
+
+    if args.summary:
+        rows = []
+        for pair_info in pairs.values():
+            summary = db_module.get_l2_summary(ticker=pair_info['ticker'])
+            if not summary.empty:
+                rows.append(summary)
+        if rows:
+            import pandas as pd
+
+            print(format_l2_library_summary(pd.concat(rows, ignore_index=True)))
+        else:
+            print("\n  No cached L2 snapshots found.\n")
+        return
+
+    if args.once:
+        for pair_id, pair_info in pairs.items():
+            snapshot = capture_l2_once(
+                pair_id,
+                pair_info,
+                depth=args.depth,
+                client_id=active_client_id,
+            )
+            if snapshot is None:
+                print(f"  No L2 depth returned for {pair_id}.")
+                continue
+            print(format_l2_snapshot(snapshot))
+        return
+
+    print(
+        f"  Capturing L2 depth for {len(pairs)} pair(s) at {args.interval:.2f}s intervals, "
+        f"depth {args.depth}, for {args.seconds:.1f}s"
+    )
+    stats = capture_l2_stream(
+        pairs,
+        depth=args.depth,
+        interval_seconds=args.interval,
+        duration_seconds=args.seconds,
+        max_snapshots=args.snapshots,
+        client_id=active_client_id,
+    )
+    print(format_l2_capture_summary(stats))
+
+
 def cmd_viz(args):
     """Export backtest data and open interactive chart via local HTTP server."""
 
@@ -449,8 +844,9 @@ def cmd_live(args):
             print(show_zones(pair_id, pair_info, zone_history_days=zone_days))
         return
 
+    profile_name = getattr(args, 'profile', None) or args.preset
     print(f"\n  IBKR client ID: {active_client_id}")
-    print(f"  Strategy preset: {_format_preset_label(args.preset)}")
+    print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
     live_balance, live_currency = _resolve_live_sizing(args)
     if live_balance is not None and live_currency:
@@ -461,10 +857,18 @@ def cmd_live(args):
     elif live_balance is not None:
         print(
             "  Live sizing: balance resolved but account currency is unknown. "
-            "Pass --account-currency to enable sizing/execution."
+            "Pass --account-currency or set IBKR_ACCOUNT_CURRENCY to enable sizing/execution."
         )
     else:
         print("  Live sizing: unavailable (could not resolve balance)")
+
+    can_execute = live_balance is not None and live_currency is not None
+    if args.paper_trade and not can_execute:
+        print(
+            "\n  ERROR: --paper-trade requires both balance and account currency.\n"
+            "  Pass --balance and --account-currency, or ensure IBKR is connected."
+        )
+        sys.exit(1)
 
     if args.once:
         print(f'  Scanning {len(pairs)} pairs for opportunities...')
@@ -475,6 +879,9 @@ def cmd_live(args):
             tracked = sync_positions(params, zone_days)
         pending_pairs = ibkr.fetch_open_order_pairs()
         market_prices = {}
+        hourly_data_cache = {}
+        daily_data_cache = {}
+        zone_cache = {}
         signals = scan_opportunities(
             pairs,
             params,
@@ -482,6 +889,9 @@ def cmd_live(args):
             tracked_positions=tracked,
             blocked_pairs=pending_pairs,
             price_cache=market_prices,
+            daily_data_cache=daily_data_cache,
+            zone_cache=zone_cache,
+            hourly_data_cache=hourly_data_cache,
         )
         size_plans = build_live_size_plans(
             signals,
@@ -489,6 +899,7 @@ def cmd_live(args):
             risk_pct=args.risk_pct / 100.0,
             account_currency=live_currency,
             price_cache=market_prices,
+            hourly_data_cache=hourly_data_cache,
         )
         print(format_signals_with_sizes(signals, size_plans))
         if args.paper_trade:
@@ -500,6 +911,13 @@ def cmd_live(args):
                 execute_orders=True,
                 existing_pairs={info['pair'] for info in tracked.values()},
                 pending_pairs=pending_pairs,
+                params=params,
+                tracked_positions=tracked,
+                balance=live_balance,
+                risk_pct=args.risk_pct / 100.0,
+                account_currency=live_currency,
+                price_cache=market_prices,
+                hourly_data_cache=hourly_data_cache,
             )
             print(format_execution_results(execution_results))
         return
@@ -516,7 +934,7 @@ def cmd_live(args):
         risk_pct=args.risk_pct / 100.0,
         account_currency=live_currency,
         execute_orders=args.paper_trade,
-        strategy_label=_format_preset_label(args.preset),
+        strategy_label=_format_preset_label(profile_name),
         client_id=active_client_id,
         port=args.port,
         open_browser=not args.no_browser,
@@ -524,30 +942,30 @@ def cmd_live(args):
 
 
 def main():
-    preset_lines = '\n'.join(
-        (
-            f"  {name:<10} {STRATEGY_PRESET_DESCRIPTIONS[name]} "
-            f"(rr={STRATEGY_PRESETS[name]['rr_ratio']}, sl={STRATEGY_PRESETS[name]['sl_buffer_pct']}, "
-            f"early={STRATEGY_PRESETS[name]['early_exit_r']}, corr={STRATEGY_PRESETS[name]['max_correlated_trades']})"
-        )
-        for name in STRATEGY_PRESETS
+    profile_lines = '\n'.join(
+        f"  {name:<12} {p['description']} "
+        f"(rr={p['rr_ratio']}, sl={p['sl_buffer_pct']}, "
+        f"early={p['early_exit_r']}, corr={p['max_correlated_trades']})"
+        for name, p in PROFILES.items()
     )
     epilog = (
         'Examples:\n'
         '  python run.py download\n'
         '  python run.py download --days 365 --pair EURUSD\n'
         '  python run.py backtest --days 365 --balance 10000 --risk-pct 5\n'
-        '  python run.py backtest --preset source\n'
-        '  python run.py backtest --preset aggressive\n'
-        '  python run.py backtest --preset source --rr-ratio 1.2\n'
-        '  python run.py live --preset aggressive --once\n'
+        '  python run.py backtest --profile source\n'
+        '  python run.py backtest --profile aggressive\n'
+        '  python run.py backtest --profile optimized --rr-ratio 1.5\n'
+        '  python run.py l2 --pair EURUSD --once\n'
+        '  python run.py l2 --pair EURUSD --seconds 300 --interval 1\n'
+        '  python run.py live --profile aggressive --once\n'
         '  python run.py live --port 8765\n\n'
-        'Named presets:\n'
-        f'{preset_lines}'
+        'Profiles (edit fx_sr/profiles.py to add/modify):\n'
+        f'{profile_lines}'
     )
 
     parser = argparse.ArgumentParser(
-        description='FX S/R zone trading tool (daily zones + hourly execution)',
+        description='FX S/R zone trading tool (daily zones + hourly execution + L2 capture)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog,
     )
@@ -555,7 +973,7 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='Mode')
 
     dl = subparsers.add_parser('download', help='Download and cache price data from IBKR')
-    dl.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all 10')
+    dl.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all configured pairs')
     dl.add_argument(
         '--days',
         type=int,
@@ -565,7 +983,7 @@ def main():
     _add_ibkr_args(dl)
 
     bt = subparsers.add_parser('backtest', help='Backtest using daily zones + hourly execution')
-    bt.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all 10')
+    bt.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all configured pairs')
     bt.add_argument(
         '--days',
         type=int,
@@ -585,6 +1003,24 @@ def main():
         '--no-cache',
         action='store_true',
         help='Bypass SQLite cache and refresh directly from IBKR',
+    )
+    bt.add_argument(
+        '--target-trades',
+        type=int,
+        default=None,
+        help='Retry with progressively relaxed filters until at least this many total portfolio trades are reached',
+    )
+    bt.add_argument(
+        '--target-profit-floor',
+        type=float,
+        default=1.0,
+        help='Minimum baseline profitability multiplier for target mode (default: 1.0)',
+    )
+    bt.add_argument(
+        '--target-win-rate-floor',
+        type=float,
+        default=1.0,
+        help='Minimum baseline win-rate multiplier for target mode (default: 1.0)',
     )
     bt.add_argument('-v', '--verbose', action='store_true', help='Show individual trade details')
 
@@ -629,6 +1065,41 @@ def main():
         help='Start the live dashboard server without opening a browser',
     )
 
+    l2p = subparsers.add_parser('l2', help='Capture and inspect IBKR L2 market depth')
+    l2p.add_argument(
+        '--pair',
+        type=str,
+        required=True,
+        help='Specific pair to capture (for example EURUSD)',
+    )
+    l2p.add_argument(
+        '--depth',
+        type=int,
+        default=5,
+        help='Depth levels per side to request from IBKR (default: 5)',
+    )
+    l2p.add_argument(
+        '--interval',
+        type=float,
+        default=1.0,
+        help='Seconds between saved snapshots during streaming capture (default: 1.0)',
+    )
+    l2p.add_argument(
+        '--seconds',
+        type=float,
+        default=60.0,
+        help='Streaming capture duration in seconds (default: 60)',
+    )
+    l2p.add_argument(
+        '--snapshots',
+        type=int,
+        default=None,
+        help='Stop after saving this many snapshots (default: unlimited within --seconds)',
+    )
+    l2p.add_argument('--once', action='store_true', help='Fetch and save one depth snapshot then exit')
+    l2p.add_argument('--summary', action='store_true', help='Show cached L2 summary for the requested pair')
+    _add_ibkr_args(l2p)
+
     vz = subparsers.add_parser('viz', help='Export backtest data and open interactive chart')
     vz.add_argument(
         '--days',
@@ -654,6 +1125,8 @@ def main():
         cmd_download(args)
     elif args.command == 'backtest':
         cmd_backtest(args)
+    elif args.command == 'l2':
+        cmd_l2(args)
     elif args.command == 'live':
         cmd_live(args)
     elif args.command == 'viz':

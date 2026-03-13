@@ -35,6 +35,8 @@ Fresh downloads and `--no-cache` refreshes require TWS or IB Gateway to be runni
 ```bash
 python run.py download
 python run.py download --pair EURUSD --days 365
+python run.py l2 --pair EURUSD --once
+python run.py l2 --pair EURUSD --seconds 300 --interval 1
 ```
 
 ### 2. Backtest
@@ -82,7 +84,17 @@ python run.py live --pair EURUSD --interval 30
 python run.py live --no-positions
 ```
 
-### 4. Interactive chart
+### 4. L2 capture
+
+```bash
+python run.py l2 --pair EURUSD --once
+python run.py l2 --pair EURUSD --seconds 300 --interval 1
+python run.py l2 --pair EURUSD --summary
+```
+
+This captures IBKR market-depth snapshots into SQLite. Each snapshot stores top-of-book summary plus individual bid/ask levels.
+
+### 5. Interactive chart
 
 ```bash
 python run.py viz
@@ -105,8 +117,9 @@ fx_sr/
   levels.py             S/R zone detection (pivots, clustering, touch counting)
   backtest.py           Walk-forward backtesting engine
   live.py               Real-time opportunity scanner
+  l2.py                 L2 market-depth capture and formatting helpers
   data.py               Data layer: SQLite cache -> IBKR
-  db.py                 SQLite OHLC cache (fx_data.db)
+  db.py                 SQLite OHLC + L2 cache (fx_data.db)
   ibkr.py               Interactive Brokers TWS connection (ib_async)
   positions.py          IBKR position tracking and exit monitoring
   param_sweep.py        Parameter optimization sweeps
@@ -124,6 +137,8 @@ IBKR TWS / Gateway
 Daily OHLC --> Zone detection (pivots + clustering)
     +
 Hourly OHLC --> Signal generation (reversal candles in zones)
+    +
+L2 depth snapshots --> SQLite archive for order-book research
     |
     v
 Backtest engine / Live scanner / Position monitor

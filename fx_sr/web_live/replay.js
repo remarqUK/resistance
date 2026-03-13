@@ -33,12 +33,8 @@ const errorBanner  = document.getElementById('error-banner');
 const chartEl      = document.getElementById('chart-container');
 const playbackRow  = document.getElementById('playback-row');
 const infoGrid     = document.getElementById('info-grid');
-const scrubber     = document.getElementById('scrubber');
-const barLabel     = document.getElementById('bar-label');
-const playPause    = document.getElementById('play-pause');
-const stepBack     = document.getElementById('step-back');
-const stepFwd      = document.getElementById('step-fwd');
-const speedSelect  = document.getElementById('speed-select');
+
+
 const tfSelect     = document.getElementById('tf-select');
 const refreshBtn   = document.getElementById('refresh-btn');
 
@@ -50,33 +46,66 @@ PAIRS.forEach(p => {
   pairSelect.appendChild(opt);
 });
 
-// Pre-select pair from query string (e.g. /replay?pair=EURUSD)
-const urlPair = new URLSearchParams(window.location.search).get('pair');
+const urlParams = new URLSearchParams(window.location.search);
+
+// Pre-select pair/date from query string (e.g. /replay?pair=EURUSD&date=2026-03-10)
+const urlPair = urlParams.get('pair');
 if (urlPair && PAIRS.includes(urlPair.toUpperCase())) {
   pairSelect.value = urlPair.toUpperCase();
 }
+const urlPreset = urlParams.get('preset');
+const urlTimeframe = urlParams.get('tf');
+if (urlTimeframe && Array.from(tfSelect.options).some((option) => option.value === urlTimeframe)) {
+  tfSelect.value = urlTimeframe;
+}
 
-pairSelect.addEventListener('change', fetchDateRange);
+const urlDate = isIsoDate(urlParams.get('date')) ? urlParams.get('date') : '';
+let requestedReplayDate = urlDate;
+if (urlDate) {
+  dateInput.value = urlDate;
+}
+
+pairSelect.addEventListener('change', () => { fetchDateRange().then(() => loadReplay()); });
 loadBtn.addEventListener('click', loadReplay);
-playPause.addEventListener('click', togglePlay);
-stepBack.addEventListener('click', () => stepTo(replay.currentIndex - 1));
-stepFwd.addEventListener('click', () => stepTo(replay.currentIndex + 1));
-scrubber.addEventListener('input', () => stepTo(parseInt(scrubber.value)));
-speedSelect.addEventListener('change', () => {
-  replay.speed = parseFloat(speedSelect.value);
-  if (replay.isPlaying) { stopPlay(); startPlay(); }
-});
 tfSelect.addEventListener('change', loadReplay);
 refreshBtn.addEventListener('click', refreshData);
 
-fetchDateRange().then(() => {
-  // Auto-load today's data on page open
-  if (!dateInput.value) {
-    const today = new Date().toISOString().slice(0, 10);
-    dateInput.value = today;
-  }
-  loadReplay();
+// Fetch available presets from server, then init
+fetchPresets().then(() => {
+  fetchDateRange().then(() => {
+    if (!dateInput.value) {
+      const today = new Date().toISOString().slice(0, 10);
+      dateInput.value = today;
+    }
+    loadReplay();
+  });
 });
+
+async function fetchPresets() {
+  try {
+    const res = await fetch('/api/replay/presets');
+    if (!res.ok) return;
+    const data = await res.json();
+    const presets = data.presets || [];
+    if (!presets.length) return;
+
+    presetSelect.innerHTML = '';
+    presets.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.name;
+      opt.title = p.description || '';
+      presetSelect.appendChild(opt);
+    });
+
+    // Select from URL param, or default to high_volume, or first
+    if (urlPreset && presets.some(p => p.name === urlPreset)) {
+      presetSelect.value = urlPreset;
+    } else if (presets.some(p => p.name === 'high_volume')) {
+      presetSelect.value = 'high_volume';
+    }
+  } catch (_) { /* keep hardcoded fallback */ }
+}
 
 // ── Date range ──
 
@@ -87,11 +116,26 @@ async function fetchDateRange() {
     const res = await fetch(`/api/replay/dates?pair=${pair}`);
     if (!res.ok) return;
     const data = await res.json();
+    const requestedDate = requestedReplayDate || dateInput.value;
     dateInput.min = data.first_date;
     dateInput.max = data.last_date;
-    if (!dateInput.value || dateInput.value < data.first_date || dateInput.value > data.last_date) {
+    const requestedInRange = (
+      requestedDate
+      && requestedDate >= data.first_date
+      && requestedDate <= data.last_date
+    );
+    const currentOutOfRange = (
+      !dateInput.value
+      || dateInput.value < data.first_date
+      || dateInput.value > data.last_date
+    );
+
+    if (requestedInRange) {
+      dateInput.value = requestedDate;
+    } else if (currentOutOfRange) {
       dateInput.value = data.last_date;
     }
+    requestedReplayDate = '';
   } catch (_) { /* ignore */ }
 }
 
@@ -126,14 +170,14 @@ async function loadReplay() {
     replay.contextBars = data.context_bars || [];
     replay.zones = data.zones;
     replay.summary = data.summary;
+    replay.allTrades = data.all_completed_trades || [];
     replay.currentIndex = -1;
     replay.markers = [];
+    updateReplayUrl(pair, dateVal, preset, tf);
 
     initChart();
     drawZoneLines();
 
-    scrubber.max = replay.frames.length - 1;
-    scrubber.value = 0;
     playbackRow.style.display = 'flex';
     infoGrid.style.display = '';
 
@@ -150,13 +194,41 @@ async function loadReplay() {
     }
 
     renderSummary();
-    stepTo(replay.frames.length - 1);
+    if (replay.frames.length > 0) {
+      stepTo(replay.frames.length - 1);
+    } else {
+      // No target-day bars — still render context bars and trades
+      const candles = replay.contextBars.map(b => ({
+        time: parseTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close,
+      }));
+      replay.candleSeries.setData(candles);
+      replay.zoneSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
+      // Render trades panel with empty frame
+      renderInfo(-1);
+    }
   } catch (err) {
     showError('Network error: ' + err.message);
   } finally {
     loadBtn.disabled = false;
     loadBtn.textContent = 'Load';
   }
+}
+
+function isIsoDate(value) {
+  if (!value || typeof value !== 'string') return false;
+  const match = /^\d{4}-\d{2}-\d{2}$/.test(value);
+  if (!match) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function updateReplayUrl(pair, date, preset, tf) {
+  const params = new URLSearchParams(window.location.search);
+  params.set('pair', pair);
+  params.set('date', date);
+  params.set('preset', preset);
+  params.set('tf', tf);
+  window.history.replaceState({}, '', `/replay?${params.toString()}`);
 }
 
 async function refreshData() {
@@ -188,6 +260,12 @@ async function refreshData() {
 function initChart() {
   if (replay.chart) { replay.chart.remove(); }
   replay.zoneLines = [];
+  const dec = replay.summary?.decimals || 5;
+  const priceFormat = {
+    type: 'price',
+    precision: dec,
+    minMove: Math.pow(10, -dec),
+  };
 
   replay.chart = LightweightCharts.createChart(chartEl, {
     width: chartEl.clientWidth,
@@ -201,12 +279,18 @@ function initChart() {
       vertLines: { color: 'rgba(53,43,34,0.06)' },
       horzLines: { color: 'rgba(53,43,34,0.06)' },
     },
+    localization: {
+      priceFormatter: (value) => Number(value).toFixed(dec),
+    },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    rightPriceScale: { borderColor: 'rgba(53,43,34,0.12)' },
+    rightPriceScale: {
+      borderColor: 'rgba(53,43,34,0.12)',
+    },
     timeScale: {
       borderColor: 'rgba(53,43,34,0.12)',
       timeVisible: true,
       secondsVisible: false,
+      rightOffset: 12,
     },
   });
 
@@ -217,6 +301,7 @@ function initChart() {
     lastValueVisible: false,
     priceLineVisible: false,
     crosshairMarkerVisible: false,
+    priceFormat,
   });
 
   replay.candleSeries = replay.chart.addCandlestickSeries({
@@ -226,6 +311,7 @@ function initChart() {
     borderDownColor: '#b23b29',
     wickUpColor: '#1f7a49',
     wickDownColor: '#b23b29',
+    priceFormat,
   });
 
   // Resize handler
@@ -289,6 +375,39 @@ function renderToFrame(targetIndex) {
   }));
   const markers = [];
 
+  // Add entry/exit markers onto context bars for trades involving the selected day
+  const selectedDate = replay.summary?.date || '';
+  const contextTimes = new Set(candles.map(c => c.time));
+  const relevantTrades = (replay.allTrades || []).filter(t =>
+    (t.entry_time || '').slice(0, 10) === selectedDate ||
+    (t.exit_time || '').slice(0, 10) === selectedDate
+  );
+  for (const t of relevantTrades) {
+    const entryTs = parseTime(t.entry_time);
+    if (contextTimes.has(entryTs)) {
+      markers.push({
+        time: entryTs,
+        position: t.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: t.direction === 'LONG' ? '#1f7a49' : '#b23b29',
+        shape: t.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text: t.direction,
+      });
+    }
+    if (t.exit_time) {
+      const exitTs = parseTime(t.exit_time);
+      if (contextTimes.has(exitTs)) {
+        const win = (t.pnl_pips || 0) > 0;
+        markers.push({
+          time: exitTs,
+          position: 'inBar',
+          color: win ? '#1f7a49' : '#b23b29',
+          shape: 'circle',
+          text: `${t.exit_reason} ${win ? '+' : ''}${t.pnl_pips}p`,
+        });
+      }
+    }
+  }
+
   // Append target-day bars up to current index
   for (let i = 0; i <= targetIndex; i++) {
     const f = replay.frames[i];
@@ -322,11 +441,9 @@ function renderToFrame(targetIndex) {
   replay.candleSeries.setData(candles);
   // Feed zone series same time range so its price lines render (behind candles)
   replay.zoneSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
-  if (markers.length) {
-    replay.candleSeries.setMarkers(markers);
-  } else {
-    replay.candleSeries.setMarkers([]);
-  }
+  // Markers must be sorted by time for Lightweight Charts
+  markers.sort((a, b) => a.time - b.time);
+  replay.candleSeries.setMarkers(markers);
 
   // Open trade SL/TP lines
   removeTradeLevels();
@@ -362,98 +479,149 @@ function removeTradeLevels() {
 
 // ── Playback ──
 
+function jumpToTradeEntry(entryTime) {
+  const dt = new Date(entryTime);
+  const tradeDate = dt.toISOString().slice(0, 10);
+  const currentDate = dateInput.value;
+
+  if (tradeDate !== currentDate) {
+    // Different day — update date picker and reload
+    dateInput.value = tradeDate;
+    loadReplay().then(() => {
+      _scrubToTime(dt);
+    });
+  } else {
+    _scrubToTime(dt);
+  }
+}
+
+function _scrubToTime(dt) {
+  const target = Math.floor(dt.getTime() / 1000);
+  let best = 0;
+  for (let i = 0; i < replay.frames.length; i++) {
+    const ft = Math.floor(new Date(replay.frames[i].time).getTime() / 1000);
+    if (ft <= target) best = i;
+  }
+  stopPlay();
+  stepTo(best);
+}
+
 function stepTo(index) {
   if (index < 0) index = 0;
   if (index >= replay.frames.length) index = replay.frames.length - 1;
   if (index === replay.currentIndex) return;
 
   replay.currentIndex = index;
-  scrubber.value = index;
-  barLabel.textContent = `${index + 1} / ${replay.frames.length}`;
 
   renderToFrame(index);
   renderInfo(index);
 
-  if (index >= replay.frames.length - 1) stopPlay();
-}
-
-function startPlay() {
-  if (replay.isPlaying) return;
-  replay.isPlaying = true;
-  playPause.innerHTML = '&#9646;&#9646;';
-  const interval = Math.max(50, 1000 / replay.speed);
-  replay.playTimer = setInterval(() => stepTo(replay.currentIndex + 1), interval);
 }
 
 function stopPlay() {
   replay.isPlaying = false;
-  playPause.innerHTML = '&#9654;';
   if (replay.playTimer) { clearInterval(replay.playTimer); replay.playTimer = null; }
-}
-
-function togglePlay() {
-  if (replay.isPlaying) stopPlay();
-  else {
-    if (replay.currentIndex >= replay.frames.length - 1) stepTo(0);
-    startPlay();
-  }
 }
 
 // ── Info panels ──
 
+function _infoRow(label, value) {
+  return `<div class="info-row"><span class="info-label">${label}</span><span>${value}</span></div>`;
+}
+
 function renderInfo(index) {
   const f = replay.frames[index];
-  if (!f) return;
-
   const dec = replay.summary?.decimals || 5;
+
+  if (!f) {
+    // No frames for target day — clear bar/trade panels but still show trades list
+    document.getElementById('bar-details').innerHTML = '<div class="info-row" style="color:var(--muted)">No bars for selected date</div>';
+    document.getElementById('trade-details').innerHTML = '<div class="info-row" style="color:var(--muted)">No data</div>';
+    _renderTradeList(dec);
+    return;
+  }
 
   // Bar info
   const dt = new Date(f.time);
-  const timeStr = dt.toLocaleString();
-  document.getElementById('bar-details').innerHTML = `
-    <p class="detail"><strong>Time:</strong> ${timeStr}</p>
-    <p class="detail"><strong>O:</strong> ${f.open.toFixed(dec)}&ensp;
-       <strong>H:</strong> ${f.high.toFixed(dec)}&ensp;
-       <strong>L:</strong> ${f.low.toFixed(dec)}&ensp;
-       <strong>C:</strong> ${f.close.toFixed(dec)}</p>
-    ${f.nearest_support ? `<p class="detail"><strong>Support:</strong> ${f.nearest_support.lower.toFixed(dec)} &ndash; ${f.nearest_support.upper.toFixed(dec)} (${f.nearest_support.touches}t)</p>` : ''}
-    ${f.nearest_resistance ? `<p class="detail"><strong>Resistance:</strong> ${f.nearest_resistance.lower.toFixed(dec)} &ndash; ${f.nearest_resistance.upper.toFixed(dec)} (${f.nearest_resistance.touches}t)</p>` : ''}
-  `;
+  const timeStr = dt.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false});
+  let barHtml = '';
+  barHtml += _infoRow('Time', timeStr);
+  barHtml += _infoRow('Open', f.open.toFixed(dec));
+  barHtml += _infoRow('High', f.high.toFixed(dec));
+  barHtml += _infoRow('Low', f.low.toFixed(dec));
+  barHtml += _infoRow('Close', f.close.toFixed(dec));
+  if (f.nearest_support) {
+    barHtml += _infoRow('Support', `${f.nearest_support.lower.toFixed(dec)} \u2013 ${f.nearest_support.upper.toFixed(dec)} (${f.nearest_support.touches}t)`);
+  }
+  if (f.nearest_resistance) {
+    barHtml += _infoRow('Resistance', `${f.nearest_resistance.lower.toFixed(dec)} \u2013 ${f.nearest_resistance.upper.toFixed(dec)} (${f.nearest_resistance.touches}t)`);
+  }
+  document.getElementById('bar-details').innerHTML = barHtml;
 
   // Trade state
   let tradeHtml = '';
-  if (f.signal) {
-    tradeHtml += `<p class="detail"><span class="pill pill-${f.signal.direction.toLowerCase()}">${f.signal.direction}</span> Entry @ ${f.signal.entry_price.toFixed(dec)}</p>
-      <p class="detail">SL: ${f.signal.sl_price.toFixed(dec)} &ensp; TP: ${f.signal.tp_price.toFixed(dec)}</p>`;
-  }
   if (f.exit) {
     const cls = f.exit.pnl_pips > 0 ? 'up' : 'down';
-    tradeHtml += `<p class="detail"><strong>Exit:</strong> ${f.exit.reason} @ ${f.exit.price.toFixed(dec)}</p>
-      <p class="detail ${cls}"><strong>${f.exit.pnl_pips > 0 ? '+' : ''}${f.exit.pnl_pips}p</strong> (${f.exit.pnl_r > 0 ? '+' : ''}${f.exit.pnl_r}R)</p>`;
+    tradeHtml += _infoRow('Exit', `${f.exit.reason} @ ${f.exit.price.toFixed(dec)}`);
+    tradeHtml += `<div class="info-row"><span class="info-label">P&L</span><span class="${cls}">${f.exit.pnl_pips > 0 ? '+' : ''}${f.exit.pnl_pips}p (${f.exit.pnl_r > 0 ? '+' : ''}${f.exit.pnl_r}R)</span></div>`;
   }
   if (f.open_trade) {
-    tradeHtml += `<p class="detail"><span class="pill pill-${f.open_trade.direction.toLowerCase()}">${f.open_trade.direction}</span> open since ${new Date(f.open_trade.entry_time).toLocaleString()}</p>
-      <p class="detail">Entry: ${f.open_trade.entry_price.toFixed(dec)} &ensp; SL: ${f.open_trade.sl_price.toFixed(dec)} &ensp; TP: ${f.open_trade.tp_price.toFixed(dec)}</p>
-      <p class="detail">Bars held: ${f.open_trade.bars_held}</p>`;
+    const openSince = new Date(f.open_trade.entry_time).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false});
+    const label = f.signal ? 'Entry' : 'Open';
+    tradeHtml += `<div class="info-row"><span class="pill pill-${f.open_trade.direction.toLowerCase()}" style="font-size:0.68rem;padding:2px 6px;min-width:auto">${f.open_trade.direction}</span><span>${label} @ ${f.open_trade.entry_price.toFixed(dec)}${!f.signal ? ' since ' + openSince : ''}</span></div>`;
+    tradeHtml += _infoRow('SL', f.open_trade.sl_price.toFixed(dec));
+    tradeHtml += _infoRow('TP', f.open_trade.tp_price.toFixed(dec));
+    tradeHtml += _infoRow('Bars held', f.open_trade.bars_held);
+  } else if (f.signal) {
+    tradeHtml += `<div class="info-row"><span class="pill pill-${f.signal.direction.toLowerCase()}" style="font-size:0.68rem;padding:2px 6px;min-width:auto">${f.signal.direction}</span><span>Entry @ ${f.signal.entry_price.toFixed(dec)}</span></div>`;
+    tradeHtml += _infoRow('SL', f.signal.sl_price.toFixed(dec));
+    tradeHtml += _infoRow('TP', f.signal.tp_price.toFixed(dec));
   }
   if (!f.signal && !f.exit && !f.open_trade) {
-    tradeHtml = '<p class="detail" style="color:var(--muted)">Flat &mdash; no position</p>';
+    tradeHtml = '<div class="info-row" style="color:var(--muted)">Flat \u2014 no position</div>';
   }
   document.getElementById('trade-details').innerHTML = tradeHtml;
 
-  // Completed trades list
-  const trades = f.completed_trades || [];
+  _renderTradeList(dec);
+}
+
+function _renderTradeList(dec) {
+  const trades = replay.allTrades || [];
+  const selectedDate = replay.summary?.date || '';
+  const isSelectedDay = t => (t.entry_time || '').slice(0, 10) === selectedDate || (t.exit_time || '').slice(0, 10) === selectedDate;
+  const todayTrades = trades.filter(isSelectedDay);
+  const otherTrades = trades.filter(t => !isSelectedDay(t));
+
+  const renderTrade = (t) => {
+    const cls = (t.pnl_pips || 0) > 0 ? 'up' : 'down';
+    const entryDt = new Date(t.entry_time).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false});
+    const exitDt = t.exit_time ? new Date(t.exit_time).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false}) : '';
+    return `<div class="trade-row" style="flex-wrap:wrap;gap:2px;cursor:pointer" onclick="jumpToTradeEntry('${t.entry_time}')">
+      <span><span class="pill pill-${t.direction.toLowerCase()}" style="font-size:0.68rem;padding:2px 6px;min-width:auto">${t.direction}</span> @ ${t.entry_price.toFixed(dec)}${t.exit_price ? ' \u2192 ' + t.exit_price.toFixed(dec) : ''}</span>
+      <span class="${cls}">${t.exit_reason} ${(t.pnl_pips || 0) > 0 ? '+' : ''}${t.pnl_pips}p (${(t.pnl_r || 0) > 0 ? '+' : ''}${t.pnl_r}R)</span>
+      <span style="width:100%;font-size:0.76rem;color:var(--muted)">\u{1F4C4} Simulated \u00b7 ${entryDt}${exitDt ? ' \u2192 ' + exitDt : ''}</span>
+    </div>`;
+  };
+
+  let listHtml = '';
   if (trades.length === 0) {
-    document.getElementById('trade-list').innerHTML = '<p class="detail" style="color:var(--muted)">No completed trades yet</p>';
+    listHtml = '<p class="detail" style="color:var(--muted)">No completed trades</p>';
   } else {
-    document.getElementById('trade-list').innerHTML = trades.map((t, i) => {
-      const cls = (t.pnl_pips || 0) > 0 ? 'up' : 'down';
-      return `<div class="trade-row">
-        <span>#${i + 1} ${t.direction} @ ${t.entry_price.toFixed(dec)}</span>
-        <span class="${cls}">${t.exit_reason} ${(t.pnl_pips || 0) > 0 ? '+' : ''}${t.pnl_pips}p (${(t.pnl_r || 0) > 0 ? '+' : ''}${t.pnl_r}R)</span>
-      </div>`;
-    }).join('');
+    if (todayTrades.length > 0) {
+      listHtml += `<div class="info-section-label">Selected day (${selectedDate})</div>`;
+      listHtml += [...todayTrades].reverse().map(renderTrade).join('');
+    } else {
+      listHtml += `<div class="info-section-label" style="color:var(--muted)">No trades on ${selectedDate}</div>`;
+    }
+    if (otherTrades.length > 0) {
+      listHtml += `<hr style="border:none;border-top:2px solid #1f1a17;margin:10px 0">`;
+      listHtml += `<div class="info-section-label">Other days (${otherTrades.length})</div>`;
+      listHtml += `<div style="max-height:200px;overflow-y:auto">`;
+      listHtml += [...otherTrades].reverse().map(renderTrade).join('');
+      listHtml += `</div>`;
+    }
   }
+  document.getElementById('trade-list').innerHTML = listHtml;
 }
 
 function renderSummary() {
@@ -462,13 +630,30 @@ function renderSummary() {
   const badge = s.incomplete
     ? '<span class="pill pill-warning" style="font-size:0.68rem;padding:4px 8px;min-width:auto">Incomplete</span>'
     : '';
-  document.getElementById('summary-details').innerHTML = `
-    <p class="detail"><strong>Pair:</strong> ${s.pair}</p>
-    <p class="detail"><strong>Date:</strong> ${s.date} ${badge}</p>
-    <p class="detail"><strong>Bars:</strong> ${s.total_bars}${s.incomplete ? ' (day in progress)' : ''}</p>
-    <p class="detail"><strong>Trades:</strong> ${s.total_trades} (${s.wins}W / ${s.losses}L)</p>
-    <p class="detail"><strong>Total P&amp;L:</strong> <span class="${s.total_pnl_pips > 0 ? 'up' : s.total_pnl_pips < 0 ? 'down' : ''}">${s.total_pnl_pips > 0 ? '+' : ''}${s.total_pnl_pips} pips</span></p>
-  `;
+  const risk = 100;
+  const dayR = s.total_pnl_r || 0;
+  const dayMoney = (dayR * risk).toFixed(0);
+  const daySign = dayR > 0 ? '+' : '';
+  const dayClass = dayR > 0 ? 'up' : dayR < 0 ? 'down' : '';
+
+  const allR = s.all_pnl_r || 0;
+  const allMoney = (allR * risk).toFixed(0);
+  const allSign = allR > 0 ? '+' : '';
+  const allClass = allR > 0 ? 'up' : allR < 0 ? 'down' : '';
+
+  let html = '';
+  html += _infoRow('Pair', s.pair);
+  html += _infoRow('Date', `${s.date} ${badge}`);
+  html += _infoRow('Bars', `${s.total_bars}${s.incomplete ? ' (in progress)' : ''}`);
+  html += `<div class="info-section-label">Selected day</div>`;
+  html += _infoRow('Trades', `${s.total_trades} (${s.wins}W / ${s.losses}L)`);
+  html += `<div class="info-row"><span class="info-label">P&L</span><span class="${s.total_pnl_pips > 0 ? 'up' : s.total_pnl_pips < 0 ? 'down' : ''}">${s.total_pnl_pips > 0 ? '+' : ''}${s.total_pnl_pips}p <span style="color:var(--muted)">(${daySign}${dayR}R)</span></span></div>`;
+  html += `<div class="info-row"><span class="info-label">At \u00a3${risk} risk</span><span class="${dayClass}">${daySign}\u00a3${dayMoney}</span></div>`;
+  html += `<div class="info-section-label">30-day</div>`;
+  html += _infoRow('Trades', s.all_trades);
+  html += `<div class="info-row"><span class="info-label">P&L</span><span class="${s.all_pnl_pips > 0 ? 'up' : s.all_pnl_pips < 0 ? 'down' : ''}">${s.all_pnl_pips > 0 ? '+' : ''}${s.all_pnl_pips}p <span style="color:var(--muted)">(${allSign}${allR}R)</span></span></div>`;
+  html += `<div class="info-row"><span class="info-label">At \u00a3${risk} risk</span><span class="${allClass}">${allSign}\u00a3${allMoney}</span></div>`;
+  document.getElementById('summary-details').innerHTML = html;
 }
 
 // ── Errors ──

@@ -108,8 +108,59 @@ def build_position_size_plan(
     amount per one unit is the stop distance in quote currency converted back
     into the account currency.
     """
-    base, quote = split_pair(pair)
     risk_amount = calculate_risk_amount(balance, risk_pct)
+    return build_position_size_plan_for_risk_amount(
+        pair=pair,
+        direction=direction,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        balance=balance,
+        risk_amount=risk_amount,
+        account_currency=account_currency,
+        price_lookup=price_lookup,
+    )
+
+
+def estimate_position_risk_amount(
+    pair: str,
+    entry_price: float,
+    stop_price: float,
+    units: int,
+    account_currency: str,
+    price_lookup: PriceLookup,
+) -> Optional[float]:
+    """Estimate full stop-loss risk for an existing FX position in account currency."""
+
+    _, quote = split_pair(pair)
+    stop_distance = abs(float(entry_price) - float(stop_price))
+    if stop_distance <= 0 or abs(int(units)) <= 0:
+        return 0.0
+
+    risk_quote = stop_distance * abs(int(units))
+    risk_account = convert_currency(
+        risk_quote,
+        from_currency=quote,
+        to_currency=account_currency,
+        price_lookup=price_lookup,
+    )
+    if risk_account is None or risk_account < 0:
+        return None
+    return float(risk_account)
+
+
+def build_position_size_plan_for_risk_amount(
+    pair: str,
+    direction: str,
+    entry_price: float,
+    stop_price: float,
+    balance: float,
+    risk_amount: float,
+    account_currency: str,
+    price_lookup: PriceLookup,
+) -> Optional[PositionSizePlan]:
+    """Size a live FX trade for an explicit account-currency risk amount."""
+
+    _, quote = split_pair(pair)
     stop_distance = abs(float(entry_price) - float(stop_price))
 
     if risk_amount <= 0 or stop_distance <= 0:
@@ -143,7 +194,7 @@ def build_position_size_plan(
         direction=direction,
         units=units,
         risk_amount=risk_amount,
-        risk_pct=risk_pct,
+        risk_pct=(float(risk_amount) / float(balance)) if float(balance) > 0 else 0.0,
         balance=float(balance),
         account_currency=account_currency.upper(),
         risk_per_unit_account=float(risk_per_unit_account),

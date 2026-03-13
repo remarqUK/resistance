@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backtest Trades</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <div class="hero-title-row">
+        <div>
+          <span class="eyebrow">FX support / resistance</span>
+          <h1>All Backtest Trades</h1>
+        </div>
+        <div class="hero-actions">
+          <a href="/" class="hero-action">Back to Live Board</a>
+          <a href="/replay" class="hero-action">Strategy Replay</a>
+          <a href="/backtest-diary" class="hero-action">Trade Diary</a>
+        </div>
+      </div>
+      <p class="subtitle">Read-only backtest fills from cached runs. Filter by pair before replaying the current results.</p>
+    </div>
+
+    <section class="panel">
+      <div class="filter-toolbar">
+        <div class="field">
+          <label for="pair-filter">Ticker</label>
+          <select id="pair-filter">
+            <option value="">All pairs</option>
+          </select>
+        </div>
+        <button id="load-btn" class="toolbar-btn">Load</button>
+      </div>
+      <div id="summary" class="page-summary"></div>
+      <div class="trade-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Pair</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>Direction</th>
+              <th>Entry → Exit</th>
+              <th>P/L (pips)</th>
+              <th>P/L R</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body">
+            <tr><td colspan="8" class="empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/backtest_trades.js"></script>
+</body>
+</html>

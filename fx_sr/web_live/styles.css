@@ -105,6 +105,29 @@ body::before {
   line-height: 0.95;
 }
 
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.hero-action {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.hero-action:hover {
+  text-decoration: underline;
+}
+
+.hero-actions-vertical {
+  display: flex;
+  flex-direction: column;
+}
+
 .subtitle {
   max-width: 60ch;
   margin: 0;
@@ -305,6 +328,222 @@ body::before {
   color: var(--muted);
 }
 
+.filter-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.toolbar-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.filter-toolbar .field {
+  display: grid;
+  gap: 4px;
+}
+
+.filter-toolbar label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.filter-toolbar select,
+.filter-toolbar input[type="date"],
+.filter-toolbar input[type="text"] {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+  font-size: 0.88rem;
+  color: var(--ink);
+  font-family: inherit;
+}
+
+.toolbar-btn,
+.toolbar-small {
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.toolbar-btn {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.toolbar-btn:hover,
+.toolbar-small:hover {
+  opacity: 0.9;
+}
+
+.toolbar-btn:disabled,
+.toolbar-small:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.toolbar-small {
+  min-width: 100px;
+}
+
+.page-summary {
+  margin: 6px 0 12px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.diary-calendar {
+  margin-bottom: 12px;
+  display: grid;
+  gap: 16px;
+}
+
+.diary-month {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px;
+}
+
+.diary-month h3 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.diary-weekdays,
+.diary-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.diary-weekdays div {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-align: center;
+}
+
+.diary-week {
+  margin-bottom: 8px;
+}
+
+.diary-day,
+.diary-day:active,
+.diary-day:focus,
+.diary-day:hover {
+  border-radius: 10px;
+  min-height: 68px;
+  padding: 7px 7px;
+  border: 1px solid var(--line);
+  background: rgba(255, 251, 245, 0.45);
+  color: var(--ink);
+  font-family: inherit;
+  text-align: left;
+}
+
+.diary-day {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: flex-start;
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.diary-day:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+}
+
+.diary-day.no-trades:hover {
+  transform: none;
+  border-color: var(--line);
+}
+
+.diary-day.no-trades {
+  cursor: default;
+  background: rgba(255, 251, 245, 0.15);
+}
+
+.diary-day:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 46%, transparent);
+  outline-offset: 1px;
+}
+
+.diary-day:disabled {
+  cursor: default;
+}
+
+.diary-day.other-month {
+  cursor: default;
+  background: transparent;
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.diary-day-number {
+  font-weight: 700;
+  font-size: 0.84rem;
+}
+
+.diary-day-count,
+.diary-day-pl {
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.diary-day-pl {
+  font-weight: 700;
+}
+
+.diary-day.has-trades:not(.outside) {
+  background: rgba(31, 122, 73, 0.1);
+  border-color: rgba(31, 122, 73, 0.2);
+}
+
+.diary-day.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.diary-day.has-trades.up .diary-day-pl {
+  color: var(--success);
+}
+
+.diary-day.has-trades.down .diary-day-pl {
+  color: var(--danger);
+}
+
+.diary-selected-date {
+  margin: 8px 0 14px;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.trade-table-wrap {
+  overflow: auto;
+}
+
+.trade-history-row {
+  cursor: pointer;
+}
+
 .empty-card {
   padding: 16px;
 }
@@ -422,6 +661,22 @@ body::before {
 .pill-scanning {
   background: rgba(184, 137, 23, 0.12);
   color: var(--warning);
+}
+
+.pill-near {
+  background: rgba(210, 140, 20, 0.22);
+  color: #e5a812;
+  animation: near-pulse 2s ease-in-out infinite;
+}
+
+@keyframes near-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+td.zone-near {
+  color: #e5a812;
+  font-weight: 700;
 }
 
 .pill-info,

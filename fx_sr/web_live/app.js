@@ -107,8 +107,9 @@ function sortPairs() {
     LONG: 0,
     SHORT: 0,
     OPEN: 1,
-    WATCH: 2,
-    INSIDE: 3,
+    NEAR: 2,
+    WATCH: 3,
+    INSIDE: 4,
     WAIT: 5,
     "NO DATA": 6,
   };
@@ -203,19 +204,22 @@ function renderWatchlist() {
     return;
   }
 
+  const NEAR_THRESHOLD = 0.30;
   els.watchlistBody.innerHTML = rows.map((row) => {
     const signal = row.signal;
     const setupText = signal
       ? `${signal.zone_type} · ${signal.zone_strength}`
       : row.note || "No setup";
     const direction = signal?.direction || row.state;
+    const sNear = row.support_dist_pct != null && row.support_dist_pct <= NEAR_THRESHOLD;
+    const rNear = row.resistance_dist_pct != null && row.resistance_dist_pct <= NEAR_THRESHOLD;
     return `
       <tr>
         <td><a href="/replay?pair=${encodeURIComponent(row.pair)}" target="_blank" class="pair-main pair-link" title="Replay ${escapeHtml(row.pair)}">${escapeHtml(row.pair)}</a></td>
         <td>${renderBadge(row.state)}</td>
         <td class="price">${formatNumber(row.price, row.decimals ?? 5)}</td>
-        <td class="price">${escapeHtml(row.support_text || "–")}</td>
-        <td class="price">${escapeHtml(row.resistance_text || "–")}</td>
+        <td class="price${sNear ? " zone-near" : ""}">${escapeHtml(row.support_text || "–")}</td>
+        <td class="price${rNear ? " zone-near" : ""}">${escapeHtml(row.resistance_text || "–")}</td>
         <td>${escapeHtml(setupText)}</td>
         <td>${signal ? renderBadge(direction) : '<span class="pair-sub">–</span>'}</td>
       </tr>

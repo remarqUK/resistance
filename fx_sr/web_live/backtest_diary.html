@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backtest Diary</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <div class="hero-title-row">
+        <div>
+          <span class="eyebrow">FX support / resistance</span>
+          <h1>Trade Diary</h1>
+        </div>
+        <div class="hero-actions">
+          <a href="/" class="hero-action">Back to Live Board</a>
+          <a href="/replay" class="hero-action">Strategy Replay</a>
+          <a href="/backtest-trades" class="hero-action">All Backtest Trades</a>
+        </div>
+      </div>
+      <p class="subtitle">Calendar view of daily backtest P/L, then drill into a day to inspect trades.</p>
+    </div>
+
+    <section class="panel">
+      <div class="filter-toolbar">
+        <button id="load-btn" class="toolbar-btn">Load Diary</button>
+        <div class="toolbar-meta" id="month-range"></div>
+        <div class="toolbar-meta" id="summary"></div>
+      </div>
+
+      <div class="diary-calendar" id="diary-calendar">
+        <div class="empty-card empty">Load diary data to render calendar.</div>
+      </div>
+
+      <div class="diary-selected-date" id="selected-date">Select a day to view trades.</div>
+
+      <div class="trade-table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Pair</th>
+              <th>Entry</th>
+              <th>Exit</th>
+              <th>Direction</th>
+              <th>Entry → Exit</th>
+              <th>P/L (pips)</th>
+              <th>P/L R</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="diary-body">
+            <tr><td colspan="8" class="empty">Select a date.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/backtest_diary.js"></script>
+</body>
+</html>

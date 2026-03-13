@@ -6,6 +6,7 @@ from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import io
+import os
 import sys
 import time
 from typing import Callable, Dict, List, Optional, Set
@@ -13,8 +14,21 @@ from typing import Callable, Dict, List, Optional, Set
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data
 from .levels import detect_zones, get_nearest_zones, SRZone, is_price_in_zone
-from .strategy import StrategyParams, Signal, generate_signal
-from .sizing import PositionSizePlan, build_position_size_plan, format_units
+from .strategy import (
+    StrategyParams,
+    Signal,
+    get_correlated_pairs,
+    get_tradeable_zones,
+    is_pair_fully_blocked,
+    select_entry_signal,
+)
+from .sizing import (
+    PositionSizePlan,
+    build_position_size_plan,
+    calculate_risk_amount,
+    estimate_position_risk_amount,
+    format_units,
+)
 from . import ibkr
 
 
@@ -49,6 +63,8 @@ class PairScanRow:
     resistance_lower: Optional[float] = None
     resistance_upper: Optional[float] = None
     resistance_strength: Optional[str] = None
+    support_dist_pct: Optional[float] = None
+    resistance_dist_pct: Optional[float] = None
 
 
 @dataclass
@@ -141,6 +157,105 @@ def _format_zone_display(
     return f"{band}  {dist:.2f}%"
 
 
+NEAR_ZONE_THRESHOLD_PCT = 0.30
+_LIVE_DAILY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
+_LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
+_LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
+
+
+def _current_day_bucket() -> str:
+    """Return the current UTC day bucket used for live daily cache refreshes."""
+
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
+
+def _current_hour_bucket() -> str:
+    """Return the current UTC hour bucket used for live hourly cache refreshes."""
+
+    return datetime.utcnow().strftime('%Y-%m-%d %H')
+
+
+def _get_live_daily_data(
+    ticker_symbol: str,
+    days: int,
+    daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
+):
+    """Fetch live daily data with an in-memory cache that refreshes once per UTC day."""
+
+    cache_key = (ticker_symbol, int(days))
+    if daily_data_cache is not None and cache_key in daily_data_cache:
+        return daily_data_cache[cache_key]
+
+    bucket = _current_day_bucket()
+    cached = _LIVE_DAILY_DATA_CACHE.get(cache_key)
+    if cached and cached[0] == bucket:
+        daily_df = cached[1]
+    else:
+        daily_df = fetch_daily_data(ticker_symbol, days=days)
+        _LIVE_DAILY_DATA_CACHE[cache_key] = (bucket, daily_df)
+
+    if daily_data_cache is not None:
+        daily_data_cache[cache_key] = daily_df
+    return daily_df
+
+
+def _get_live_zones(
+    ticker_symbol: str,
+    days: int,
+    daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
+    zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
+) -> tuple[object, List[SRZone]]:
+    """Fetch live daily data and detected zones with once-per-day memoization."""
+
+    daily_df = _get_live_daily_data(
+        ticker_symbol,
+        days,
+        daily_data_cache=daily_data_cache,
+    )
+    if daily_df.empty:
+        return daily_df, []
+
+    cache_key = (ticker_symbol, int(days))
+    if zone_cache is not None and cache_key in zone_cache:
+        return daily_df, zone_cache[cache_key]
+
+    bucket = f"{_current_day_bucket()}:{daily_df.index[-1]}"
+    cached = _LIVE_ZONE_CACHE.get(cache_key)
+    if cached and cached[0] == bucket:
+        zones = cached[1]
+    else:
+        zones = detect_zones(daily_df)
+        _LIVE_ZONE_CACHE[cache_key] = (bucket, zones)
+
+    if zone_cache is not None:
+        zone_cache[cache_key] = zones
+    return daily_df, zones
+
+
+def _get_live_hourly_data(
+    ticker_symbol: str,
+    days: int,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
+):
+    """Fetch live hourly data with an in-memory cache that refreshes once per UTC hour."""
+
+    if hourly_data_cache is not None and ticker_symbol in hourly_data_cache:
+        return hourly_data_cache[ticker_symbol]
+
+    cache_key = (ticker_symbol, int(days))
+    bucket = _current_hour_bucket()
+    cached = _LIVE_HOURLY_DATA_CACHE.get(cache_key)
+    if cached and cached[0] == bucket:
+        hourly_df = cached[1]
+    else:
+        hourly_df = fetch_hourly_data(ticker_symbol, days=days)
+        _LIVE_HOURLY_DATA_CACHE[cache_key] = (bucket, hourly_df)
+
+    if hourly_data_cache is not None:
+        hourly_data_cache[ticker_symbol] = hourly_df
+    return hourly_df
+
+
 def _describe_watch_state(
     price: float,
     support: Optional[SRZone],
@@ -155,6 +270,17 @@ def _describe_watch_state(
 
     support_dist = _distance_to_zone_pct(price, support, is_support=True)
     resistance_dist = _distance_to_zone_pct(price, resistance, is_support=False)
+
+    nearest_dist = min(
+        d for d in (support_dist, resistance_dist) if d is not None
+    ) if support_dist is not None or resistance_dist is not None else None
+
+    if nearest_dist is not None and nearest_dist <= NEAR_ZONE_THRESHOLD_PCT:
+        if support_dist is not None and (
+            resistance_dist is None or support_dist <= resistance_dist
+        ):
+            return "NEAR", f"{support_dist:.2f}% from support ({support.strength})"
+        return "NEAR", f"{resistance_dist:.2f}% from resistance ({resistance.strength})"
 
     if support_dist is not None and (
         resistance_dist is None or support_dist <= resistance_dist
@@ -190,10 +316,11 @@ def _pair_row_priority(row: PairScanRow) -> tuple[int, str]:
     priority = {
         'OPEN': 1,
         'PENDING': 2,
-        'INSIDE': 3,
-        'WATCH': 4,
-        'NO DATA': 5,
-    }.get(row.state, 6)
+        'NEAR': 3,
+        'INSIDE': 4,
+        'WATCH': 5,
+        'NO DATA': 6,
+    }.get(row.state, 7)
     return priority, row.pair
 
 
@@ -209,6 +336,8 @@ def refresh_pair_row_price(row: PairScanRow, price: float) -> PairScanRow:
     )
     support_text = _format_zone_display(price, support, row.decimals, True)
     resistance_text = _format_zone_display(price, resistance, row.decimals, False)
+    s_dist = _distance_to_zone_pct(price, support, is_support=True)
+    r_dist = _distance_to_zone_pct(price, resistance, is_support=False)
 
     if row.signal or row.state in {'OPEN', 'PENDING', 'NO DATA'}:
         return replace(
@@ -216,6 +345,8 @@ def refresh_pair_row_price(row: PairScanRow, price: float) -> PairScanRow:
             price=price,
             support_text=support_text,
             resistance_text=resistance_text,
+            support_dist_pct=s_dist,
+            resistance_dist_pct=r_dist,
         )
 
     state, note = _describe_watch_state(price, support, resistance)
@@ -226,6 +357,8 @@ def refresh_pair_row_price(row: PairScanRow, price: float) -> PairScanRow:
         note=note,
         support_text=support_text,
         resistance_text=resistance_text,
+        support_dist_pct=s_dist,
+        resistance_dist_pct=r_dist,
     )
 
 
@@ -237,24 +370,35 @@ def _scan_pair(
     tracked_pairs: Dict[str, Set[str]],
     blocked_pairs: Set[str],
     price_cache: Optional[Dict[str, float]] = None,
+    daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
+    zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
 ) -> tuple[PairScanRow, Optional[Signal]]:
     """Scan one pair and return a watchlist row plus optional signal."""
 
     decimals = pair_info.get('decimals', 5)
     name = pair_info.get('name', pair_id)
 
-    daily_df = fetch_daily_data(pair_info['ticker'], days=zone_history_days)
+    daily_df, zones = _get_live_zones(
+        pair_info['ticker'],
+        zone_history_days,
+        daily_data_cache=daily_data_cache,
+        zone_cache=zone_cache,
+    )
     if daily_df.empty:
         return (
             PairScanRow(pair_id, name, decimals, None, "NO DATA", "No daily data", "-", "-"),
             None,
         )
 
-    zones = detect_zones(daily_df)
     current_price = float(daily_df['Close'].iloc[-1])
-    nearest_support, nearest_resistance = get_nearest_zones(zones, current_price, major_only=True)
+    nearest_support, nearest_resistance = get_tradeable_zones(zones, current_price)
 
-    hourly_df = fetch_hourly_data(pair_info['ticker'], days=3)
+    hourly_df = _get_live_hourly_data(
+        pair_info['ticker'],
+        days=3,
+        hourly_data_cache=hourly_data_cache,
+    )
     if hourly_df.empty:
         return (
             PairScanRow(
@@ -272,38 +416,41 @@ def _scan_pair(
                 resistance_lower=nearest_resistance.lower if nearest_resistance else None,
                 resistance_upper=nearest_resistance.upper if nearest_resistance else None,
                 resistance_strength=nearest_resistance.strength if nearest_resistance else None,
+                support_dist_pct=_distance_to_zone_pct(current_price, nearest_support, is_support=True),
+                resistance_dist_pct=_distance_to_zone_pct(current_price, nearest_resistance, is_support=False),
             ),
             None,
         )
 
     last_bar = hourly_df.iloc[-1]
     current_price = float(last_bar['Close'])
-    current_time = hourly_df.index[-1]
-    nearest_support, nearest_resistance = get_nearest_zones(zones, current_price, major_only=True)
+    nearest_support, nearest_resistance = get_tradeable_zones(zones, current_price)
     if price_cache is not None:
         price_cache[pair_id] = current_price
 
     support_text = _format_zone_display(current_price, nearest_support, decimals, True)
     resistance_text = _format_zone_display(current_price, nearest_resistance, decimals, False)
+    s_dist = _distance_to_zone_pct(current_price, nearest_support, is_support=True)
+    r_dist = _distance_to_zone_pct(current_price, nearest_resistance, is_support=False)
+
+    zone_fields = dict(
+        support_lower=nearest_support.lower if nearest_support else None,
+        support_upper=nearest_support.upper if nearest_support else None,
+        support_strength=nearest_support.strength if nearest_support else None,
+        resistance_lower=nearest_resistance.lower if nearest_resistance else None,
+        resistance_upper=nearest_resistance.upper if nearest_resistance else None,
+        resistance_strength=nearest_resistance.strength if nearest_resistance else None,
+        support_dist_pct=s_dist,
+        resistance_dist_pct=r_dist,
+    )
 
     if pair_id in tracked_pairs:
         directions = "/".join(sorted(tracked_pairs[pair_id]))
         return (
             PairScanRow(
-                pair_id,
-                name,
-                decimals,
-                current_price,
-                "OPEN",
-                f"Tracked position ({directions})",
-                support_text,
-                resistance_text,
-                support_lower=nearest_support.lower if nearest_support else None,
-                support_upper=nearest_support.upper if nearest_support else None,
-                support_strength=nearest_support.strength if nearest_support else None,
-                resistance_lower=nearest_resistance.lower if nearest_resistance else None,
-                resistance_upper=nearest_resistance.upper if nearest_resistance else None,
-                resistance_strength=nearest_resistance.strength if nearest_resistance else None,
+                pair_id, name, decimals, current_price,
+                "OPEN", f"Tracked position ({directions})",
+                support_text, resistance_text, **zone_fields,
             ),
             None,
         )
@@ -311,67 +458,29 @@ def _scan_pair(
     if pair_id in blocked_pairs:
         return (
             PairScanRow(
-                pair_id,
-                name,
-                decimals,
-                current_price,
-                "PENDING",
-                "Active order pending",
-                support_text,
-                resistance_text,
-                support_lower=nearest_support.lower if nearest_support else None,
-                support_upper=nearest_support.upper if nearest_support else None,
-                support_strength=nearest_support.strength if nearest_support else None,
-                resistance_lower=nearest_resistance.lower if nearest_resistance else None,
-                resistance_upper=nearest_resistance.upper if nearest_resistance else None,
-                resistance_strength=nearest_resistance.strength if nearest_resistance else None,
+                pair_id, name, decimals, current_price,
+                "PENDING", "Active order pending",
+                support_text, resistance_text, **zone_fields,
             ),
             None,
         )
 
-    signal = None
-    if nearest_support:
-        signal = generate_signal(
-            bar_open=last_bar['Open'],
-            bar_close=last_bar['Close'],
-            bar_high=last_bar['High'],
-            bar_low=last_bar['Low'],
-            zone=nearest_support,
-            pair=pair_id,
-            time=current_time,
-            params=params,
-        )
-    if signal is None and nearest_resistance:
-        signal = generate_signal(
-            bar_open=last_bar['Open'],
-            bar_close=last_bar['Close'],
-            bar_high=last_bar['High'],
-            bar_low=last_bar['Low'],
-            zone=nearest_resistance,
-            pair=pair_id,
-            time=current_time,
-            params=params,
-        )
+    signal = select_entry_signal(
+        hourly_df=hourly_df,
+        bar_idx=len(hourly_df) - 1,
+        pair=pair_id,
+        params=params,
+        support_zone=nearest_support,
+        resistance_zone=nearest_resistance,
+    )
 
     if signal:
         note = f"{signal.zone_type.title()} reversal ({signal.zone_strength})"
         return (
             PairScanRow(
-                pair_id,
-                name,
-                decimals,
-                current_price,
-                signal.direction,
-                note,
-                support_text,
-                resistance_text,
-                signal,
-                nearest_support.lower if nearest_support else None,
-                nearest_support.upper if nearest_support else None,
-                nearest_support.strength if nearest_support else None,
-                nearest_resistance.lower if nearest_resistance else None,
-                nearest_resistance.upper if nearest_resistance else None,
-                nearest_resistance.strength if nearest_resistance else None,
+                pair_id, name, decimals, current_price,
+                signal.direction, note, support_text, resistance_text,
+                signal, **zone_fields,
             ),
             signal,
         )
@@ -379,20 +488,9 @@ def _scan_pair(
     state, note = _describe_watch_state(current_price, nearest_support, nearest_resistance)
     return (
         PairScanRow(
-            pair_id,
-            name,
-            decimals,
-            current_price,
-            state,
-            note,
-            support_text,
-            resistance_text,
-            support_lower=nearest_support.lower if nearest_support else None,
-            support_upper=nearest_support.upper if nearest_support else None,
-            support_strength=nearest_support.strength if nearest_support else None,
-            resistance_lower=nearest_resistance.lower if nearest_resistance else None,
-            resistance_upper=nearest_resistance.upper if nearest_resistance else None,
-            resistance_strength=nearest_resistance.strength if nearest_resistance else None,
+            pair_id, name, decimals, current_price,
+            state, note, support_text, resistance_text,
+            **zone_fields,
         ),
         None,
     )
@@ -405,6 +503,9 @@ def collect_scan_rows(
     tracked_positions: Dict[str, dict] | None = None,
     blocked_pairs: Optional[Set[str]] = None,
     price_cache: Optional[Dict[str, float]] = None,
+    daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
+    zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
 ) -> tuple[List[Signal], List[PairScanRow]]:
     """Collect structured pair rows and the executable signals among them."""
 
@@ -425,6 +526,8 @@ def collect_scan_rows(
     signals: List[Signal] = []
     pair_rows: List[PairScanRow] = []
     for pair_id, pair_info in pairs.items():
+        if is_pair_fully_blocked(pair_id, params):
+            continue
         row, signal = _scan_pair(
             pair_id,
             pair_info,
@@ -433,6 +536,9 @@ def collect_scan_rows(
             tracked_pairs,
             blocked_pairs,
             price_cache=price_cache,
+            daily_data_cache=daily_data_cache,
+            zone_cache=zone_cache,
+            hourly_data_cache=hourly_data_cache,
         )
         pair_rows.append(row)
         if signal:
@@ -472,6 +578,9 @@ def scan_opportunities(
     tracked_positions: Dict[str, dict] | None = None,
     blocked_pairs: Optional[Set[str]] = None,
     price_cache: Optional[Dict[str, float]] = None,
+    daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
+    zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
 ) -> List[Signal]:
     """Scan all pairs and print a plain-text watch table."""
 
@@ -482,6 +591,9 @@ def scan_opportunities(
         tracked_positions=tracked_positions,
         blocked_pairs=blocked_pairs,
         price_cache=price_cache,
+        daily_data_cache=daily_data_cache,
+        zone_cache=zone_cache,
+        hourly_data_cache=hourly_data_cache,
     )
     print(format_scan_rows(pair_rows))
     return signals
@@ -493,7 +605,10 @@ def format_signals(signals: List[Signal]) -> str:
     return format_signals_with_sizes(signals, size_plans=None)
 
 
-def _build_price_lookup(price_cache: Optional[Dict[str, float]] = None) -> Callable[[str], Optional[float]]:
+def _build_price_lookup(
+    price_cache: Optional[Dict[str, float]] = None,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
+) -> Callable[[str], Optional[float]]:
     """Return a cached pair-price lookup for conversion and sizing."""
 
     cache: Dict[str, Optional[float]] = {}
@@ -510,7 +625,11 @@ def _build_price_lookup(price_cache: Optional[Dict[str, float]] = None) -> Calla
             return None
 
         price = None
-        hourly_df = fetch_hourly_data(pair_info['ticker'], days=3, allow_stale_cache=True)
+        hourly_df = _get_live_hourly_data(
+            pair_info['ticker'],
+            days=3,
+            hourly_data_cache=hourly_data_cache,
+        )
         if not hourly_df.empty:
             price = float(hourly_df['Close'].iloc[-1])
 
@@ -526,13 +645,17 @@ def build_live_size_plans(
     risk_pct: float,
     account_currency: Optional[str],
     price_cache: Optional[Dict[str, float]] = None,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
 ) -> List[Optional[PositionSizePlan]]:
     """Build per-signal live size plans from the shared compounding rule."""
 
     if not signals or balance is None or balance <= 0 or not account_currency:
         return [None for _ in signals]
 
-    price_lookup = _build_price_lookup(price_cache=price_cache)
+    price_lookup = _build_price_lookup(
+        price_cache=price_cache,
+        hourly_data_cache=hourly_data_cache,
+    )
     return [
         build_position_size_plan(
             pair=signal.pair,
@@ -546,6 +669,52 @@ def build_live_size_plans(
         )
         for signal in signals
     ]
+
+
+def _correlated_exposure_count(pair_id: str, active_pairs: Set[str]) -> int:
+    """Count active same/correlated exposures for the requested pair."""
+
+    correlated_pairs = get_correlated_pairs(pair_id)
+    return sum(1 for active_pair in active_pairs if active_pair == pair_id or active_pair in correlated_pairs)
+
+
+def _estimate_reserved_portfolio_risk(
+    tracked_positions: Optional[Dict[str, dict]],
+    pending_pairs: Set[str],
+    slot_risk_amount: Optional[float],
+    account_currency: Optional[str],
+    price_lookup: Callable[[str], Optional[float]],
+) -> Optional[float]:
+    """Estimate currently reserved risk from tracked and pending live exposure."""
+
+    if slot_risk_amount is None or slot_risk_amount <= 0 or not account_currency:
+        return None
+
+    reserved_risk = float(slot_risk_amount) * len(pending_pairs)
+    if not tracked_positions:
+        return reserved_risk
+
+    for info in tracked_positions.values():
+        pair = info.get('pair')
+        trade = info.get('trade')
+        units = int(abs(info.get('ibkr_size') or 0))
+        if not pair or trade is None:
+            continue
+        if units <= 0:
+            reserved_risk += float(slot_risk_amount)
+            continue
+
+        estimated = estimate_position_risk_amount(
+            pair=pair,
+            entry_price=trade.entry_price,
+            stop_price=trade.sl_price,
+            units=units,
+            account_currency=account_currency,
+            price_lookup=price_lookup,
+        )
+        reserved_risk += float(slot_risk_amount) if estimated is None else float(estimated)
+
+    return reserved_risk
 
 
 def format_signals_with_sizes(
@@ -621,30 +790,78 @@ def execute_signal_plans(
     execute_orders: bool,
     existing_pairs: Optional[Set[str]] = None,
     pending_pairs: Optional[Set[str]] = None,
+    params: Optional[StrategyParams] = None,
+    tracked_positions: Optional[Dict[str, dict]] = None,
+    balance: Optional[float] = None,
+    risk_pct: Optional[float] = None,
+    account_currency: Optional[str] = None,
+    price_cache: Optional[Dict[str, float]] = None,
+    hourly_data_cache: Optional[Dict[str, object]] = None,
 ) -> List[ExecutionResult]:
     """Submit market orders for valid size plans when execution is enabled."""
 
     if not execute_orders or not signals:
         return []
 
+    if params is None:
+        params = StrategyParams()
+    correlation_cap = max(int(params.max_correlated_trades), 1)
     existing_pairs = existing_pairs or set()
     pending_pairs = pending_pairs or set()
+    active_pairs = set(existing_pairs) | set(pending_pairs)
+    slot_risk_amount = (
+        calculate_risk_amount(balance, risk_pct)
+        if balance is not None and risk_pct is not None and account_currency
+        else None
+    )
+    price_lookup = _build_price_lookup(
+        price_cache=price_cache,
+        hourly_data_cache=hourly_data_cache,
+    )
+    reserved_risk = _estimate_reserved_portfolio_risk(
+        tracked_positions=tracked_positions,
+        pending_pairs=pending_pairs,
+        slot_risk_amount=slot_risk_amount,
+        account_currency=account_currency,
+        price_lookup=price_lookup,
+    )
+    max_total_risk = (
+        float(slot_risk_amount) * correlation_cap
+        if slot_risk_amount is not None
+        else None
+    )
     results: List[ExecutionResult] = []
     for signal, plan in zip(signals, size_plans):
         if plan is None:
             results.append(ExecutionResult(signal.pair, signal.direction, 0, 'SKIPPED', note='size unavailable'))
             continue
-        if signal.pair in existing_pairs or signal.pair in pending_pairs:
+        if signal.pair in active_pairs:
             results.append(
                 ExecutionResult(signal.pair, signal.direction, plan.units, 'SKIPPED', note='position/order exists')
             )
             continue
+        if _correlated_exposure_count(signal.pair, active_pairs) >= correlation_cap:
+            results.append(
+                ExecutionResult(signal.pair, signal.direction, plan.units, 'SKIPPED', note='correlation cap reached')
+            )
+            continue
+        if (
+            max_total_risk is not None
+            and reserved_risk is not None
+            and reserved_risk + plan.risk_amount > max_total_risk + 1e-9
+        ):
+            results.append(
+                ExecutionResult(signal.pair, signal.direction, plan.units, 'SKIPPED', note='risk budget full')
+            )
+            continue
 
         order_ref = f"fxsr:{signal.pair}:{signal.direction}:{signal.time.strftime('%Y%m%d%H%M%S')}"
-        order = ibkr.submit_fx_market_order(
+        order = ibkr.submit_fx_market_bracket_order(
             pair=signal.pair,
             direction=signal.direction,
             quantity=plan.units,
+            take_profit_price=signal.tp_price,
+            stop_loss_price=signal.sl_price,
             order_ref=order_ref,
         )
         if order is None:
@@ -653,7 +870,10 @@ def execute_signal_plans(
             )
             continue
 
+        active_pairs.add(signal.pair)
         pending_pairs.add(signal.pair)
+        if reserved_risk is not None:
+            reserved_risk += plan.risk_amount
         results.append(
             ExecutionResult(
                 signal.pair,
@@ -661,7 +881,7 @@ def execute_signal_plans(
                 plan.units,
                 order.get('status') or 'SUBMITTED',
                 order_id=order.get('order_id'),
-                note=f"risk {plan.account_currency} {plan.risk_amount:,.2f}",
+                note=f"risk {plan.account_currency} {plan.risk_amount:,.2f}; tp/sl attached",
             )
         )
     return results
@@ -729,6 +949,9 @@ def run_monitor_cycle(
         tracked = sync_positions(params, zone_history_days) if track_positions else {}
 
         market_prices: Dict[str, float] = {}
+        daily_data_cache: Dict[tuple[str, int], object] = {}
+        zone_cache: Dict[tuple[str, int], List[SRZone]] = {}
+        hourly_data_cache: Dict[str, object] = {}
         signals, pair_rows = collect_scan_rows(
             pairs=pairs,
             params=params,
@@ -736,10 +959,14 @@ def run_monitor_cycle(
             tracked_positions=tracked,
             blocked_pairs=pending_pairs,
             price_cache=market_prices,
+            daily_data_cache=daily_data_cache,
+            zone_cache=zone_cache,
+            hourly_data_cache=hourly_data_cache,
         )
 
         active_balance = balance
-        active_currency = account_currency.upper() if account_currency else None
+        env_currency = os.getenv('IBKR_ACCOUNT_CURRENCY')
+        active_currency = account_currency.upper() if account_currency else (env_currency.upper() if env_currency else None)
         if active_balance is None:
             active_balance, fetched_currency = ibkr.fetch_account_net_liquidation()
             if active_currency is None and fetched_currency not in (None, 'BASE'):
@@ -751,6 +978,7 @@ def run_monitor_cycle(
             risk_pct,
             active_currency,
             price_cache=market_prices,
+            hourly_data_cache=hourly_data_cache,
         )
         execution_results = execute_signal_plans(
             signals,
@@ -758,12 +986,23 @@ def run_monitor_cycle(
             execute_orders=execute_orders,
             existing_pairs={info['pair'] for info in tracked.values()},
             pending_pairs=pending_pairs,
+            params=params,
+            tracked_positions=tracked,
+            balance=active_balance,
+            risk_pct=risk_pct,
+            account_currency=active_currency,
+            price_cache=market_prices,
+            hourly_data_cache=hourly_data_cache,
         )
 
         alerts: List[dict] = []
         position_snapshots: Dict[str, dict] = {}
         if track_positions and tracked:
-            alerts, position_snapshots = check_position_exits(tracked, params)
+            alerts, position_snapshots = check_position_exits(
+                tracked,
+                params,
+                hourly_data_cache=hourly_data_cache,
+            )
 
     messages = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()] if capture_output else []
     scan_completed_at = datetime.now()

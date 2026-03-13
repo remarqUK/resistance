@@ -13,14 +13,15 @@ from typing import Optional
 import pandas as pd
 from aiohttp import web
 
-from .backtest import _slice_daily_window, _finalize_trade
+from .backtest import _slice_daily_window, _deserialize_backtest_result, _finalize_trade
 from .config import PAIRS, STRATEGY_PRESETS, DEFAULT_ZONE_HISTORY_DAYS
+from .profiles import PROFILES, get_profile
 from . import db
 from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
-from .levels import detect_zones, get_nearest_zones, SRZone
+from .levels import detect_zones, SRZone
 from .strategy import (
-    Trade, StrategyParams, generate_signal, check_exit,
-    check_momentum_filter, BLOCKED_PAIR_DIRECTIONS,
+    Trade, StrategyParams, check_exit, build_trade_from_signal,
+    get_tradeable_zones, select_entry_signal,
 )
 
 
@@ -60,6 +61,68 @@ def _trade_to_dict(trade: Trade, pip: float) -> dict:
     return d
 
 
+def _trade_row_to_dict(
+    pair: str,
+    trade: Trade,
+    decimals: int,
+    source_row: dict,
+) -> dict:
+    return {
+        'pair': pair,
+        'entry_time': str(trade.entry_time),
+        'exit_time': str(trade.exit_time) if trade.exit_time is not None else None,
+        'direction': trade.direction,
+        'entry_price': round(float(trade.entry_price), decimals),
+        'exit_price': float(trade.exit_price) if trade.exit_price is not None else None,
+        'sl_price': round(float(trade.sl_price), decimals),
+        'tp_price': round(float(trade.tp_price), decimals),
+        'decimals': decimals,
+        'zone_upper': round(float(trade.zone_upper), decimals),
+        'zone_lower': round(float(trade.zone_lower), decimals),
+        'zone_strength': trade.zone_strength,
+        'risk': float(trade.risk),
+        'bars_held': int(trade.bars_held),
+        'pnl_pips': round(float(trade.pnl_pips), 1),
+        'pnl_r': round(float(trade.pnl_r), 2),
+        'exit_reason': trade.exit_reason,
+        'hourly_days': source_row['hourly_days'],
+        'zone_history_days': source_row['zone_history_days'],
+        'strategy_version': source_row['strategy_version'],
+        'updated_at': source_row['updated_at'],
+    }
+
+
+def _load_latest_cached_backtest_rows(pair: str | None = None) -> list[dict]:
+    from .backtest import BACKTEST_CACHE_VERSION
+    rows = db.load_backtest_results(pairs=[pair] if pair else None)
+    latest_by_pair = {}
+    for row in rows:
+        # Only show results from the current strategy version
+        if row.get('strategy_version') != BACKTEST_CACHE_VERSION:
+            continue
+        pair_value = row['pair']
+        if pair_value not in latest_by_pair:
+            latest_by_pair[pair_value] = row
+    return list(latest_by_pair.values())
+
+
+def _load_cached_backtest_trades(pair: str | None = None) -> list[dict]:
+    rows = _load_latest_cached_backtest_rows(pair)
+    trades: list[dict] = []
+    for row in rows:
+        try:
+            result = _deserialize_backtest_result(row['result_json'])
+        except (ValueError, TypeError, KeyError):
+            continue
+
+        decimals = PAIRS.get(row['pair'], {}).get('decimals', 5)
+        for trade in result.trades:
+            trades.append(_trade_row_to_dict(row['pair'], trade, decimals, row))
+
+    trades.sort(key=lambda item: item['entry_time'] or '', reverse=True)
+    return trades
+
+
 def generate_replay_frames(
     daily_df: pd.DataFrame,
     hourly_df: pd.DataFrame,
@@ -85,6 +148,7 @@ def generate_replay_frames(
     nearest_support: Optional[SRZone] = None
     nearest_resistance: Optional[SRZone] = None
     last_trade_bar = -params.cooldown_bars
+    last_trade_was_loss = False
     last_zone_date = None
     trade_entry_bar = 0
 
@@ -108,24 +172,27 @@ def generate_replay_frames(
             daily_window = _slice_daily_window(daily_df, bar_date, zone_history_days)
             if len(daily_window) >= 20:
                 current_zones = detect_zones(daily_window)
-                current_price = float(row['Close'])
-                nearest_support, nearest_resistance = get_nearest_zones(
-                    current_zones, current_price, major_only=True,
-                )
+            else:
+                current_zones = []
             last_zone_date = current_date
+
+        current_price = float(row['Close'])
+        nearest_support, nearest_resistance = get_tradeable_zones(current_zones, current_price)
 
         # --- capture zones once we reach the target day ---
         is_target = str(current_date) == str(target_date)
 
-        # Collect pre-target bars as context
-        if not is_target:
-            context_bars.append({
-                'time': str(current_time),
-                'open': round(float(row['Open']), decimals),
-                'high': round(float(row['High']), decimals),
-                'low': round(float(row['Low']), decimals),
-                'close': round(float(row['Close']), decimals),
-            })
+        # Collect pre-target bars as context (7 days before target only)
+        if not is_target and current_date < target_date:
+            context_cutoff = target_date - timedelta(days=7)
+            if current_date >= context_cutoff:
+                context_bars.append({
+                    'time': str(current_time),
+                    'open': round(float(row['Open']), decimals),
+                    'high': round(float(row['High']), decimals),
+                    'low': round(float(row['Low']), decimals),
+                    'close': round(float(row['Close']), decimals),
+                })
 
         if is_target and not day_zones and current_zones:
             day_zones = [_zone_to_dict(z) for z in current_zones]
@@ -159,6 +226,7 @@ def generate_replay_frames(
                 }
                 completed_trades.append(_trade_to_dict(finished, pip))
                 last_trade_bar = i
+                last_trade_was_loss = finished.pnl_r <= 0
                 current_trade = None
 
                 if is_target:
@@ -172,64 +240,21 @@ def generate_replay_frames(
                 continue
 
         # --- check entry ---
-        if current_trade is None and (i - last_trade_bar) >= params.cooldown_bars:
-            if params.use_time_filters:
-                entry_hour = current_time.hour if hasattr(current_time, 'hour') else 0
-                entry_weekday = current_time.weekday() if hasattr(current_time, 'weekday') else 0
-                if entry_hour in params.blocked_hours or entry_weekday in params.blocked_days:
-                    if is_target:
-                        frames.append(_build_frame(
-                            bar_index_in_day, current_time, row,
-                            current_zones, nearest_support, nearest_resistance,
-                            None, None, None, list(completed_trades),
-                            decimals,
-                        ))
-                        bar_index_in_day += 1
-                    continue
-
-            signal = None
-            # Try support
-            if nearest_support:
-                if not check_momentum_filter(hourly_df, i, nearest_support, params):
-                    signal = generate_signal(
-                        bar_open=row['Open'], bar_close=row['Close'],
-                        bar_high=row['High'], bar_low=row['Low'],
-                        zone=nearest_support, pair=pair,
-                        time=current_time, params=params,
-                    )
-                    if signal and params.use_pair_direction_filter and \
-                            (pair, signal.direction) in BLOCKED_PAIR_DIRECTIONS:
-                        signal = None
-
-            # Try resistance if no support signal
-            if signal is None and nearest_resistance:
-                if not check_momentum_filter(hourly_df, i, nearest_resistance, params):
-                    signal = generate_signal(
-                        bar_open=row['Open'], bar_close=row['Close'],
-                        bar_high=row['High'], bar_low=row['Low'],
-                        zone=nearest_resistance, pair=pair,
-                        time=current_time, params=params,
-                    )
-                    if signal and params.use_pair_direction_filter and \
-                            (pair, signal.direction) in BLOCKED_PAIR_DIRECTIONS:
-                        signal = None
+        cooldown = params.cooldown_bars
+        if last_trade_was_loss and params.loss_cooldown_bars > 0:
+            cooldown = max(cooldown, params.loss_cooldown_bars)
+        if current_trade is None and (i - last_trade_bar) >= cooldown:
+            signal = select_entry_signal(
+                hourly_df=hourly_df,
+                bar_idx=i,
+                pair=pair,
+                params=params,
+                support_zone=nearest_support,
+                resistance_zone=nearest_resistance,
+            )
 
             if signal:
-                if signal.direction == 'LONG':
-                    risk = signal.entry_price - signal.sl_price
-                else:
-                    risk = signal.sl_price - signal.entry_price
-                current_trade = Trade(
-                    entry_time=signal.time,
-                    entry_price=signal.entry_price,
-                    direction=signal.direction,
-                    sl_price=signal.sl_price,
-                    tp_price=signal.tp_price,
-                    zone_upper=signal.zone_upper,
-                    zone_lower=signal.zone_lower,
-                    zone_strength=signal.zone_strength,
-                    risk=risk,
-                )
+                current_trade = build_trade_from_signal(signal)
                 trade_entry_bar = i
                 signal_event = {
                     'direction': signal.direction,
@@ -263,10 +288,16 @@ def generate_replay_frames(
             ))
             bar_index_in_day += 1
 
-    # Summary
-    wins = sum(1 for t in completed_trades if t.get('pnl_pips', 0) > 0)
-    losses = sum(1 for t in completed_trades if t.get('pnl_pips', 0) <= 0)
-    total_pips = sum(t.get('pnl_pips', 0) for t in completed_trades)
+    # Summary — separate target-day trades from all trades
+    target_str = str(target_date)
+    day_trades = [t for t in completed_trades if str(t.get('entry_time', ''))[:10] == target_str]
+    wins = sum(1 for t in day_trades if t.get('pnl_pips', 0) > 0)
+    losses = sum(1 for t in day_trades if t.get('pnl_pips', 0) <= 0)
+    total_pips = sum(t.get('pnl_pips', 0) for t in day_trades)
+    total_r = round(sum(t.get('pnl_r', 0) for t in day_trades), 2)
+    all_trades_count = len(completed_trades)
+    all_pips = round(sum(t.get('pnl_pips', 0) for t in completed_trades), 1)
+    all_r = round(sum(t.get('pnl_r', 0) for t in completed_trades), 2)
 
     from datetime import date as date_cls
     incomplete = target_date >= date_cls.today()
@@ -275,14 +306,19 @@ def generate_replay_frames(
         'frames': frames,
         'context_bars': context_bars,
         'zones': day_zones,
+        'all_completed_trades': completed_trades,
         'summary': {
             'pair': pair,
             'date': str(target_date),
             'total_bars': len(frames),
-            'total_trades': len(completed_trades),
+            'total_trades': len(day_trades),
             'wins': wins,
             'losses': losses,
             'total_pnl_pips': round(total_pips, 1),
+            'total_pnl_r': total_r,
+            'all_trades': all_trades_count,
+            'all_pnl_pips': all_pips,
+            'all_pnl_r': all_r,
             'decimals': decimals,
             'pip': pip,
             'incomplete': incomplete,
@@ -364,10 +400,89 @@ def _expand_hourly_to_minutes(
 # HTTP handlers
 # ---------------------------------------------------------------------------
 
+def _pair_from_request(request: web.Request) -> str | None:
+    """Normalize optional pair query param."""
+    pair = request.query.get('pair', '')
+    pair = pair.upper().strip()
+    return pair or None
+
+
+async def handle_backtest_trades_page(_request: web.Request) -> web.StreamResponse:
+    """Serve the backtest trades page."""
+    return web.FileResponse(WEB_DIR / 'backtest_trades.html')
+
+
+async def handle_backtest_diary_page(_request: web.Request) -> web.StreamResponse:
+    """Serve the backtest diary page."""
+    return web.FileResponse(WEB_DIR / 'backtest_diary.html')
+
+
+async def handle_backtest_trades_api(_request: web.Request) -> web.Response:
+    """Return completed backtest trades for all cached pairs."""
+    pair_filter = _pair_from_request(_request)
+    if pair_filter is not None and pair_filter not in PAIRS:
+        return web.json_response({'error': f'Unknown pair: {pair_filter}'}, status=400)
+
+    trades = _load_cached_backtest_trades(pair=pair_filter)
+    rows = _load_latest_cached_backtest_rows(pair=pair_filter)
+    available_pairs = sorted({row['pair'] for row in rows})
+
+    return web.json_response({
+        'trades': trades,
+        'pairs': available_pairs,
+        'pair_filter': pair_filter,
+        'count': len(trades),
+    })
+
+
+async def handle_backtest_diary_api(_request: web.Request) -> web.Response:
+    """Return trades whose entry or exit occurs on the selected date."""
+    pair_filter = _pair_from_request(_request)
+    date_str = _request.query.get('date', '')
+    if pair_filter is not None and pair_filter not in PAIRS:
+        return web.json_response({'error': f'Unknown pair: {pair_filter}'}, status=400)
+    if not date_str:
+        return web.json_response({'error': 'Missing date'}, status=400)
+
+    try:
+        selected = date.fromisoformat(date_str)
+    except ValueError:
+        return web.json_response({'error': f'Invalid date: {date_str}'}, status=400)
+    selected_str = str(selected)
+
+    trades = _load_cached_backtest_trades(pair=pair_filter)
+    matches = []
+    for trade in trades:
+        entry_match = (trade['entry_time'] or '').startswith(selected_str)
+        exit_match = (trade['exit_time'] or '').startswith(selected_str) if trade['exit_time'] else False
+        if entry_match or exit_match:
+            matches.append(trade)
+
+    wins = sum(1 for trade in matches if trade['pnl_pips'] > 0)
+    losses = len(matches) - wins
+    total_pnl_pips = round(sum(trade['pnl_pips'] for trade in matches), 1)
+    total_pnl_r = round(sum(trade['pnl_r'] for trade in matches), 2)
+
+    return web.json_response({
+        'date': selected_str,
+        'pair_filter': pair_filter,
+        'trades': matches,
+        'count': len(matches),
+        'wins': wins,
+        'losses': losses,
+        'total_pnl_pips': total_pnl_pips,
+        'total_pnl_r': total_pnl_r,
+    })
+
+
 def _build_params(preset_name: str) -> StrategyParams:
-    """Build StrategyParams from a preset name."""
-    preset = STRATEGY_PRESETS.get(preset_name, STRATEGY_PRESETS.get('optimized', {}))
-    return StrategyParams(**preset)
+    """Build StrategyParams from a profile name, using all profile values."""
+    from .strategy import params_from_profile
+    try:
+        profile = get_profile(preset_name)
+    except KeyError:
+        profile = get_profile('optimized')
+    return params_from_profile(profile)
 
 
 async def handle_replay_page(_request: web.Request) -> web.StreamResponse:
@@ -401,8 +516,10 @@ async def handle_replay(request: web.Request) -> web.Response:
     daily_end = datetime(target.year, target.month, target.day, 23, 59, 59)
     daily_df = db.load_ohlc(ticker, '1d', start=daily_start, end=daily_end)
 
-    hourly_start = datetime(target.year, target.month, target.day) - timedelta(days=7)
-    hourly_end = datetime(target.year, target.month, target.day, 23, 59, 59)
+    hourly_start = datetime(target.year, target.month, target.day) - timedelta(days=30)
+    today = date.today()
+    hourly_end_date = max(target, today)
+    hourly_end = datetime(hourly_end_date.year, hourly_end_date.month, hourly_end_date.day, 23, 59, 59)
     hourly_df = db.load_ohlc(ticker, '1h', start=hourly_start, end=hourly_end)
 
     if daily_df.empty or hourly_df.empty:
@@ -415,7 +532,7 @@ async def handle_replay(request: web.Request) -> web.Response:
     decimals = PAIRS[pair].get('decimals', 5)
     result = generate_replay_frames(daily_df, hourly_df, pair, target, params, zone_history_days)
 
-    if not result['frames']:
+    if not result['frames'] and not result['context_bars']:
         return web.json_response(
             {'error': f'No bars found for {pair} on {date_str}. Click "Update Data" to fetch from IBKR.'},
             status=404,
@@ -498,3 +615,12 @@ async def handle_replay_refresh(request: web.Request) -> web.Response:
         'hourly_bars': len(hourly_df),
         'minute_bars': len(minute_df),
     })
+
+
+async def handle_replay_presets(_request: web.Request) -> web.Response:
+    """``GET /api/replay/presets`` — return available profile names and descriptions."""
+    presets = [
+        {'name': name, 'description': p['description']}
+        for name, p in PROFILES.items()
+    ]
+    return web.json_response({'presets': presets})

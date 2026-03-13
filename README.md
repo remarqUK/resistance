@@ -2,25 +2,31 @@
 
 Mean reversion trading system for forex, based on the NickShawnFX support/resistance workflow. The executable implementation now uses SQLite cache plus IBKR data only. There is no Yahoo Finance fallback anywhere in the strategy stack.
 
-## Performance (365-day direct CLI runs, March 10, 2026)
+## Performance (365-day backtest, March 13, 2026)
 
-| Preset | Signals (raw) | Trades (compounded) | Win rate (compounded) | Return (compounding) | Max drawdown | Final balance |
-|--------|----------------|---------------------|-----------------------|----------------------|--------------|---------------|
-| `source` | 242 | 240 | 45.4% | +524.5% | 21.3% | GBP 62,449.46 |
-| `balanced` | 236 | 235 | 39.6% | +410.4% | 21.3% | GBP 51,040.66 |
-| `aggressive` | 250 | 250 | 47.2% | +767.4% | 31.4% | GBP 86,738.13 |
+| Profile | Trades | Win rate | Return | Max drawdown | Max streak | Final balance |
+|---------|--------|----------|--------|--------------|------------|---------------|
+| `high_volume` | 532 | 48.7% | +87,710% | 20.0% | 6 | GBP 8,781,044 |
+| `optimized` | 99 | 51.5% | +337% | 17.8% | 4 | GBP 43,700 |
+| `source` | 240 | 45.4% | +525% | 21.3% | — | GBP 62,449 |
+| `balanced` | 235 | 39.6% | +410% | 21.3% | — | GBP 51,041 |
+| `aggressive` | 250 | 47.2% | +767% | 31.4% | — | GBP 86,738 |
 
-These runs now use the conservative execution model: IBKR `MIDPOINT` bars, `0.6` pip spread, `0.2` pip stop slippage, and worst-case same-bar TP/SL resolution to `SL`.
+`high_volume` uses dynamic equity-curve risk sizing: 8% risk at equity highs, scaling linearly down to 0.5% during drawdowns (5-18% DD range). This preserves aggressive compounding during winning runs while capping drawdown at 20%.
 
-Assumptions: all 10 major FX pairs, `zone_history_days=180`, `GBP 10,000` starting balance, and `5%` risk per trade. The repo default remains `balanced`, but the latest conservative run shows `source` ahead of it on return with the same max drawdown.
+All runs use the conservative execution model: IBKR `MIDPOINT` bars, `0.6` pip spread, `0.2` pip stop slippage, and worst-case same-bar TP/SL resolution to `SL`.
 
-## Named Presets
+Assumptions: 22 FX pairs (15 active after pair-direction blocking), `zone_history_days=180`, `GBP 10,000` starting balance. Avg win: +1.06R, avg loss: -0.48R.
 
-| Preset | Purpose | Key differences |
-|--------|---------|-----------------|
-| `source` | Closest CLI match to the original 1:1 playbook | `rr=1.0`, `early_exit=0.4`, `max_correlated_trades=3`; strongest latest lower-drawdown result |
-| `balanced` | Current repo default | Conservative `1.2R` profile; trailed `source` on the latest conservative run |
-| `aggressive` | Highest-return variant | `sl_buffer=0.10`, `min_entry_body=0.10`, highest drawdown of the shipped presets |
+## Named Profiles
+
+| Profile | Purpose | Key differences |
+|---------|---------|-----------------|
+| `high_volume` | Primary profile — highest trade count with dynamic risk | `rr=1.1`, `zp=0.42`, `mom=0.6`, 8% base risk with DD-scaled floor at 0.5%, 17 pair blocks |
+| `optimized` | Best risk-adjusted with strict filters | `rr=1.3`, `zp=0.55`, `body=0.15`, 26 pair blocks, lowest trade count |
+| `source` | Closest to the original NickShawnFX 1:1 playbook | `rr=1.0`, `early_exit=0.4`, `max_correlated_trades=3` |
+| `balanced` | Conservative default | `rr=1.2` profile with moderate filters |
+| `aggressive` | Highest-return fixed-risk variant | `sl_buffer=0.10`, `body=0.10`, highest drawdown of the fixed-risk profiles |
 
 ## Quick Start
 
@@ -147,9 +153,11 @@ Backtest engine / Live scanner / Position monitor
 viz_data.json --> chart.html
 ```
 
-## Supported Pairs
+## Supported Pairs (22)
 
-`EURUSD`, `USDJPY`, `GBPUSD`, `USDCHF`, `AUDUSD`, `USDCAD`, `NZDUSD`, `EURGBP`, `EURJPY`, `GBPJPY`
+**Majors:** `EURUSD`, `USDJPY`, `GBPUSD`, `USDCHF`, `AUDUSD`, `USDCAD`, `NZDUSD`
+
+**Crosses:** `EURGBP`, `EURJPY`, `GBPJPY`, `AUDJPY`, `CADJPY`, `CHFJPY`, `EURAUD`, `EURCAD`, `EURCHF`, `GBPAUD`, `GBPCAD`, `GBPCHF`, `AUDNZD`, `NZDJPY`, `AUDCAD`
 
 ## IBKR Setup
 

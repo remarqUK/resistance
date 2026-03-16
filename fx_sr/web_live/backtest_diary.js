@@ -1,3 +1,4 @@
+const backtestFilter = document.getElementById("backtest-filter");
 const loadBtn = document.getElementById("load-btn");
 const monthRangeEl = document.getElementById("month-range");
 const summaryEl = document.getElementById("summary");
@@ -5,6 +6,8 @@ const selectedDateEl = document.getElementById("selected-date");
 const calendarEl = document.getElementById("diary-calendar");
 const bodyEl = document.getElementById("diary-body");
 const BACKTEST_CURRENCY = "GBP";
+const PRICE_DISPLAY_DECIMALS = 5;
+let selectedBacktest = null;
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -73,7 +76,7 @@ function formatSigned(value, digits = 2, suffix = "") {
   })}${suffix}`;
 }
 
-function formatNumber(value, digits = 2) {
+function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "–";
   }
@@ -108,10 +111,75 @@ function formatTime(isoTime) {
   });
 }
 
+function formatBacktestDate(isoTime) {
+  if (!isoTime) {
+    return "";
+  }
+  const parsed = new Date(isoTime);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(isoTime).slice(0, 10);
+  }
+  return parsed.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  });
+}
+
 function replayDateForTrade(trade) {
   if (trade.entry_time) return String(trade.entry_time).slice(0, 10);
   if (trade.exit_time) return String(trade.exit_time).slice(0, 10);
   return "";
+}
+
+function formatBacktestOption(backtest) {
+  if (!backtest) return "Unknown backtest";
+  const parts = [];
+  const dateLabel = formatBacktestDate(backtest.updated_at);
+  const nameLabel = backtest.label || backtest.profile_name || "cached run";
+  if (dateLabel) {
+    parts.push(dateLabel);
+  }
+  parts.push(nameLabel);
+  if (backtest.description && backtest.description !== nameLabel) {
+    parts.push(backtest.description);
+  }
+  if (backtest.hourly_days && backtest.zone_history_days) {
+    parts.push(`${backtest.hourly_days}d / ${backtest.zone_history_days}d`);
+  }
+  if (backtest.starting_balance !== null && backtest.starting_balance !== undefined) {
+    parts.push(`${formatCurrency(backtest.starting_balance)} @ ${formatNumber(backtest.risk_pct, 2)}%`);
+  }
+  return parts.join(" · ");
+}
+
+function populateBacktests(backtests, selectedKey = "") {
+  const current = selectedKey || backtestFilter.value;
+  backtestFilter.innerHTML = "";
+
+  if (!backtests.length) {
+    backtestFilter.innerHTML = "<option value=\"\">No cached runs</option>";
+    backtestFilter.disabled = true;
+    selectedBacktest = null;
+    return;
+  }
+
+  backtestFilter.disabled = false;
+  backtests.forEach((backtest) => {
+    const option = document.createElement("option");
+    option.value = backtest.key || "";
+    option.textContent = formatBacktestOption(backtest);
+    backtestFilter.appendChild(option);
+  });
+
+  const availableKeys = backtests.map((backtest) => backtest.key);
+  if (availableKeys.includes(current)) {
+    backtestFilter.value = current;
+  } else {
+    backtestFilter.value = availableKeys[0] || "";
+  }
+
+  selectedBacktest = backtests.find((backtest) => backtest.key === backtestFilter.value) || backtests[0] || null;
 }
 
 function tradeActiveDates(trade) {
@@ -136,13 +204,14 @@ function tradeRealizedDate(trade) {
   return isIsoDate(entryDate) ? entryDate : "";
 }
 
-function openReplay(pair, date, preset, entryTime = "") {
+function openReplay(pair, date, preset, entryTime = "", backtestKey = "") {
   if (!pair || !date) return;
   const params = new URLSearchParams({
     pair: String(pair).toUpperCase(),
     date,
   });
   if (preset) params.set('preset', preset);
+  if (backtestKey) params.set('backtest', backtestKey);
   if (entryTime) params.set('entry', entryTime);
   window.location.href = `/replay?${params.toString()}`;
 }
@@ -161,7 +230,7 @@ function buildRows(trades, dateFilter = "") {
   bodyEl.innerHTML = trades.map((trade) => {
     const pnlClass = (trade.pnl_pips || 0) >= 0 ? "up" : "down";
     const directionClass = (trade.direction || "").toLowerCase();
-    const digits = trade.decimals || 5;
+    const digits = PRICE_DISPLAY_DECIMALS;
     const tradeDate = dateFilter || replayDateForTrade(trade);
     const exitPrice = trade.exit_price ? formatNumber(trade.exit_price, digits) : "—";
     const safePair = escapeHtml(trade.pair || "");
@@ -186,7 +255,13 @@ function buildRows(trades, dateFilter = "") {
     const pair = row.dataset.pair || "";
     const date = row.dataset.date || "";
     const entry = row.dataset.entry || "";
-    row.addEventListener("click", () => openReplay(pair, date, "", entry));
+    row.addEventListener("click", () => openReplay(
+      pair,
+      date,
+      "",
+      entry,
+      selectedBacktest?.key || "",
+    ));
   });
 }
 
@@ -251,7 +326,7 @@ function openReplayForDate(date) {
   const firstTrade = dayData.trades[0];
   const pair = selectReplayPair(dayData.trades);
   if (!pair) return;
-  openReplay(pair, date, "", firstTrade?.entry_time || "");
+  openReplay(pair, date, "", firstTrade?.entry_time || "", selectedBacktest?.key || "");
 }
 
 function monthStartFromDate(date) {
@@ -426,12 +501,21 @@ function loadDiaryData() {
   loadBtn.textContent = "Loading...";
   showLoading("Loading trades cache…");
 
-  return fetch("/api/backtest/trades")
+  const params = new URLSearchParams();
+  const selectedBacktestKey = backtestFilter.value;
+  if (selectedBacktestKey) {
+    params.set("backtest", selectedBacktestKey);
+  }
+  const endpoint = params.toString() ? `/api/backtest/trades?${params}` : "/api/backtest/trades";
+
+  return fetch(endpoint)
     .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) {
         throw new Error(data.error || "Unable to load backtest trades.");
       }
+      populateBacktests(data.backtests || [], data.selected_backtest?.key || "");
+      selectedBacktest = data.selected_backtest || null;
       const trades = data.trades || [];
       dateMap = buildCalendarState(trades);
       renderCalendar();
@@ -472,5 +556,6 @@ function defaultDateFromQuery(sortedDates) {
 let dateMap = new Map();
 let selectedDate = "";
 
+backtestFilter.addEventListener("change", loadDiaryData);
 loadBtn.addEventListener("click", loadDiaryData);
 loadDiaryData();

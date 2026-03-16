@@ -14,8 +14,10 @@
           <h1><span class="eyebrow">FX support / resistance scanner</span>Live Market Board</h1>
           <p class="subtitle" id="hero-sizing"><span id="sizing-summary">Resolving</span> · <span id="strategy-label">Strategy preset</span></p>
         </div>
-        <span id="connection-pill" class="pill pill-muted">Connecting</span>
-        <div class="hero-actions hero-actions-vertical">
+        <div><span id="connection-pill" class="pill pill-muted">Connecting</span></div>
+        <div><button id="trade-toggle-btn" type="button" class="toolbar-btn hero-toggle-btn" hidden>Pause Entries</button></div>
+        <div><button id="stop-server-btn" type="button" class="toolbar-btn" style="color:#fff;background:#b23b29;border-color:#b23b29">Stop Server</button></div>
+        <div class="hero-actions hero-actions-vertical hero-links-column">
           <a href="/replay" target="_blank" class="hero-action">Strategy Replay</a>
           <a href="/backtest-trades" target="_blank" class="hero-action">All Backtest Trades</a>
           <a href="/backtest-diary" target="_blank" class="hero-action">Trade Diary</a>
@@ -38,6 +40,11 @@
         <span class="meta-label">Tracked positions</span>
         <strong id="position-count">0</strong>
         <span id="execution-mode" class="metric-detail">Scan only</span>
+      </article>
+      <article class="metric-card">
+        <span class="meta-label">Next transaction</span>
+        <strong id="next-transaction-timer">--:--</strong>
+        <span id="next-transaction-at" class="metric-detail">Waiting for next top of hour</span>
       </article>
     </section>
 

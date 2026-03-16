@@ -88,6 +88,19 @@ python run.py live --pair EURUSD --interval 30
 python run.py live --no-positions
 ```
 
+### Live dashboard controls
+
+- Header controls now include:
+  - live status pill (`Connecting` / `Live` / `Scanning` / `Disconnected`)
+  - `Pause Entries`
+  - `Stop Server`
+  - links: `Strategy Replay`, `All Backtest Trades`, `Trade Diary`
+- `Trade Diary` now loads available cached backtest runs first, then shows the selected run in the calendar view
+- Dashboard shows a next-transaction countdown and beeps at:
+  - 10 minutes: 1 beep
+  - 5 minutes: 2 beeps
+  - 2 minutes: 3 beeps
+
 ### 4. L2 capture
 
 ```bash

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Chart</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body { margin: 0; background: var(--bg-page); }
+    .chart-shell { display: flex; flex-direction: column; height: 100vh; }
+    .chart-header {
+      display: flex; align-items: center; gap: 16px;
+      padding: 12px 20px; background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+    }
+    .chart-header h1 { font-size: 1.3rem; margin: 0; }
+    .chart-header .pair-name { color: var(--accent); }
+    .chart-header .live-price { font-family: "Aptos", monospace; font-size: 1.1rem; }
+    .chart-header .back-link { color: var(--fg-soft); text-decoration: none; font-size: 0.9rem; }
+    .chart-header .back-link:hover { color: var(--accent); }
+    .chart-header .zone-info { font-size: 0.85rem; color: var(--fg-soft); }
+    .chart-header .zone-info .zone-label { font-weight: 600; }
+    .chart-container { flex: 1; }
+  </style>
+</head>
+<body>
+  <div class="chart-shell">
+    <div class="chart-header">
+      <a href="/" class="back-link">Back</a>
+      <h1><span class="pair-name" id="pair-name">--</span></h1>
+      <span class="live-price" id="live-price">--</span>
+      <span id="connection-pill" class="pill pill-muted">Connecting</span>
+      <span class="zone-info" id="zone-info"></span>
+    </div>
+    <div class="chart-container" id="chart-container"></div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const pair = params.get('pair') || '';
+    if (!pair) {
+      document.getElementById('pair-name').textContent = 'No pair specified';
+    }
+    document.getElementById('pair-name').textContent = pair;
+    document.title = `${pair} - Live Chart`;
+
+    let chart = null;
+    let candleSeries = null;
+    let supportLine = null;
+    let resistanceLine = null;
+    const CHART_DECIMALS = 5;
+    let decimals = CHART_DECIMALS;
+
+    function initChart() {
+      const container = document.getElementById('chart-container');
+      chart = LightweightCharts.createChart(container, {
+        layout: {
+          background: { type: 'solid', color: '#1a1510' },
+          textColor: '#a69882',
+        },
+        grid: {
+          vertLines: { color: 'rgba(166, 152, 130, 0.08)' },
+          horzLines: { color: 'rgba(166, 152, 130, 0.08)' },
+        },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: 'rgba(166, 152, 130, 0.2)' },
+        timeScale: {
+          borderColor: 'rgba(166, 152, 130, 0.2)',
+          timeVisible: true,
+          secondsVisible: false,
+        },
+      });
+
+      candleSeries = chart.addCandlestickSeries({
+        upColor: '#1f7a49',
+        downColor: '#b23b29',
+        borderUpColor: '#1f7a49',
+        borderDownColor: '#b23b29',
+        wickUpColor: '#1f7a49',
+        wickDownColor: '#b23b29',
+        priceFormat: {
+          type: 'price',
+          precision: CHART_DECIMALS,
+          minMove: 1 / Math.pow(10, CHART_DECIMALS),
+        },
+      });
+
+      new ResizeObserver(() => {
+        chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+      }).observe(container);
+    }
+
+    function addZoneLines(support, resistance) {
+      if (support) {
+        supportLine = candleSeries.createPriceLine({
+          price: support.lower,
+          color: '#1f7a49',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `S ${support.strength}`,
+        });
+        candleSeries.createPriceLine({
+          price: support.upper,
+          color: 'rgba(31, 122, 73, 0.4)',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: false,
+        });
+        document.getElementById('zone-info').innerHTML +=
+          `<span class="zone-label" style="color:#1f7a49">S:</span> ${support.lower.toFixed(decimals)}-${support.upper.toFixed(decimals)} `;
+      }
+      if (resistance) {
+        resistanceLine = candleSeries.createPriceLine({
+          price: resistance.upper,
+          color: '#b23b29',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `R ${resistance.strength}`,
+        });
+        candleSeries.createPriceLine({
+          price: resistance.lower,
+          color: 'rgba(178, 59, 41, 0.4)',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: false,
+        });
+        document.getElementById('zone-info').innerHTML +=
+          `<span class="zone-label" style="color:#b23b29">R:</span> ${resistance.lower.toFixed(decimals)}-${resistance.upper.toFixed(decimals)}`;
+      }
+    }
+
+    async function loadChartData() {
+      if (!pair) return;
+      try {
+        const resp = await fetch(`/api/chart-data?pair=${encodeURIComponent(pair)}`);
+        const data = await resp.json();
+        if (data.error) return;
+
+        decimals = CHART_DECIMALS;
+        if (data.bars && data.bars.length) {
+          loadedBars = data.bars;
+          candleSeries.setData(data.bars);
+          const last = data.bars[data.bars.length - 1];
+          document.getElementById('live-price').textContent = last.close.toFixed(decimals);
+        }
+        addZoneLines(data.support, data.resistance);
+      } catch (e) {
+        console.error('Failed to load chart data:', e);
+      }
+    }
+
+    // WebSocket for live price updates
+    function connectWs() {
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+      const pill = document.getElementById('connection-pill');
+
+      ws.addEventListener('open', () => {
+        pill.className = 'pill pill-live';
+        pill.textContent = 'Live';
+      });
+
+      ws.addEventListener('message', (event) => {
+        const msg = JSON.parse(event.data);
+
+        // Handle pair_update for our pair
+        if (msg.type === 'pair_update' && msg.row && msg.row.pair === pair) {
+          updateLivePrice(msg.row.price);
+        }
+
+        // Handle full snapshot — find our pair
+        if ((msg.type === 'bootstrap' || msg.type === 'snapshot') && msg.state && msg.state.pairs) {
+          const row = msg.state.pairs[pair];
+          if (row) updateLivePrice(row.price);
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        pill.className = 'pill pill-muted';
+        pill.textContent = 'Disconnected';
+        setTimeout(connectWs, 1500);
+      });
+
+      ws.addEventListener('error', () => ws.close());
+    }
+
+    let lastBarTime = null;
+    let currentBar = null;
+    let loadedBars = [];
+
+    function updateLivePrice(price) {
+      if (price == null || price <= 0) return;
+      document.getElementById('live-price').textContent = price.toFixed(decimals);
+
+      if (!candleSeries) return;
+
+      const now = Math.floor(Date.now() / 1000);
+      const hourStart = now - (now % 3600);
+
+      if (currentBar && lastBarTime === hourStart) {
+        // Update existing bar
+        currentBar.high = Math.max(currentBar.high, price);
+        currentBar.low = Math.min(currentBar.low, price);
+        currentBar.close = price;
+        candleSeries.update({
+          time: hourStart,
+          open: currentBar.open,
+          high: currentBar.high,
+          low: currentBar.low,
+          close: currentBar.close,
+        });
+      } else {
+        // New hour — start fresh bar
+        lastBarTime = hourStart;
+        currentBar = { open: price, high: price, low: price, close: price };
+        candleSeries.update({
+          time: hourStart,
+          open: price,
+          high: price,
+          low: price,
+          close: price,
+        });
+      }
+    }
+
+    // Init
+    initChart();
+    loadChartData().then(() => {
+      // Seed currentBar from the last loaded bar (the in-progress bar from accumulator)
+      if (loadedBars.length > 0) {
+        const last = loadedBars[loadedBars.length - 1];
+        lastBarTime = last.time;
+        currentBar = { open: last.open, high: last.high, low: last.low, close: last.close };
+      }
+    });
+    connectWs();
+  </script>
+</body>
+</html>

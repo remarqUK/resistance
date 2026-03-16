@@ -140,6 +140,14 @@ class StrategyParams:
     quality_risk_max: float = 1.5              # risk multiplier for highest quality (1.5x base)
     # Correlation quality selection
     correlation_prefer_quality: bool = False    # prefer higher-quality trades in correlation filter
+    # Submit-time live execution guards
+    max_submit_quote_age_seconds: float = 2.0  # reject stale submit-time quotes
+    max_submit_spread_pips: float = 2.0        # reject wide spreads at submit time
+    max_submit_entry_drift_r: float = 0.25     # reject entries drifting too far from planned R
+    prefer_l2_submit_quote: bool = True        # prefer L2 top-of-book over L1 when available
+    # Historical execution parity
+    strict_backtest_execution: bool = False    # require historical execution quotes for backtests
+    allow_h1_execution_fallback: bool = True   # allow next-hour modeled fallback when quote data is missing
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -188,6 +196,12 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         quality_risk_min=merged.get('quality_risk_min', 0.5),
         quality_risk_max=merged.get('quality_risk_max', 1.5),
         correlation_prefer_quality=merged.get('correlation_prefer_quality', False),
+        max_submit_quote_age_seconds=merged.get('max_submit_quote_age_seconds', 2.0),
+        max_submit_spread_pips=merged.get('max_submit_spread_pips', 2.0),
+        max_submit_entry_drift_r=merged.get('max_submit_entry_drift_r', 0.25),
+        prefer_l2_submit_quote=merged.get('prefer_l2_submit_quote', True),
+        strict_backtest_execution=merged.get('strict_backtest_execution', False),
+        allow_h1_execution_fallback=merged.get('allow_h1_execution_fallback', True),
     )
 
 
@@ -572,26 +586,129 @@ def select_entry_signal(
     return None
 
 
-def build_trade_from_signal(signal: Signal) -> Trade:
+def build_trade_from_signal(
+    signal: Signal,
+    *,
+    entry_price: float | None = None,
+    entry_time: pd.Timestamp | None = None,
+    sl_price: float | None = None,
+    tp_price: float | None = None,
+) -> Trade:
     """Create an open trade object from a generated signal."""
 
+    actual_entry_price = float(signal.entry_price if entry_price is None else entry_price)
+    actual_entry_time = signal.time if entry_time is None else pd.Timestamp(entry_time)
+    actual_sl_price = float(signal.sl_price if sl_price is None else sl_price)
+    actual_tp_price = float(signal.tp_price if tp_price is None else tp_price)
+
     if signal.direction == 'LONG':
-        risk = signal.entry_price - signal.sl_price
+        risk = actual_entry_price - actual_sl_price
     else:
-        risk = signal.sl_price - signal.entry_price
+        risk = actual_sl_price - actual_entry_price
 
     return Trade(
-        entry_time=signal.time,
-        entry_price=signal.entry_price,
+        entry_time=actual_entry_time,
+        entry_price=actual_entry_price,
         direction=signal.direction,
-        sl_price=signal.sl_price,
-        tp_price=signal.tp_price,
+        sl_price=actual_sl_price,
+        tp_price=actual_tp_price,
         zone_upper=signal.zone_upper,
         zone_lower=signal.zone_lower,
         zone_strength=signal.zone_strength,
         risk=risk,
         quality_score=signal.quality_score,
     )
+
+
+def check_price_exit(
+    trade: Trade,
+    high_price: float,
+    low_price: float,
+    close_price: float,
+    *,
+    params: StrategyParams,
+    pip: float,
+    bar_time: pd.Timestamp | None = None,
+    bars_held: int | None = None,
+    allow_friday: bool = False,
+    allow_sideways: bool = False,
+    allow_time: bool = False,
+) -> Optional[tuple[str, float]]:
+    """Shared price-based exit engine used by both bar and tick paths."""
+
+    early_exit_r = max(params.early_exit_r, 0.0)
+    half_spread = get_half_spread_price(pip, params)
+    market_exit = get_market_exit_price(close_price, trade.direction, pip, params)
+
+    if trade.direction == 'LONG':
+        tp_hit = high_price >= trade.tp_price + half_spread
+        sl_hit = low_price <= trade.sl_price + half_spread
+
+        if tp_hit and sl_hit:
+            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+        if tp_hit:
+            return ('TP', trade.tp_price)
+
+        if allow_friday and bar_time is not None and hasattr(bar_time, 'weekday') and bar_time.weekday() == 4:
+            if market_exit > trade.entry_price:
+                tp_dist = trade.tp_price - trade.entry_price
+                if tp_dist > 0:
+                    current_progress = (market_exit - trade.entry_price) / tp_dist
+                    if current_progress >= params.friday_tp_pct:
+                        return ('FRIDAY', market_exit)
+
+        if sl_hit:
+            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+
+        loss_r = ((trade.entry_price - market_exit) / trade.risk) if trade.risk > 0 else 0.0
+        if close_price < trade.zone_lower or loss_r >= early_exit_r:
+            return ('EARLY_EXIT', market_exit)
+
+        if allow_sideways and bars_held is not None and bars_held >= params.sideways_bars:
+            tp_dist = trade.tp_price - trade.entry_price
+            if tp_dist > 0:
+                progress = max(0.0, (market_exit - trade.entry_price) / tp_dist)
+                if progress < params.sideways_threshold:
+                    return ('SIDEWAYS', market_exit)
+
+        if allow_time and bars_held is not None and bars_held >= params.max_hold_bars:
+            return ('TIME', market_exit)
+
+    else:
+        tp_hit = low_price <= trade.tp_price - half_spread
+        sl_hit = high_price >= trade.sl_price - half_spread
+
+        if tp_hit and sl_hit:
+            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+        if tp_hit:
+            return ('TP', trade.tp_price)
+
+        if allow_friday and bar_time is not None and hasattr(bar_time, 'weekday') and bar_time.weekday() == 4:
+            if market_exit < trade.entry_price:
+                tp_dist = trade.entry_price - trade.tp_price
+                if tp_dist > 0:
+                    current_progress = (trade.entry_price - market_exit) / tp_dist
+                    if current_progress >= params.friday_tp_pct:
+                        return ('FRIDAY', market_exit)
+
+        if sl_hit:
+            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+
+        loss_r = ((market_exit - trade.entry_price) / trade.risk) if trade.risk > 0 else 0.0
+        if close_price > trade.zone_upper or loss_r >= early_exit_r:
+            return ('EARLY_EXIT', market_exit)
+
+        if allow_sideways and bars_held is not None and bars_held >= params.sideways_bars:
+            tp_dist = trade.entry_price - trade.tp_price
+            if tp_dist > 0:
+                progress = max(0.0, (trade.entry_price - market_exit) / tp_dist)
+                if progress < params.sideways_threshold:
+                    return ('SIDEWAYS', market_exit)
+
+        if allow_time and bars_held is not None and bars_held >= params.max_hold_bars:
+            return ('TIME', market_exit)
+
+    return None
 
 
 def check_exit(
@@ -625,85 +742,16 @@ def check_exit(
         (exit_reason, exit_price) tuple, or None if trade stays open
     """
     del progress_toward_tp  # legacy arg retained for compatibility
-
-    early_exit_r = max(params.early_exit_r, 0.0)
-    half_spread = get_half_spread_price(pip, params)
-    market_exit = get_market_exit_price(bar_close, trade.direction, pip, params)
-
-    if trade.direction == 'LONG':
-        tp_hit = bar_high >= trade.tp_price + half_spread
-        sl_hit = bar_low <= trade.sl_price + half_spread
-
-        if tp_hit and sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
-        if tp_hit:
-            return ('TP', trade.tp_price)
-
-        # Friday close: if winning and 70%+ to TP
-        if hasattr(bar_time, 'weekday') and bar_time.weekday() == 4:  # Friday
-            if market_exit > trade.entry_price:
-                tp_dist = trade.tp_price - trade.entry_price
-                if tp_dist > 0:
-                    current_progress = (market_exit - trade.entry_price) / tp_dist
-                    if current_progress >= params.friday_tp_pct:
-                        return ('FRIDAY', market_exit)
-
-        if sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
-
-        # Early exit: zone break or a loss beyond the configured early-exit threshold.
-        loss_r = ((trade.entry_price - market_exit) / trade.risk) if trade.risk > 0 else 0.0
-        if bar_close < trade.zone_lower or loss_r >= early_exit_r:
-            return ('EARLY_EXIT', market_exit)
-
-        # Sideways exit: no meaningful progress after sideways_bars
-        if bars_held >= params.sideways_bars and market_exit <= trade.entry_price:
-            tp_dist = trade.tp_price - trade.entry_price
-            if tp_dist > 0:
-                progress = max(0.0, (market_exit - trade.entry_price) / tp_dist)
-                if progress < params.sideways_threshold:
-                    return ('SIDEWAYS', market_exit)
-
-        # Time-based exit: held too long without resolution
-        if bars_held >= params.max_hold_bars and market_exit <= trade.entry_price:
-            return ('TIME', market_exit)
-
-    else:  # SHORT
-        tp_hit = bar_low <= trade.tp_price - half_spread
-        sl_hit = bar_high >= trade.sl_price - half_spread
-
-        if tp_hit and sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
-        if tp_hit:
-            return ('TP', trade.tp_price)
-
-        # Friday close: if winning and 70%+ to TP
-        if hasattr(bar_time, 'weekday') and bar_time.weekday() == 4:  # Friday
-            if market_exit < trade.entry_price:
-                tp_dist = trade.entry_price - trade.tp_price
-                if tp_dist > 0:
-                    current_progress = (trade.entry_price - market_exit) / tp_dist
-                    if current_progress >= params.friday_tp_pct:
-                        return ('FRIDAY', market_exit)
-
-        if sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
-
-        # Early exit: zone break or a loss beyond the configured early-exit threshold.
-        loss_r = ((market_exit - trade.entry_price) / trade.risk) if trade.risk > 0 else 0.0
-        if bar_close > trade.zone_upper or loss_r >= early_exit_r:
-            return ('EARLY_EXIT', market_exit)
-
-        # Sideways exit
-        if bars_held >= params.sideways_bars and market_exit >= trade.entry_price:
-            tp_dist = trade.entry_price - trade.tp_price
-            if tp_dist > 0:
-                progress = max(0.0, (trade.entry_price - market_exit) / tp_dist)
-                if progress < params.sideways_threshold:
-                    return ('SIDEWAYS', market_exit)
-
-        # Time-based exit
-        if bars_held >= params.max_hold_bars and market_exit >= trade.entry_price:
-            return ('TIME', market_exit)
-
-    return None
+    return check_price_exit(
+        trade,
+        bar_high,
+        bar_low,
+        bar_close,
+        params=params,
+        pip=pip,
+        bar_time=bar_time,
+        bars_held=bars_held,
+        allow_friday=True,
+        allow_sideways=True,
+        allow_time=True,
+    )

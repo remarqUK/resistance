@@ -4,20 +4,37 @@ from __future__ import annotations
 
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 import os
+import pandas as pd
 import sys
 import time
 from typing import Callable, Dict, List, Optional, Set
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data
+from .execution import build_execution_plan
 from .levels import detect_zones, get_nearest_zones, SRZone, is_price_in_zone
+from .live_history import (
+    load_detected_signal_stats,
+    load_detected_signals,
+    reconcile_detected_signal_orders,
+    record_detected_signals,
+    record_execution_results,
+)
+from .portfolio import (
+    CorrelationExposure,
+    PortfolioState,
+    apply_correlation_policy,
+    build_portfolio_state,
+    closed_trade_summary_key,
+    closed_trade_summary_from_row,
+    get_entry_block,
+)
 from .strategy import (
     StrategyParams,
     Signal,
-    get_correlated_pairs,
     get_tradeable_zones,
     is_pair_fully_blocked,
     select_entry_signal,
@@ -25,6 +42,7 @@ from .strategy import (
 from .sizing import (
     PositionSizePlan,
     build_position_size_plan,
+    build_position_size_plan_for_risk_amount,
     calculate_risk_amount,
     estimate_position_risk_amount,
     format_units,
@@ -41,7 +59,33 @@ class ExecutionResult:
     units: int
     status: str
     order_id: Optional[int] = None
+    take_profit_order_id: Optional[int] = None
+    stop_loss_order_id: Optional[int] = None
+    avg_fill_price: Optional[float] = None
+    filled_units: Optional[int] = None
+    remaining_units: Optional[int] = None
+    broker_status: Optional[str] = None
+    submitted_entry_price: Optional[float] = None
+    submitted_tp_price: Optional[float] = None
+    submitted_sl_price: Optional[float] = None
+    submit_bid: Optional[float] = None
+    submit_ask: Optional[float] = None
+    submit_spread: Optional[float] = None
+    quote_source: Optional[str] = None
+    quote_time: Optional[pd.Timestamp] = None
     note: str = ''
+
+
+@dataclass(frozen=True)
+class PreparedExecutionPlan:
+    """Submit-time execution plan repriced from a fresh quote."""
+
+    signal: Signal
+    size_plan: PositionSizePlan
+    entry_price: float
+    stop_price: float
+    take_profit_price: float
+    quote: ibkr.ExecutionQuote
 
 
 @dataclass(frozen=True)
@@ -163,16 +207,28 @@ _LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
 _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 
 
+@dataclass
+class _PortfolioStateCacheEntry:
+    params_key: str
+    state: PortfolioState
+    trade_ids: set[str]
+    closed_count: int
+    max_last_updated: str | None
+
+
+_PORTFOLIO_STATE_CACHE: Dict[str, _PortfolioStateCacheEntry] = {}
+
+
 def _current_day_bucket() -> str:
     """Return the current UTC day bucket used for live daily cache refreshes."""
 
-    return datetime.utcnow().strftime('%Y-%m-%d')
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
 
 def _current_hour_bucket() -> str:
     """Return the current UTC hour bucket used for live hourly cache refreshes."""
 
-    return datetime.utcnow().strftime('%Y-%m-%d %H')
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H')
 
 
 def _get_live_daily_data(
@@ -256,6 +312,134 @@ def _get_live_hourly_data(
     return hourly_df
 
 
+def load_closed_trade_summaries() -> list:
+    """Load closed live trades from history and normalize them for portfolio policy."""
+
+    rows = load_detected_signals(status='CLOSED')
+    trades = []
+    for row in rows:
+        summary = closed_trade_summary_from_row(row)
+        if summary is not None:
+            trades.append(summary)
+    return trades
+
+
+def _portfolio_params_key(params: StrategyParams) -> str:
+    """Return a stable cache key for portfolio-policy semantics."""
+
+    return repr(
+        (
+            params.cooldown_bars,
+            params.loss_cooldown_bars,
+            params.streak_pause_trigger,
+            params.streak_pause_hours,
+            params.dynamic_risk,
+            params.dd_risk_start,
+            params.dd_risk_full,
+            params.dd_risk_floor,
+            params.quality_sizing,
+            params.quality_risk_min,
+            params.quality_risk_max,
+        )
+    )
+
+
+def _merge_closed_trade_rows(rows: List[dict], known_trade_ids: set[str]) -> list:
+    """Convert DB rows to unseen closed-trade summaries."""
+
+    trades = []
+    for row in rows:
+        summary = closed_trade_summary_from_row(row)
+        if summary is None:
+            continue
+        trade_id = closed_trade_summary_key(summary)
+        if trade_id in known_trade_ids:
+            raise ValueError(f"closed trade {trade_id} already present")
+        trades.append(summary)
+        known_trade_ids.add(trade_id)
+    return trades
+
+
+def load_portfolio_state(
+    params: StrategyParams | None = None,
+    *,
+    current_balance: float | None = None,
+    force_refresh: bool = False,
+) -> PortfolioState:
+    """Load closed-trade history and build a shared portfolio state snapshot."""
+
+    if params is None:
+        params = StrategyParams()
+    params_key = _portfolio_params_key(params)
+    stats = load_detected_signal_stats(status='CLOSED')
+    cache_key = 'default'
+    cache_entry = _PORTFOLIO_STATE_CACHE.get(cache_key)
+
+    if (
+        force_refresh
+        or cache_entry is None
+        or cache_entry.params_key != params_key
+        or stats['count'] < cache_entry.closed_count
+        or (
+            stats['count'] == cache_entry.closed_count
+            and stats['max_last_updated'] != cache_entry.max_last_updated
+        )
+    ):
+        trades = load_closed_trade_summaries()
+        state = build_portfolio_state(
+            trades,
+            params=params,
+            current_balance=current_balance,
+        )
+        cache_entry = _PortfolioStateCacheEntry(
+            params_key=params_key,
+            state=state,
+            trade_ids={closed_trade_summary_key(trade) for trade in trades},
+            closed_count=int(stats['count']),
+            max_last_updated=stats['max_last_updated'],
+        )
+        _PORTFOLIO_STATE_CACHE[cache_key] = cache_entry
+        return state
+
+    if stats['count'] > cache_entry.closed_count:
+        if cache_entry.max_last_updated is None:
+            trades = load_closed_trade_summaries()
+            cache_entry.state = build_portfolio_state(
+                trades,
+                params=params,
+                current_balance=current_balance,
+            )
+            cache_entry.trade_ids = {closed_trade_summary_key(trade) for trade in trades}
+            cache_entry.closed_count = int(stats['count'])
+            cache_entry.max_last_updated = stats['max_last_updated']
+            return cache_entry.state
+
+        rows = load_detected_signals(
+            status='CLOSED',
+            updated_after=cache_entry.max_last_updated,
+        )
+        try:
+            for trade in sorted(
+                _merge_closed_trade_rows(rows, cache_entry.trade_ids),
+                key=lambda summary: (summary.entry_time, summary.exit_time),
+            ):
+                cache_entry.state.record_closed_trade(trade)
+        except ValueError:
+            trades = load_closed_trade_summaries()
+            cache_entry.state = build_portfolio_state(
+                trades,
+                params=params,
+                current_balance=current_balance,
+            )
+            cache_entry.trade_ids = {closed_trade_summary_key(trade) for trade in trades}
+
+        cache_entry.closed_count = int(stats['count'])
+        cache_entry.max_last_updated = stats['max_last_updated']
+
+    cache_entry.state.sync_balance(current_balance)
+    return cache_entry.state
+
+
 def _describe_watch_state(
     price: float,
     support: Optional[SRZone],
@@ -315,11 +499,12 @@ def _pair_row_priority(row: PairScanRow) -> tuple[int, str]:
 
     priority = {
         'OPEN': 1,
-        'PENDING': 2,
-        'NEAR': 3,
-        'INSIDE': 4,
-        'WATCH': 5,
-        'NO DATA': 6,
+        'PARTIAL': 2,
+        'PENDING': 3,
+        'NEAR': 4,
+        'INSIDE': 5,
+        'WATCH': 6,
+        'NO DATA': 7,
     }.get(row.state, 7)
     return priority, row.pair
 
@@ -339,7 +524,7 @@ def refresh_pair_row_price(row: PairScanRow, price: float) -> PairScanRow:
     s_dist = _distance_to_zone_pct(price, support, is_support=True)
     r_dist = _distance_to_zone_pct(price, resistance, is_support=False)
 
-    if row.signal or row.state in {'OPEN', 'PENDING', 'NO DATA'}:
+    if row.signal or row.state in {'OPEN', 'PARTIAL', 'PENDING', 'NO DATA'}:
         return replace(
             row,
             price=price,
@@ -368,13 +553,28 @@ def _scan_pair(
     params: StrategyParams,
     zone_history_days: int,
     tracked_pairs: Dict[str, Set[str]],
-    blocked_pairs: Set[str],
+    tracked_states: Dict[str, str] | Set[str] | None = None,
+    blocked_pairs: Optional[Set[str]] = None,
     price_cache: Optional[Dict[str, float]] = None,
     daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
     zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    portfolio_state: Optional[PortfolioState] = None,
+    closed_trades: Optional[List[object]] = None,
 ) -> tuple[PairScanRow, Optional[Signal]]:
     """Scan one pair and return a watchlist row plus optional signal."""
+
+    # Backward compatibility: older callers passed `blocked_pairs` in the
+    # `tracked_states` position before tracked state labels were introduced.
+    if blocked_pairs is None and (
+        tracked_states is None or isinstance(tracked_states, set)
+    ):
+        blocked_pairs = set() if tracked_states is None else set(tracked_states)
+        tracked_states = {}
+    elif tracked_states is None:
+        tracked_states = {}
+    if blocked_pairs is None:
+        blocked_pairs = set()
 
     decimals = pair_info.get('decimals', 5)
     name = pair_info.get('name', pair_id)
@@ -446,10 +646,16 @@ def _scan_pair(
 
     if pair_id in tracked_pairs:
         directions = "/".join(sorted(tracked_pairs[pair_id]))
+        state = tracked_states.get(pair_id, 'OPEN')
+        note = (
+            f"Partial fill tracked ({directions})"
+            if state == 'PARTIAL'
+            else f"Tracked position ({directions})"
+        )
         return (
             PairScanRow(
                 pair_id, name, decimals, current_price,
-                "OPEN", f"Tracked position ({directions})",
+                state, note,
                 support_text, resistance_text, **zone_fields,
             ),
             None,
@@ -461,6 +667,25 @@ def _scan_pair(
                 pair_id, name, decimals, current_price,
                 "PENDING", "Active order pending",
                 support_text, resistance_text, **zone_fields,
+            ),
+            None,
+        )
+
+    if portfolio_state is None and closed_trades is not None:
+        portfolio_state = build_portfolio_state(closed_trades, params=params)
+
+    entry_block = get_entry_block(
+        pair_id,
+        hourly_df.index[-1],
+        portfolio_state or [],
+        params,
+    )
+    if entry_block is not None:
+        state, note = entry_block
+        return (
+            PairScanRow(
+                pair_id, name, decimals, current_price,
+                state, note, support_text, resistance_text, **zone_fields,
             ),
             None,
         )
@@ -506,6 +731,8 @@ def collect_scan_rows(
     daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
     zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    portfolio_state: Optional[PortfolioState] = None,
+    closed_trades: Optional[List[object]] = None,
 ) -> tuple[List[Signal], List[PairScanRow]]:
     """Collect structured pair rows and the executable signals among them."""
 
@@ -513,8 +740,11 @@ def collect_scan_rows(
         pairs = PAIRS
     if params is None:
         params = StrategyParams()
+    if portfolio_state is None and closed_trades is not None:
+        portfolio_state = build_portfolio_state(closed_trades, params=params)
 
     tracked_pairs: Dict[str, Set[str]] = {}
+    tracked_states: Dict[str, str] = {}
     blocked_pairs = blocked_pairs or set()
     if tracked_positions:
         for info in tracked_positions.values():
@@ -522,6 +752,10 @@ def collect_scan_rows(
             trade = info.get('trade')
             if pair and trade:
                 tracked_pairs.setdefault(pair, set()).add(trade.direction)
+                if info.get('signal_status') == 'PARTIAL':
+                    tracked_states[pair] = 'PARTIAL'
+                else:
+                    tracked_states.setdefault(pair, 'OPEN')
 
     signals: List[Signal] = []
     pair_rows: List[PairScanRow] = []
@@ -534,11 +768,14 @@ def collect_scan_rows(
             params,
             zone_history_days,
             tracked_pairs,
+            tracked_states,
             blocked_pairs,
             price_cache=price_cache,
             daily_data_cache=daily_data_cache,
             zone_cache=zone_cache,
             hourly_data_cache=hourly_data_cache,
+            portfolio_state=portfolio_state,
+            closed_trades=closed_trades,
         )
         pair_rows.append(row)
         if signal:
@@ -581,6 +818,8 @@ def scan_opportunities(
     daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
     zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    portfolio_state: Optional[PortfolioState] = None,
+    closed_trades: Optional[List[object]] = None,
 ) -> List[Signal]:
     """Scan all pairs and print a plain-text watch table."""
 
@@ -594,6 +833,8 @@ def scan_opportunities(
         daily_data_cache=daily_data_cache,
         zone_cache=zone_cache,
         hourly_data_cache=hourly_data_cache,
+        portfolio_state=portfolio_state,
+        closed_trades=closed_trades,
     )
     print(format_scan_rows(pair_rows))
     return signals
@@ -644,6 +885,9 @@ def build_live_size_plans(
     balance: Optional[float],
     risk_pct: float,
     account_currency: Optional[str],
+    params: Optional[StrategyParams] = None,
+    portfolio_state: Optional[PortfolioState] = None,
+    closed_trades: Optional[List[object]] = None,
     price_cache: Optional[Dict[str, float]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
 ) -> List[Optional[PositionSizePlan]]:
@@ -651,6 +895,14 @@ def build_live_size_plans(
 
     if not signals or balance is None or balance <= 0 or not account_currency:
         return [None for _ in signals]
+    if params is None:
+        params = StrategyParams()
+    if portfolio_state is None:
+        portfolio_state = build_portfolio_state(
+            closed_trades or [],
+            params=params,
+            current_balance=balance,
+        )
 
     price_lookup = _build_price_lookup(
         price_cache=price_cache,
@@ -663,19 +915,16 @@ def build_live_size_plans(
             entry_price=signal.entry_price,
             stop_price=signal.sl_price,
             balance=balance,
-            risk_pct=risk_pct,
+            risk_pct=portfolio_state.effective_risk_pct(
+                risk_pct,
+                balance=balance,
+                quality_score=signal.quality_score,
+            ),
             account_currency=account_currency,
             price_lookup=price_lookup,
         )
         for signal in signals
     ]
-
-
-def _correlated_exposure_count(pair_id: str, active_pairs: Set[str]) -> int:
-    """Count active same/correlated exposures for the requested pair."""
-
-    correlated_pairs = get_correlated_pairs(pair_id)
-    return sum(1 for active_pair in active_pairs if active_pair == pair_id or active_pair in correlated_pairs)
 
 
 def _estimate_reserved_portfolio_risk(
@@ -782,6 +1031,58 @@ def format_execution_results(results: List[ExecutionResult]) -> str:
         )
     lines.append("=" * 92)
     return "\n".join(lines)
+def _prepare_execution_plan(
+    signal: Signal,
+    size_plan: PositionSizePlan,
+    params: StrategyParams,
+    price_lookup: Callable[[str], Optional[float]],
+) -> tuple[Optional[PreparedExecutionPlan], str]:
+    """Reprice a signal from a fresh live quote and rebuild size for submit time."""
+
+    quote = ibkr.fetch_execution_quote(
+        signal.pair,
+        prefer_depth=params.prefer_l2_submit_quote,
+    )
+    if quote is None:
+        return None, 'quote unavailable'
+
+    core_plan, skip_note = build_execution_plan(
+        signal,
+        quote,
+        params,
+    )
+    if core_plan is None:
+        return None, skip_note
+
+    def quote_price_lookup(pair_id: str) -> Optional[float]:
+        if pair_id == signal.pair:
+            return float(quote.mid)
+        return price_lookup(pair_id)
+
+    repriced_plan = build_position_size_plan_for_risk_amount(
+        pair=signal.pair,
+        direction=signal.direction,
+        entry_price=core_plan.entry_price,
+        stop_price=core_plan.stop_price,
+        balance=float(size_plan.balance),
+        risk_amount=float(size_plan.risk_amount),
+        account_currency=size_plan.account_currency,
+        price_lookup=quote_price_lookup,
+    )
+    if repriced_plan is None:
+        return None, 'size unavailable'
+
+    return (
+        PreparedExecutionPlan(
+            signal=signal,
+            size_plan=repriced_plan,
+            entry_price=core_plan.entry_price,
+            stop_price=core_plan.stop_price,
+            take_profit_price=core_plan.take_profit_price,
+            quote=quote,
+        ),
+        '',
+    )
 
 
 def execute_signal_plans(
@@ -805,10 +1106,8 @@ def execute_signal_plans(
 
     if params is None:
         params = StrategyParams()
-    correlation_cap = max(int(params.max_correlated_trades), 1)
     existing_pairs = existing_pairs or set()
     pending_pairs = pending_pairs or set()
-    active_pairs = set(existing_pairs) | set(pending_pairs)
     slot_risk_amount = (
         calculate_risk_amount(balance, risk_pct)
         if balance is not None and risk_pct is not None and account_currency
@@ -825,66 +1124,256 @@ def execute_signal_plans(
         account_currency=account_currency,
         price_lookup=price_lookup,
     )
+    correlation_cap = max(int(params.max_correlated_trades), 1)
     max_total_risk = (
         float(slot_risk_amount) * correlation_cap
-        if slot_risk_amount is not None
+        if slot_risk_amount is not None and params.use_correlation_filter
         else None
     )
-    results: List[ExecutionResult] = []
-    for signal, plan in zip(signals, size_plans):
+    results: list[Optional[ExecutionResult]] = [None] * len(signals)
+    planned: dict[int, PreparedExecutionPlan] = {}
+    planned_reserved_risk = 0.0
+
+    exposures: list[CorrelationExposure] = []
+    seen_nonreplaceable_pairs: set[str] = set()
+    if tracked_positions:
+        for info in tracked_positions.values():
+            pair = (info.get('pair') or '').upper()
+            trade = info.get('trade')
+            if not pair or pair in seen_nonreplaceable_pairs:
+                continue
+            exposures.append(
+                CorrelationExposure(
+                    pair=pair,
+                    quality_score=float(getattr(trade, 'quality_score', 0.0) or 0.0),
+                    replaceable=False,
+                    payload=pair,
+                )
+            )
+            seen_nonreplaceable_pairs.add(pair)
+    for pair in sorted(set(existing_pairs) | set(pending_pairs)):
+        pair = pair.upper()
+        if pair in seen_nonreplaceable_pairs:
+            continue
+        exposures.append(
+            CorrelationExposure(
+                pair=pair,
+                quality_score=0.0,
+                replaceable=False,
+                payload=pair,
+            )
+        )
+        seen_nonreplaceable_pairs.add(pair)
+
+    for idx, (signal, plan) in enumerate(zip(signals, size_plans)):
         if plan is None:
-            results.append(ExecutionResult(signal.pair, signal.direction, 0, 'SKIPPED', note='size unavailable'))
+            results[idx] = ExecutionResult(signal.pair, signal.direction, 0, 'SKIPPED', note='size unavailable')
             continue
-        if signal.pair in active_pairs:
-            results.append(
-                ExecutionResult(signal.pair, signal.direction, plan.units, 'SKIPPED', note='position/order exists')
-            )
-            continue
-        if _correlated_exposure_count(signal.pair, active_pairs) >= correlation_cap:
-            results.append(
-                ExecutionResult(signal.pair, signal.direction, plan.units, 'SKIPPED', note='correlation cap reached')
-            )
-            continue
-        if (
-            max_total_risk is not None
-            and reserved_risk is not None
-            and reserved_risk + plan.risk_amount > max_total_risk + 1e-9
-        ):
-            results.append(
-                ExecutionResult(signal.pair, signal.direction, plan.units, 'SKIPPED', note='risk budget full')
+
+        same_pair_nonreplaceable = any(
+            exposure.pair == signal.pair and not exposure.replaceable
+            for exposure in exposures
+        )
+        if same_pair_nonreplaceable:
+            results[idx] = ExecutionResult(
+                signal.pair,
+                signal.direction,
+                plan.units,
+                'SKIPPED',
+                note='position/order exists',
             )
             continue
 
+        replace_candidates = {
+            exposure.payload: exposure
+            for exposure in exposures
+            if exposure.pair == signal.pair and exposure.replaceable
+        }
+        if replace_candidates:
+            worst_same_pair = min(
+                replace_candidates.values(),
+                key=lambda exposure: exposure.quality_score,
+            )
+            if float(signal.quality_score) > float(worst_same_pair.quality_score):
+                candidate_exposures = [
+                    exposure
+                    for exposure in exposures
+                    if exposure.payload != worst_same_pair.payload
+                ]
+            else:
+                results[idx] = ExecutionResult(
+                    signal.pair,
+                    signal.direction,
+                    plan.units,
+                    'SKIPPED',
+                    note='duplicate pair signal',
+                )
+                continue
+        else:
+            worst_same_pair = None
+            candidate_exposures = list(exposures)
+
+        allowed, replaced_corr = apply_correlation_policy(
+            candidate_exposures,
+            candidate_pair=signal.pair,
+            candidate_quality=signal.quality_score,
+            params=params,
+        )
+        if not allowed:
+            results[idx] = ExecutionResult(
+                signal.pair,
+                signal.direction,
+                plan.units,
+                'SKIPPED',
+                note='correlation cap reached',
+            )
+            continue
+
+        replaced_exposures = {}
+        for exposure in (worst_same_pair, replaced_corr):
+            if exposure is not None:
+                replaced_exposures[exposure.payload] = exposure
+
+        prepared_plan, skip_note = _prepare_execution_plan(
+            signal,
+            plan,
+            params,
+            price_lookup,
+        )
+        if prepared_plan is None:
+            results[idx] = ExecutionResult(
+                signal.pair,
+                signal.direction,
+                plan.units,
+                'SKIPPED',
+                note=skip_note or 'quote unavailable',
+            )
+            continue
+
+        candidate_reserved_risk = planned_reserved_risk + float(prepared_plan.size_plan.risk_amount)
+        for payload in replaced_exposures:
+            prior = planned.get(payload)
+            if prior is not None:
+                candidate_reserved_risk -= float(prior.size_plan.risk_amount)
+
+        if (
+            max_total_risk is not None
+            and reserved_risk is not None
+            and reserved_risk + candidate_reserved_risk > max_total_risk + 1e-9
+        ):
+            results[idx] = ExecutionResult(
+                signal.pair,
+                signal.direction,
+                plan.units,
+                'SKIPPED',
+                note='risk budget full',
+            )
+            continue
+
+        for payload in replaced_exposures:
+            prior = planned.pop(payload, None)
+            if prior is None:
+                continue
+            planned_reserved_risk -= float(prior.size_plan.risk_amount)
+            results[payload] = ExecutionResult(
+                prior.signal.pair,
+                prior.signal.direction,
+                prior.size_plan.units,
+                'SKIPPED',
+                note='replaced by higher-quality correlated signal',
+            )
+            exposures = [
+                exposure for exposure in exposures
+                if exposure.payload != payload
+            ]
+
+        planned[idx] = prepared_plan
+        planned_reserved_risk += float(prepared_plan.size_plan.risk_amount)
+        exposures.append(
+            CorrelationExposure(
+                pair=signal.pair,
+                quality_score=float(signal.quality_score),
+                replaceable=True,
+                payload=idx,
+            )
+        )
+
+    for idx, prepared in planned.items():
+        signal = prepared.signal
+        plan = prepared.size_plan
+        quote = prepared.quote
         order_ref = f"fxsr:{signal.pair}:{signal.direction}:{signal.time.strftime('%Y%m%d%H%M%S')}"
         order = ibkr.submit_fx_market_bracket_order(
             pair=signal.pair,
             direction=signal.direction,
             quantity=plan.units,
-            take_profit_price=signal.tp_price,
-            stop_loss_price=signal.sl_price,
+            take_profit_price=prepared.take_profit_price,
+            stop_loss_price=prepared.stop_price,
             order_ref=order_ref,
         )
         if order is None:
-            results.append(
-                ExecutionResult(signal.pair, signal.direction, plan.units, 'FAILED', note='broker rejected/failed')
-            )
-            continue
-
-        active_pairs.add(signal.pair)
-        pending_pairs.add(signal.pair)
-        if reserved_risk is not None:
-            reserved_risk += plan.risk_amount
-        results.append(
-            ExecutionResult(
+            results[idx] = ExecutionResult(
                 signal.pair,
                 signal.direction,
                 plan.units,
-                order.get('status') or 'SUBMITTED',
-                order_id=order.get('order_id'),
-                note=f"risk {plan.account_currency} {plan.risk_amount:,.2f}; tp/sl attached",
+                'FAILED',
+                submitted_entry_price=prepared.entry_price,
+                submitted_tp_price=prepared.take_profit_price,
+                submitted_sl_price=prepared.stop_price,
+                submit_bid=quote.bid,
+                submit_ask=quote.ask,
+                submit_spread=quote.spread,
+                quote_source=quote.source,
+                quote_time=quote.captured_at,
+                note='broker rejected/failed',
             )
+            continue
+
+        filled_units = int(abs(order.get('filled_units') or 0))
+        remaining_units = order.get('remaining_units')
+        if remaining_units is not None:
+            remaining_units = int(max(abs(float(remaining_units)), 0.0))
+        broker_status = order.get('broker_status') or order.get('status')
+        result_status = order.get('status') or 'SUBMITTED'
+        note = f"risk {plan.account_currency} {plan.risk_amount:,.2f}; {quote.source} quote @ {prepared.entry_price:.5f}; order submitted"
+        if filled_units > 0:
+            if remaining_units is None:
+                result_status = 'PARTIAL'
+                note = f"partial fill {filled_units:,}/{plan.units:,}"
+            elif remaining_units > 0:
+                result_status = 'PARTIAL'
+                note = f"partial fill {filled_units:,}/{plan.units:,}"
+            else:
+                result_status = 'OPEN'
+                note = f"filled {filled_units:,}/{plan.units:,}"
+
+        results[idx] = ExecutionResult(
+            signal.pair,
+            signal.direction,
+            plan.units,
+            result_status,
+            order_id=order.get('order_id'),
+            take_profit_order_id=order.get('take_profit_order_id'),
+            stop_loss_order_id=order.get('stop_loss_order_id'),
+            avg_fill_price=order.get('avg_fill_price'),
+            filled_units=filled_units,
+            remaining_units=remaining_units,
+            broker_status=broker_status,
+            submitted_entry_price=prepared.entry_price,
+            submitted_tp_price=prepared.take_profit_price,
+            submitted_sl_price=prepared.stop_price,
+            submit_bid=quote.bid,
+            submit_ask=quote.ask,
+            submit_spread=quote.spread,
+            quote_source=quote.source,
+            quote_time=quote.captured_at,
+            note=note,
         )
-    return results
+
+    return [
+        result if result is not None else ExecutionResult(signal.pair, signal.direction, 0, 'SKIPPED', note='not planned')
+        for signal, result in zip(signals, results)
+    ]
 
 
 def show_zones(pair_id: str, pair_info: dict, zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS) -> str:
@@ -952,6 +1441,15 @@ def run_monitor_cycle(
         daily_data_cache: Dict[tuple[str, int], object] = {}
         zone_cache: Dict[tuple[str, int], List[SRZone]] = {}
         hourly_data_cache: Dict[str, object] = {}
+        active_balance = balance
+        env_currency = os.getenv('IBKR_ACCOUNT_CURRENCY')
+        active_currency = account_currency.upper() if account_currency else (env_currency.upper() if env_currency else None)
+        if active_balance is None:
+            active_balance, fetched_currency = ibkr.fetch_account_net_liquidation()
+            if active_currency is None and fetched_currency not in (None, 'BASE'):
+                active_currency = fetched_currency
+        portfolio_state = load_portfolio_state(params, current_balance=active_balance)
+
         signals, pair_rows = collect_scan_rows(
             pairs=pairs,
             params=params,
@@ -962,23 +1460,27 @@ def run_monitor_cycle(
             daily_data_cache=daily_data_cache,
             zone_cache=zone_cache,
             hourly_data_cache=hourly_data_cache,
+            portfolio_state=portfolio_state,
         )
-
-        active_balance = balance
-        env_currency = os.getenv('IBKR_ACCOUNT_CURRENCY')
-        active_currency = account_currency.upper() if account_currency else (env_currency.upper() if env_currency else None)
-        if active_balance is None:
-            active_balance, fetched_currency = ibkr.fetch_account_net_liquidation()
-            if active_currency is None and fetched_currency not in (None, 'BASE'):
-                active_currency = fetched_currency
 
         size_plans = build_live_size_plans(
             signals,
             active_balance,
             risk_pct,
             active_currency,
+            params=params,
+            portfolio_state=portfolio_state,
             price_cache=market_prices,
             hourly_data_cache=hourly_data_cache,
+        )
+        exec_mode = ibkr.get_execution_mode() if execute_orders else 'scan'
+        ibkr_acct = ibkr.fetch_account_id() if execute_orders else None
+        signal_ids = record_detected_signals(
+            signals,
+            size_plans,
+            execute_orders=execute_orders,
+            execution_mode=exec_mode,
+            ibkr_account=ibkr_acct,
         )
         execution_results = execute_signal_plans(
             signals,
@@ -994,6 +1496,35 @@ def run_monitor_cycle(
             price_cache=market_prices,
             hourly_data_cache=hourly_data_cache,
         )
+        record_execution_results(
+            signals, size_plans, execution_results,
+            execution_mode=exec_mode,
+            ibkr_account=ibkr_acct,
+        )
+        if execute_orders:
+            reconcile_detected_signal_orders(signal_ids=signal_ids)
+            if track_positions:
+                tracked = sync_positions(params, zone_history_days)
+
+        execution_by_pair = {
+            result.pair: result
+            for result in execution_results
+            if result.status in {'PARTIAL', 'OPEN', 'SUBMITTED', 'Submitted', 'PreSubmitted', 'PRESUBMITTED'}
+        }
+        if execution_by_pair:
+            updated_rows: List[PairScanRow] = []
+            for row in pair_rows:
+                result = execution_by_pair.get(row.pair)
+                if result is None:
+                    updated_rows.append(row)
+                    continue
+                if result.status == 'PARTIAL':
+                    updated_rows.append(replace(row, state='PARTIAL', note=result.note, signal=None))
+                elif result.status == 'OPEN':
+                    updated_rows.append(replace(row, state='OPEN', note=result.note, signal=None))
+                else:
+                    updated_rows.append(replace(row, state='PENDING', note=result.note, signal=None))
+            pair_rows = updated_rows
 
         alerts: List[dict] = []
         position_snapshots: Dict[str, dict] = {}

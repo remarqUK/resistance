@@ -6,6 +6,7 @@ visualization in the browser.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -18,21 +19,25 @@ import pandas as pd
 from aiohttp import web
 
 from .backtest import (
-    _slice_daily_window,
     _deserialize_backtest_result,
-    _finalize_trade,
     _params_signature,
     calculate_compounding_pnl,
 )
 from .config import PAIRS, STRATEGY_PRESETS, DEFAULT_ZONE_HISTORY_DAYS
+from .execution import historical_execution_quote
 from .profiles import DEFAULT_PROFILE, PROFILES, get_profile
 from . import db
 from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
 from .levels import detect_zones, SRZone
 from .strategy import (
-    Trade, StrategyParams, check_exit, build_trade_from_signal,
-    get_tradeable_zones, params_from_profile, select_entry_signal,
+    Trade, StrategyParams, params_from_profile,
 )
+from .serialization import (
+    serialize_trade as shared_serialize_trade,
+    serialize_zone as shared_serialize_zone,
+    trade_active_dates as shared_trade_active_dates,
+)
+from .walkforward import WalkForwardBar, run_walk_forward, slice_daily_window
 
 
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
@@ -44,20 +49,7 @@ def _trade_active_dates(
 ) -> list[str]:
     """Return every calendar date touched by a trade, inclusive."""
 
-    if entry_time is None:
-        return []
-
-    start_date = pd.Timestamp(entry_time).date()
-    end_date = pd.Timestamp(exit_time).date() if exit_time is not None else start_date
-    if end_date < start_date:
-        end_date = start_date
-
-    active_dates: list[str] = []
-    current_date = start_date
-    while current_date <= end_date:
-        active_dates.append(str(current_date))
-        current_date += timedelta(days=1)
-    return active_dates
+    return shared_trade_active_dates(entry_time, exit_time)
 
 
 def _trade_realized_date(trade_row: dict) -> str:
@@ -100,37 +92,17 @@ def _trade_is_active_on_date(trade_row: dict, selected_date: str) -> bool:
 
 
 def _zone_to_dict(zone: SRZone) -> dict:
-    return {
-        'upper': zone.upper,
-        'lower': zone.lower,
-        'midpoint': zone.midpoint,
-        'touches': zone.touches,
-        'zone_type': zone.zone_type,
-        'strength': zone.strength,
-    }
+    return shared_serialize_zone(zone)
 
 
 def _trade_to_dict(trade: Trade, pip: float) -> dict:
-    d = {
-        'entry_time': pd.Timestamp(trade.entry_time).isoformat(),
-        'entry_price': trade.entry_price,
-        'direction': trade.direction,
-        'sl_price': trade.sl_price,
-        'tp_price': trade.tp_price,
-        'zone_upper': trade.zone_upper,
-        'zone_lower': trade.zone_lower,
-        'active_dates': _trade_active_dates(trade.entry_time, trade.exit_time),
-    }
-    if trade.exit_time is not None:
-        d.update({
-            'exit_time': pd.Timestamp(trade.exit_time).isoformat(),
-            'exit_price': trade.exit_price,
-            'exit_reason': trade.exit_reason,
-            'pnl_pips': round(trade.pnl_pips, 1),
-            'pnl_r': round(trade.pnl_r, 2),
-            'bars_held': trade.bars_held,
-        })
-    return d
+    return shared_serialize_trade(
+        trade,
+        include_risk=False,
+        include_quality=False,
+        include_active_dates=True,
+        round_exit_metrics=True,
+    )
 
 
 def _trade_row_to_dict(
@@ -165,7 +137,7 @@ def _trade_row_to_dict(
         'hourly_days': source_row['hourly_days'],
         'zone_history_days': source_row['zone_history_days'],
         'strategy_version': source_row['strategy_version'],
-        'updated_at': source_row['updated_at'],
+        'updated_at': source_row['updated_at'].isoformat() if hasattr(source_row['updated_at'], 'isoformat') else str(source_row['updated_at']),
         'risk_amount': round(float(risk_amount), 2) if risk_amount is not None else None,
         'pnl_amount': round(float(pnl_amount), 2) if pnl_amount is not None else None,
         'balance_after': round(float(balance_after), 2) if balance_after is not None else None,
@@ -213,6 +185,12 @@ def _describe_backtest_row(row: dict) -> dict:
         or matched_profile.get('profile_name')
         or ''
     )
+    profile_description = (
+        run_config.get('profile_description')
+        or PROFILES.get(profile_name, {}).get('description', '')
+        or matched_profile.get('description', '')
+        or ''
+    )
     selection_label = run_config.get('selection_label') or ''
     label = profile_name or selection_label or row.get('params_hash', '')[:10] or 'cached run'
     if selection_label and selection_label not in {'baseline', profile_name}:
@@ -221,6 +199,7 @@ def _describe_backtest_row(row: dict) -> dict:
         'key': _cached_backtest_key(row),
         'label': label,
         'profile_name': profile_name,
+        'description': profile_description,
         'selection_label': selection_label,
         'params_hash': row.get('params_hash'),
         'hourly_days': int(row.get('hourly_days', 0) or 0),
@@ -239,7 +218,7 @@ def _describe_backtest_row(row: dict) -> dict:
                 else None
             )
         ),
-        'updated_at': row.get('updated_at') or '',
+        'updated_at': row['updated_at'].isoformat() if hasattr(row.get('updated_at'), 'isoformat') else str(row.get('updated_at') or ''),
     }
 
 
@@ -323,6 +302,7 @@ def _known_compounding_profiles() -> dict[str, dict]:
         profile_params = params_from_profile(profile)
         known_profiles[_params_signature(profile_params)] = {
             'profile_name': name,
+            'description': profile.get('description', ''),
             'starting_balance': float(profile.get('starting_balance', 1000.0)),
             'risk_pct': float(profile.get('risk_pct', 5.0)) / 100.0,
             # The trade list shows all cached trades, so keep the risk model but
@@ -514,6 +494,8 @@ def generate_replay_frames(
     target_date: date,
     params: StrategyParams | None = None,
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
+    minute_df: pd.DataFrame | None = None,
+    l2_snapshots: pd.DataFrame | None = None,
 ) -> dict:
     """Walk the full hourly history, emitting frames only for *target_date*.
 
@@ -526,16 +508,6 @@ def generate_replay_frames(
     pip = pair_info.get('pip', 0.0001)
     decimals = pair_info.get('decimals', 5)
 
-    # --- walk-forward state (identical to run_backtest) ---
-    current_trade: Optional[Trade] = None
-    current_zones: list[SRZone] = []
-    nearest_support: Optional[SRZone] = None
-    nearest_resistance: Optional[SRZone] = None
-    last_trade_bar = -params.cooldown_bars
-    last_trade_was_loss = False
-    last_zone_date = None
-    trade_entry_bar = 0
-
     frames: list[dict] = []
     context_bars: list[dict] = []
     completed_trades: list[dict] = []
@@ -544,31 +516,56 @@ def generate_replay_frames(
     selected_day_bar_count = 0
     carry_trade_entry_time: Optional[pd.Timestamp] = None
 
-    for i in range(len(hourly_df)):
-        row = hourly_df.iloc[i]
-        current_time = hourly_df.index[i]
-        current_date = current_time.date() if hasattr(current_time, 'date') else current_time
-
-        # Re-detect zones on new day
+    def zone_provider(current_time, current_date, _bar_index):
         bar_date = pd.Timestamp(current_date)
         if hasattr(current_time, 'tzinfo') and current_time.tzinfo:
             bar_date = bar_date.tz_localize(current_time.tzinfo)
+        daily_window = slice_daily_window(daily_df, bar_date, zone_history_days)
+        if len(daily_window) < 20:
+            return []
+        return detect_zones(daily_window)
 
-        if last_zone_date is None or str(current_date) != str(last_zone_date):
-            daily_window = _slice_daily_window(daily_df, bar_date, zone_history_days)
-            if len(daily_window) >= 20:
-                current_zones = detect_zones(daily_window)
-            else:
-                current_zones = []
-            last_zone_date = current_date
+    def execution_quote_provider(signal, submit_time, _bar_index, row):
+        return historical_execution_quote(
+            signal.pair,
+            submit_time,
+            params,
+            minute_df=minute_df,
+            l2_snapshots=l2_snapshots,
+            allow_h1_fallback=(
+                bool(params.allow_h1_execution_fallback)
+                and not bool(params.strict_backtest_execution)
+            ),
+            fallback_mid_price=float(row['Open']),
+        )
 
-        current_price = float(row['Close'])
-        nearest_support, nearest_resistance = get_tradeable_zones(current_zones, current_price)
+    def serialize_open_trade(trade: Trade | None, bars_held: int) -> dict | None:
+        if trade is None:
+            return None
+        return {
+            'entry_time': pd.Timestamp(trade.entry_time).isoformat(),
+            'entry_price': trade.entry_price,
+            'direction': trade.direction,
+            'sl_price': trade.sl_price,
+            'tp_price': trade.tp_price,
+            'zone_upper': trade.zone_upper,
+            'zone_lower': trade.zone_lower,
+            'bars_held': bars_held,
+        }
 
-        # --- capture zones once we reach the target day ---
+    def on_bar(step: WalkForwardBar) -> None:
+        nonlocal frame_index, selected_day_bar_count, day_zones, carry_trade_entry_time
+
+        row = step.row
+        current_time = step.bar_time
+        current_date = current_time.date() if hasattr(current_time, 'date') else current_time
         is_target = str(current_date) == str(target_date)
 
-        # Collect pre-target bars as context (7 days before target only)
+        if step.opened_trade is not None:
+            opened_entry_time = pd.Timestamp(step.opened_trade.entry_time)
+            if str(opened_entry_time.date()) == str(target_date):
+                carry_trade_entry_time = opened_entry_time
+
         if not is_target and current_date < target_date:
             context_cutoff = target_date - timedelta(days=7)
             if current_date >= context_cutoff:
@@ -580,136 +577,105 @@ def generate_replay_frames(
                     'close': round(float(row['Close']), decimals),
                 })
 
-        if is_target and not day_zones and current_zones:
-            day_zones = [_zone_to_dict(z) for z in current_zones]
+        if is_target and not day_zones and step.zones:
+            day_zones = [_zone_to_dict(zone) for zone in step.zones]
 
-        # --- check exit ---
-        exit_event = None
         signal_event = None
+        if step.signal is not None:
+            signal_event = {
+                'direction': step.signal.direction,
+                'entry_price': step.signal.entry_price,
+                'sl_price': step.signal.sl_price,
+                'tp_price': step.signal.tp_price,
+                'zone_type': step.signal.zone_type,
+            }
 
-        if current_trade is not None:
-            bars_held = i - trade_entry_bar
-            result = check_exit(
-                current_trade,
-                bar_high=row['High'],
-                bar_low=row['Low'],
-                bar_close=row['Close'],
-                bar_time=current_time,
-                bars_held=bars_held,
-                params=params,
-                pip=pip,
+        if step.exit_trade is not None:
+            was_carry_trade = (
+                carry_trade_entry_time is not None
+                and pd.Timestamp(step.exit_trade.entry_time) == carry_trade_entry_time
             )
-            if result:
-                was_carry_trade = (
-                    carry_trade_entry_time is not None
-                    and pd.Timestamp(current_trade.entry_time) == carry_trade_entry_time
-                )
-                exit_reason, exit_price = result
-                finished = _finalize_trade(
-                    current_trade, current_time, exit_price, exit_reason, bars_held, pip,
-                )
-                exit_event = {
-                    'reason': finished.exit_reason,
-                    'price': finished.exit_price,
-                    'pnl_pips': round(finished.pnl_pips, 1),
-                    'pnl_r': round(finished.pnl_r, 2),
-                }
-                completed_trades.append(_trade_to_dict(finished, pip))
-                last_trade_bar = i
-                last_trade_was_loss = finished.pnl_r <= 0
-                current_trade = None
+            exit_event = {
+                'reason': step.exit_trade.exit_reason,
+                'price': step.exit_trade.exit_price,
+                'pnl_pips': round(step.exit_trade.pnl_pips, 1),
+                'pnl_r': round(step.exit_trade.pnl_r, 2),
+            }
+            completed_trades.append(_trade_to_dict(step.exit_trade, pip))
+            if is_target or was_carry_trade:
+                frames.append(_build_frame(
+                    frame_index,
+                    current_time,
+                    row,
+                    step.zones,
+                    step.support_zone,
+                    step.resistance_zone,
+                    None,
+                    exit_event,
+                    None,
+                    list(completed_trades),
+                    decimals,
+                ))
+                frame_index += 1
+                if is_target:
+                    selected_day_bar_count += 1
+            if was_carry_trade:
+                carry_trade_entry_time = None
+            return
 
-                if is_target or was_carry_trade:
-                    frames.append(_build_frame(
-                        frame_index, current_time, row,
-                        current_zones, nearest_support, nearest_resistance,
-                        signal_event, exit_event, None, list(completed_trades),
-                        decimals,
-                    ))
-                    frame_index += 1
-                    if is_target:
-                        selected_day_bar_count += 1
-                if was_carry_trade:
-                    carry_trade_entry_time = None
-                continue
-
-        # --- check entry ---
-        cooldown = params.cooldown_bars
-        if last_trade_was_loss and params.loss_cooldown_bars > 0:
-            cooldown = max(cooldown, params.loss_cooldown_bars)
-        if current_trade is None and (i - last_trade_bar) >= cooldown:
-            signal = select_entry_signal(
-                hourly_df=hourly_df,
-                bar_idx=i,
-                pair=pair,
-                params=params,
-                support_zone=nearest_support,
-                resistance_zone=nearest_resistance,
-            )
-
-            if signal:
-                current_trade = build_trade_from_signal(signal)
-                trade_entry_bar = i
-                signal_event = {
-                    'direction': signal.direction,
-                    'entry_price': signal.entry_price,
-                    'sl_price': signal.sl_price,
-                    'tp_price': signal.tp_price,
-                    'zone_type': signal.zone_type,
-                }
-
-        # --- emit frame for target day ---
         is_carry_continuation = (
             current_date > target_date
             and carry_trade_entry_time is not None
-            and current_trade is not None
-            and pd.Timestamp(current_trade.entry_time) == carry_trade_entry_time
+            and step.open_trade is not None
+            and pd.Timestamp(step.open_trade.entry_time) == carry_trade_entry_time
         )
 
         if is_target:
-            open_trade = None
-            if current_trade is not None:
-                carry_trade_entry_time = pd.Timestamp(current_trade.entry_time)
-                bars_held = i - trade_entry_bar
-                open_trade = {
-                    'entry_time': pd.Timestamp(current_trade.entry_time).isoformat(),
-                    'entry_price': current_trade.entry_price,
-                    'direction': current_trade.direction,
-                    'sl_price': current_trade.sl_price,
-                    'tp_price': current_trade.tp_price,
-                    'zone_upper': current_trade.zone_upper,
-                    'zone_lower': current_trade.zone_lower,
-                    'bars_held': bars_held,
-                }
-
+            if step.open_trade is not None:
+                carry_trade_entry_time = pd.Timestamp(step.open_trade.entry_time)
             frames.append(_build_frame(
-                frame_index, current_time, row,
-                current_zones, nearest_support, nearest_resistance,
-                signal_event, exit_event, open_trade, list(completed_trades),
+                frame_index,
+                current_time,
+                row,
+                step.zones,
+                step.support_zone,
+                step.resistance_zone,
+                signal_event,
+                None,
+                serialize_open_trade(step.open_trade, step.bars_held),
+                list(completed_trades),
                 decimals,
             ))
             frame_index += 1
             selected_day_bar_count += 1
-        elif is_carry_continuation:
-            bars_held = i - trade_entry_bar
-            open_trade = {
-                'entry_time': pd.Timestamp(current_trade.entry_time).isoformat(),
-                'entry_price': current_trade.entry_price,
-                'direction': current_trade.direction,
-                'sl_price': current_trade.sl_price,
-                'tp_price': current_trade.tp_price,
-                'zone_upper': current_trade.zone_upper,
-                'zone_lower': current_trade.zone_lower,
-                'bars_held': bars_held,
-            }
+            return
 
+        if is_carry_continuation:
             frames.append(_build_frame(
-                frame_index, current_time, row,
-                current_zones, nearest_support, nearest_resistance,
-                signal_event, exit_event, open_trade, list(completed_trades),
+                frame_index,
+                current_time,
+                row,
+                step.zones,
+                step.support_zone,
+                step.resistance_zone,
+                signal_event,
+                None,
+                serialize_open_trade(step.open_trade, step.bars_held),
+                list(completed_trades),
                 decimals,
             ))
             frame_index += 1
+
+    run_walk_forward(
+        hourly_df,
+        pair=pair,
+        params=params,
+        pip=pip,
+        zone_provider=zone_provider,
+        execution_quote_provider=execution_quote_provider,
+        on_bar=on_bar,
+        force_close_end=False,
+    )
 
     # Summary — separate target-day trades from all trades
     target_str = str(target_date)
@@ -955,6 +921,8 @@ async def handle_replay(request: web.Request) -> web.Response:
     hourly_end_date = max(target, today)
     hourly_end = datetime(hourly_end_date.year, hourly_end_date.month, hourly_end_date.day, 23, 59, 59)
     hourly_df = db.load_ohlc(ticker, '1h', start=hourly_start, end=hourly_end)
+    minute_df = db.load_ohlc(ticker, '1m')
+    l2_snapshots = db.load_l2_snapshots(ticker)
 
     if daily_df.empty or hourly_df.empty:
         return web.json_response(
@@ -964,7 +932,16 @@ async def handle_replay(request: web.Request) -> web.Response:
 
     params = _build_params(preset)
     decimals = PAIRS[pair].get('decimals', 5)
-    result = generate_replay_frames(daily_df, hourly_df, pair, target, params, zone_history_days)
+    result = generate_replay_frames(
+        daily_df,
+        hourly_df,
+        pair,
+        target,
+        params,
+        zone_history_days,
+        minute_df=minute_df,
+        l2_snapshots=l2_snapshots,
+    )
     account_trades, compounding = _load_cached_backtest_trades(backtest_key=backtest_key)
     result['summary']['account'] = _build_account_day_summary(target, account_trades, compounding)
 
@@ -977,7 +954,6 @@ async def handle_replay(request: web.Request) -> web.Response:
     # Expand target-day frames to minute bars when requested
     actual_tf = '1h'
     if timeframe == '1m':
-        minute_df = db.load_ohlc(ticker, '1m')
         if not minute_df.empty:
             result['frames'] = _expand_hourly_to_minutes(result['frames'], minute_df, decimals)
             result['summary']['total_bars'] = len(result['frames'])
@@ -1043,7 +1019,7 @@ async def handle_replay_refresh(request: web.Request) -> web.Response:
             # Release the IBKR connection so the client ID is free next time
             ibkr.disconnect()
 
-    daily_df, hourly_df, minute_df = await request.loop.run_in_executor(None, _fetch_all)
+    daily_df, hourly_df, minute_df = await asyncio.get_running_loop().run_in_executor(None, _fetch_all)
 
     return web.json_response({
         'pair': pair,

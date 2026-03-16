@@ -66,13 +66,19 @@ class TargetTradeModeTests(unittest.TestCase):
             'GBPUSD': _result('GBPUSD', [_trade('GBPUSD', '2026-03-01 10:00:00', '2026-03-01 13:00:00', 8.0, 0.8)]),
         }
 
-        summary = _portfolio_summary(results, params)
+        summary = _portfolio_summary(
+            results,
+            params,
+            starting_balance=1000.0,
+            risk_pct=0.05,
+        )
 
         self.assertEqual(summary['raw_total_trades'], 2)
         self.assertEqual(summary['raw_total_pnl'], 18.0)
         self.assertEqual(summary['total_trades'], 1)
         self.assertEqual(summary['total_pnl'], 10.0)
         self.assertEqual(summary['win_rate'], 100.0)
+        self.assertEqual(summary['skip_counts'], {'CORRELATION_CAP': 1})
 
     def test_run_backtests_until_target_returns_best_profile_label(self):
         baseline_params = StrategyParams()

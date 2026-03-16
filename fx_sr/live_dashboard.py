@@ -72,6 +72,7 @@ def _state_text(row: PairScanRow) -> Text:
 
     style = {
         'OPEN': "black on blue",
+        'PARTIAL': "black on bright_yellow",
         'PENDING': "black on yellow",
         'INSIDE': "black on magenta",
         'WATCH': "cyan",
@@ -89,6 +90,8 @@ def _note_text(row: PairScanRow) -> Text:
         return Text(row.note, style="red")
     if row.state == 'OPEN':
         return Text(row.note, style="blue")
+    if row.state == 'PARTIAL':
+        return Text(row.note, style="yellow")
     if row.state == 'PENDING':
         return Text(row.note, style="yellow")
     if row.state == 'NO DATA':
@@ -294,7 +297,7 @@ def _build_actions_panel(snapshot: Optional[MonitorSnapshot]) -> Panel:
         )
 
     for result in snapshot.execution_results[:6]:
-        if result.status in {'Submitted', 'PreSubmitted', 'SUBMITTED'}:
+        if result.status in {'Submitted', 'PreSubmitted', 'SUBMITTED', 'PARTIAL', 'OPEN'}:
             prefix = "[green bold]ORDER[/green bold]"
         elif result.status == 'SKIPPED':
             prefix = "[yellow]SKIP[/yellow]"
@@ -416,7 +419,7 @@ def _append_cycle_events(
         )
 
     for result in snapshot.execution_results:
-        if result.status in {'Submitted', 'PreSubmitted', 'SUBMITTED'}:
+        if result.status in {'Submitted', 'PreSubmitted', 'SUBMITTED', 'PARTIAL', 'OPEN'}:
             style = "green bold"
         elif result.status == 'SKIPPED':
             style = "yellow"

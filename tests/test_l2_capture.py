@@ -1,4 +1,3 @@
-import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -6,6 +5,7 @@ import pandas as pd
 
 from fx_sr import db
 from fx_sr.l2 import capture_l2_stream, format_l2_snapshot
+from tests._test_db_helpers import temporary_test_database
 
 
 def _snapshot(ts: str, pair: str = 'EURUSD', ticker: str = 'EURUSD=X') -> dict:
@@ -31,11 +31,13 @@ def _snapshot(ts: str, pair: str = 'EURUSD', ticker: str = 'EURUSD=X') -> dict:
 
 class L2CaptureTests(unittest.TestCase):
     def setUp(self):
-        self.db_path = 'file:test_l2_capture?mode=memory&cache=shared'
-        self._conn = sqlite3.connect(self.db_path, uri=True)
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db.init_db(self.db_path)
 
     def tearDown(self):
-        self._conn.close()
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
 
     def test_save_and_load_l2_snapshot_round_trip(self):
         snapshot_id = db.save_l2_snapshot(

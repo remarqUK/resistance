@@ -19,15 +19,36 @@ from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
-from .data import fetch_daily_data, fetch_hourly_data
+from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
+from .execution import historical_execution_quote
 from .levels import detect_zones, SRZone
+from .portfolio import (
+    ClosedTradeSummary,
+    CorrelationExposure,
+    PortfolioState,
+    apply_correlation_policy,
+    calculate_effective_risk_pct,
+    is_pair_cooldown_active,
+    update_streak_pause_state,
+)
 from .profiles import PROFILES
 from .strategy import (
-    Trade, StrategyParams, check_exit, get_correlated_pairs, get_market_exit_price,
+    Trade, StrategyParams, check_exit, get_market_exit_price,
     build_trade_from_signal, get_tradeable_zones, is_pair_fully_blocked, params_from_profile,
     select_entry_signal,
 )
-from .db import load_backtest_result, save_backtest_result
+from .walkforward import (
+    finalize_trade as shared_finalize_trade,
+    run_walk_forward,
+    slice_daily_window as shared_slice_daily_window,
+)
+from .serialization import (
+    deserialize_timestamp as shared_deserialize_timestamp,
+    serialize_timestamp as shared_serialize_timestamp,
+    serialize_trade as shared_serialize_trade,
+    serialize_zone as shared_serialize_zone,
+)
+from .db import load_backtest_result, save_backtest_result, load_l2_snapshots, load_ohlc
 from . import ibkr
 from .sizing import calculate_risk_amount
 
@@ -52,53 +73,71 @@ class BacktestResult:
     zones: List[SRZone]
 
 
-BACKTEST_CACHE_VERSION = '5'
+@dataclass(frozen=True)
+class ExecutionAwareSkip:
+    """One candidate trade rejected by the execution-aware portfolio simulator."""
+
+    pair: str
+    trade: Trade
+    reason: str
+
+
+@dataclass
+class ExecutionAwarePortfolioResult:
+    """Portfolio-level backtest result that mirrors live execution blocking."""
+
+    trade_log: List[Tuple[str, Trade, float, float, float]]
+    skipped: List[ExecutionAwareSkip]
+    skip_counts: Dict[str, int]
+    raw_total_trades: int
+    raw_total_wins: int
+    raw_total_pnl: float
+    final_balance: float
+
+    @property
+    def total_trades(self) -> int:
+        return len(self.trade_log)
+
+    @property
+    def total_wins(self) -> int:
+        return sum(1 for _, trade, _, _, _ in self.trade_log if trade.pnl_pips > 0)
+
+    @property
+    def total_pnl(self) -> float:
+        return float(sum(trade.pnl_pips for _, trade, _, _, _ in self.trade_log))
+
+    @property
+    def win_rate(self) -> float:
+        return (self.total_wins / self.total_trades * 100.0) if self.total_trades else 0.0
+
+
+@dataclass(frozen=True)
+class _ActiveExecutionExposure:
+    """Accepted trade tracked until its historical exit time."""
+
+    pair: str
+    trade: Trade
+    risk_amount: float
+    pnl_amount: float
+
+
+BACKTEST_CACHE_VERSION = '8'
 
 
 def _serialize_timestamp(value: pd.Timestamp | None) -> str | None:
-    if value is None:
-        return None
-    return pd.Timestamp(value).isoformat()
+    return shared_serialize_timestamp(value)
 
 
 def _deserialize_timestamp(value: str | None) -> pd.Timestamp | None:
-    if not value:
-        return None
-    return pd.Timestamp(value)
+    return shared_deserialize_timestamp(value)
 
 
 def _trade_to_dict(trade: Trade) -> dict:
-    return {
-        'entry_time': _serialize_timestamp(trade.entry_time),
-        'entry_price': float(trade.entry_price),
-        'direction': trade.direction,
-        'sl_price': float(trade.sl_price),
-        'tp_price': float(trade.tp_price),
-        'zone_upper': float(trade.zone_upper),
-        'zone_lower': float(trade.zone_lower),
-        'zone_strength': trade.zone_strength,
-        'risk': float(trade.risk),
-        'exit_time': _serialize_timestamp(trade.exit_time),
-        'exit_price': float(trade.exit_price) if trade.exit_price is not None else None,
-        'exit_reason': trade.exit_reason,
-        'pnl_pips': float(trade.pnl_pips),
-        'pnl_r': float(trade.pnl_r),
-        'bars_held': int(trade.bars_held),
-        'quality_score': float(trade.quality_score),
-    }
+    return shared_serialize_trade(trade)
 
 
 def _zone_to_dict(zone: SRZone) -> dict:
-    return {
-        'upper': float(zone.upper),
-        'lower': float(zone.lower),
-        'midpoint': float(zone.midpoint),
-        'touches': int(zone.touches),
-        'zone_type': zone.zone_type,
-        'strength': zone.strength,
-        'first_seen': _serialize_timestamp(zone.first_seen),
-        'last_seen': _serialize_timestamp(zone.last_seen),
-    }
+    return shared_serialize_zone(zone, include_seen=True)
 
 
 def _serialize_backtest_result(result: BacktestResult) -> str:
@@ -248,10 +287,18 @@ def _normalize_df_for_signature(df: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _data_signature(daily_df: pd.DataFrame, hourly_df: pd.DataFrame) -> str:
+def _data_signature(
+    daily_df: pd.DataFrame,
+    hourly_df: pd.DataFrame,
+    minute_df: pd.DataFrame | None = None,
+) -> str:
     signature_payload = json.dumps({
         'daily': _normalize_df_for_signature(daily_df).to_json(orient='split', date_unit='ns'),
         'hourly': _normalize_df_for_signature(hourly_df).to_json(orient='split', date_unit='ns'),
+        'minute': _normalize_df_for_signature(minute_df if minute_df is not None else pd.DataFrame()).to_json(
+            orient='split',
+            date_unit='ns',
+        ),
     }, sort_keys=True)
     return hashlib.sha256(signature_payload.encode('utf-8')).hexdigest()
 
@@ -262,20 +309,7 @@ def _slice_daily_window(
     zone_history_days: int,
 ) -> pd.DataFrame:
     """Return a walk-forward daily window bounded by zone_history_days."""
-    if daily_df.empty or zone_history_days <= 0:
-        return daily_df.iloc[0:0]
-
-    end_ts = pd.Timestamp(end_date)
-    end_day = end_ts.date() if hasattr(end_ts, 'date') else end_date
-    start_day = (end_ts - pd.Timedelta(days=max(zone_history_days - 1, 0))).date()
-
-    if hasattr(daily_df.index, 'date'):
-        index_dates = daily_df.index.date
-        mask = (index_dates >= start_day) & (index_dates <= end_day)
-        return daily_df[mask]
-
-    bounded = daily_df[daily_df.index <= end_ts]
-    return bounded.tail(zone_history_days)
+    return shared_slice_daily_window(daily_df, end_date, zone_history_days)
 
 
 def _finalize_trade(
@@ -287,21 +321,36 @@ def _finalize_trade(
     pip: float,
 ) -> Trade:
     """Populate final trade state and derived P&L metrics."""
-    trade.exit_time = exit_time
-    trade.exit_price = float(exit_price)
-    trade.exit_reason = exit_reason
-    trade.bars_held = bars_held
+    return shared_finalize_trade(trade, exit_time, exit_price, exit_reason, bars_held, pip)
 
-    if trade.direction == 'LONG':
-        trade.pnl_pips = (trade.exit_price - trade.entry_price) / pip
-        if trade.risk > 0:
-            trade.pnl_r = (trade.exit_price - trade.entry_price) / trade.risk
-    else:
-        trade.pnl_pips = (trade.entry_price - trade.exit_price) / pip
-        if trade.risk > 0:
-            trade.pnl_r = (trade.entry_price - trade.exit_price) / trade.risk
 
-    return trade
+def _load_minute_execution_data(
+    ticker: str,
+    hourly_days: int,
+    *,
+    force_refresh: bool = False,
+    client_id: int | None = None,
+) -> pd.DataFrame:
+    """Load cached minute bars used for strict execution-parity entries."""
+
+    end = pd.Timestamp.now(tz='UTC')
+    start = end - pd.Timedelta(days=int(hourly_days))
+
+    if force_refresh:
+        refresh_days = max(1, min(int(hourly_days), 7))
+        fetch_minute_data_cached(
+            ticker,
+            days=refresh_days,
+            allow_stale_cache=False,
+            client_id=client_id,
+        )
+
+    return load_ohlc(
+        ticker,
+        '1m',
+        start=start.to_pydatetime(),
+        end=end.to_pydatetime(),
+    )
 
 
 def _deduplicate_zones(zones: List[SRZone]) -> List[SRZone]:
@@ -341,6 +390,8 @@ def run_backtest(
     pair: str,
     params: StrategyParams = None,
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
+    minute_df: pd.DataFrame | None = None,
+    l2_snapshots: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Run multi-timeframe backtest: daily zones + hourly execution.
 
@@ -360,90 +411,40 @@ def run_backtest(
     pair_info = PAIRS.get(pair, {})
     pip = pair_info.get('pip', 0.0001)
 
-    trades: List[Trade] = []
-    current_trade: Optional[Trade] = None
-    current_zones: List[SRZone] = []
-    nearest_support: Optional[SRZone] = None
-    nearest_resistance: Optional[SRZone] = None
-    last_trade_bar = -params.cooldown_bars
-    last_trade_was_loss = False
-    last_zone_date = None
-    trade_entry_bar = 0  # bar index when current trade was opened
+    def zone_provider(current_time, current_date, _bar_index):
+        bar_date = pd.Timestamp(current_date)
+        if hasattr(current_time, 'tzinfo') and current_time.tzinfo:
+            bar_date = bar_date.tz_localize(current_time.tzinfo)
+        daily_window = _slice_daily_window(daily_df, bar_date, zone_history_days)
+        if len(daily_window) < 20:
+            return []
+        return detect_zones(daily_window)
 
-    for i in range(len(hourly_df)):
-        row = hourly_df.iloc[i]
-        current_time = hourly_df.index[i]
-        current_date = current_time.date() if hasattr(current_time, 'date') else current_time
-
-        # Re-detect zones when a new day starts
-        bar_date = pd.Timestamp(current_date).tz_localize(current_time.tzinfo) if hasattr(current_time, 'tzinfo') and current_time.tzinfo else pd.Timestamp(current_date)
-
-        if last_zone_date is None or str(current_date) != str(last_zone_date):
-            # Use only daily data up to current date, bounded by the rolling lookback.
-            daily_window = _slice_daily_window(daily_df, bar_date, zone_history_days)
-
-            if len(daily_window) >= 20:
-                current_zones = detect_zones(daily_window)
-            else:
-                current_zones = []
-            last_zone_date = current_date
-
-        current_price = float(row['Close'])
-        nearest_support, nearest_resistance = get_tradeable_zones(current_zones, current_price)
-
-        # Check exit if holding a position
-        if current_trade is not None:
-            bars_held = i - trade_entry_bar
-            result = check_exit(
-                current_trade,
-                bar_high=row['High'],
-                bar_low=row['Low'],
-                bar_close=row['Close'],
-                bar_time=current_time,
-                bars_held=bars_held,
-                params=params,
-                pip=pip,
-            )
-            if result:
-                exit_reason, exit_price = result
-                closed = _finalize_trade(current_trade, current_time, exit_price, exit_reason, bars_held, pip)
-                trades.append(closed)
-                last_trade_bar = i
-                last_trade_was_loss = closed.pnl_r <= 0
-                current_trade = None
-                continue
-
-        # Check for new entry if flat and cooldown elapsed
-        cooldown = params.cooldown_bars
-        if last_trade_was_loss and params.loss_cooldown_bars > 0:
-            cooldown = max(cooldown, params.loss_cooldown_bars)
-        if current_trade is None and (i - last_trade_bar) >= cooldown:
-            signal = select_entry_signal(
-                hourly_df=hourly_df,
-                bar_idx=i,
-                pair=pair,
-                params=params,
-                support_zone=nearest_support,
-                resistance_zone=nearest_resistance,
-            )
-            if signal:
-                current_trade = build_trade_from_signal(signal)
-                trade_entry_bar = i
-
-    # Force-close any open trade at end of data
-    if current_trade is not None:
-        trades.append(
-            _finalize_trade(
-                current_trade,
-                hourly_df.index[-1],
-                get_market_exit_price(float(hourly_df['Close'].iloc[-1]), current_trade.direction, pip, params),
-                'END',
-                len(hourly_df) - 1 - trade_entry_bar,
-                pip,
-            )
+    def execution_quote_provider(signal, submit_time, _bar_index, row):
+        return historical_execution_quote(
+            signal.pair,
+            submit_time,
+            params,
+            minute_df=minute_df,
+            l2_snapshots=l2_snapshots,
+            allow_h1_fallback=(
+                bool(params.allow_h1_execution_fallback)
+                and not bool(params.strict_backtest_execution)
+            ),
+            fallback_mid_price=float(row['Open']),
         )
 
-    return _compile_results(pair, trades, current_zones)
+    result = run_walk_forward(
+        hourly_df,
+        pair=pair,
+        params=params,
+        pip=pip,
+        zone_provider=zone_provider,
+        execution_quote_provider=execution_quote_provider,
+        force_close_end=True,
+        skip_execution_plan=not bool(params.strict_backtest_execution),
+    )
+    return _compile_results(pair, result.trades, result.zones)
 
 
 def precompute_zone_cache(
@@ -589,7 +590,7 @@ def _fetch_pair_data_only(
     zone_history_days: int,
     force_refresh: bool,
     client_id: int | None,
-) -> Tuple[str, pd.DataFrame, pd.DataFrame]:
+) -> Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Fetch daily and hourly data for a pair without running the backtest."""
     daily_df = fetch_daily_data(
         pair_info['ticker'],
@@ -605,7 +606,20 @@ def _fetch_pair_data_only(
         allow_stale_cache=not force_refresh,
         client_id=client_id,
     )
-    return pair, daily_df, hourly_df
+    minute_df = _load_minute_execution_data(
+        pair_info['ticker'],
+        hourly_days,
+        force_refresh=force_refresh,
+        client_id=client_id,
+    )
+    end = pd.Timestamp.now(tz='UTC')
+    start = end - pd.Timedelta(days=int(hourly_days))
+    l2_snapshots = load_l2_snapshots(
+        pair_info['ticker'],
+        start=start.to_pydatetime(),
+        end=end.to_pydatetime(),
+    )
+    return pair, daily_df, hourly_df, minute_df, l2_snapshots
 
 
 def run_backtest_fast(
@@ -614,93 +628,44 @@ def run_backtest_fast(
     params: StrategyParams,
     zone_cache: Dict[tuple, List[SRZone]],
     pip: float,
+    minute_df: pd.DataFrame | None = None,
+    l2_snapshots: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Fast backtest using pre-computed zones (skips zone detection).
 
     Identical logic to run_backtest but looks up zones from zone_cache
     instead of calling detect_zones on each new day.
     """
-    trades: List[Trade] = []
-    current_trade: Optional[Trade] = None
-    current_zones: List[SRZone] = []
-    nearest_support: Optional[SRZone] = None
-    nearest_resistance: Optional[SRZone] = None
-    last_trade_bar = -params.cooldown_bars
-    last_trade_was_loss = False
-    last_zone_date = None
-    trade_entry_bar = 0
+    skip_exec = not bool(params.strict_backtest_execution)
 
-    for i in range(len(hourly_df)):
-        row = hourly_df.iloc[i]
-        current_time = hourly_df.index[i]
-        current_date = current_time.date() if hasattr(current_time, 'date') else current_time
-        date_str = str(current_date)
+    def zone_provider(_current_time, current_date, _bar_index):
+        return zone_cache.get((pair, str(current_date)), [])
 
-        # Look up pre-computed zones on new day
-        if last_zone_date is None or date_str != str(last_zone_date):
-            cached = zone_cache.get((pair, date_str))
-            if cached is not None:
-                current_zones = cached
-            else:
-                current_zones = []
-            last_zone_date = current_date
-
-        current_price = float(row['Close'])
-        nearest_support, nearest_resistance = get_tradeable_zones(current_zones, current_price)
-
-        # Check exit if holding a position
-        if current_trade is not None:
-            bars_held = i - trade_entry_bar
-            result = check_exit(
-                current_trade,
-                bar_high=row['High'],
-                bar_low=row['Low'],
-                bar_close=row['Close'],
-                bar_time=current_time,
-                bars_held=bars_held,
-                params=params,
-                pip=pip,
-            )
-            if result:
-                exit_reason, exit_price = result
-                closed = _finalize_trade(current_trade, current_time, exit_price, exit_reason, bars_held, pip)
-                trades.append(closed)
-                last_trade_bar = i
-                last_trade_was_loss = closed.pnl_r <= 0
-                current_trade = None
-                continue
-
-        # Check for new entry if flat and cooldown elapsed
-        cooldown = params.cooldown_bars
-        if last_trade_was_loss and params.loss_cooldown_bars > 0:
-            cooldown = max(cooldown, params.loss_cooldown_bars)
-        if current_trade is None and (i - last_trade_bar) >= cooldown:
-            signal = select_entry_signal(
-                hourly_df=hourly_df,
-                bar_idx=i,
-                pair=pair,
-                params=params,
-                support_zone=nearest_support,
-                resistance_zone=nearest_resistance,
-            )
-            if signal:
-                current_trade = build_trade_from_signal(signal)
-                trade_entry_bar = i
-
-    # Force-close any open trade at end of data
-    if current_trade is not None:
-        trades.append(
-            _finalize_trade(
-                current_trade,
-                hourly_df.index[-1],
-                get_market_exit_price(float(hourly_df['Close'].iloc[-1]), current_trade.direction, pip, params),
-                'END',
-                len(hourly_df) - 1 - trade_entry_bar,
-                pip,
-            )
+    def execution_quote_provider(signal, submit_time, _bar_index, row):
+        return historical_execution_quote(
+            signal.pair,
+            submit_time,
+            params,
+            minute_df=minute_df,
+            l2_snapshots=l2_snapshots,
+            allow_h1_fallback=(
+                bool(params.allow_h1_execution_fallback)
+                and not bool(params.strict_backtest_execution)
+            ),
+            fallback_mid_price=float(row['Open']),
         )
 
-    return _compile_results(pair, trades, current_zones)
+    result = run_walk_forward(
+        hourly_df,
+        pair=pair,
+        params=params,
+        pip=pip,
+        zone_provider=zone_provider,
+        execution_quote_provider=execution_quote_provider,
+        force_close_end=True,
+        skip_execution_plan=skip_exec,
+    )
+    return _compile_results(pair, result.trades, result.zones)
 
 
 def _compile_results(
@@ -794,9 +759,22 @@ def _backtest_pair(
         allow_stale_cache=not force_refresh,
         client_id=client_id,
     )
+    minute_df = _load_minute_execution_data(
+        pair_info['ticker'],
+        hourly_days,
+        force_refresh=force_refresh,
+        client_id=client_id,
+    )
+    end = pd.Timestamp.now(tz='UTC')
+    start = end - pd.Timedelta(days=int(hourly_days))
+    l2_snapshots = load_l2_snapshots(
+        pair_info['ticker'],
+        start=start.to_pydatetime(),
+        end=end.to_pydatetime(),
+    )
     if daily_df.empty or hourly_df.empty:
         return pair, None
-    data_sig = _data_signature(daily_df, hourly_df)
+    data_sig = _data_signature(daily_df, hourly_df, minute_df)
 
     if not force_refresh:
         cached = load_backtest_result(
@@ -828,7 +806,15 @@ def _backtest_pair(
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     pass
 
-    result = run_backtest(daily_df, hourly_df, pair, params, zone_history_days)
+    result = run_backtest(
+        daily_df,
+        hourly_df,
+        pair,
+        params,
+        zone_history_days,
+        minute_df=minute_df,
+        l2_snapshots=l2_snapshots,
+    )
     if result is not None:
         save_backtest_result(
             pair=pair,
@@ -971,22 +957,22 @@ def run_all_backtests_parallel(
                 for offset, (pair, info) in enumerate(pair_items)
             }
             for future in as_completed(futures):
-                pair, daily_df, hourly_df = future.result()
+                pair, daily_df, hourly_df, minute_df, l2_snapshots = future.result()
                 if (daily_df is not None and not daily_df.empty
                         and hourly_df is not None and not hourly_df.empty):
-                    pair_data[pair] = (daily_df, hourly_df)
+                    pair_data[pair] = (daily_df, hourly_df, minute_df, l2_snapshots)
                 else:
                     done += 1
                     print(f"    [{done}/{total}] {pair}: no data")
     except (OSError, ValueError):
         for offset, (pair, info) in enumerate(pair_items):
             cid = _pair_client_id(base_client_id, offset)
-            pair, daily_df, hourly_df = _fetch_pair_data_only(
+            pair, daily_df, hourly_df, minute_df, l2_snapshots = _fetch_pair_data_only(
                 pair, info, hourly_days, zone_history_days, force_refresh, cid,
             )
             if (daily_df is not None and not daily_df.empty
                     and hourly_df is not None and not hourly_df.empty):
-                pair_data[pair] = (daily_df, hourly_df)
+                pair_data[pair] = (daily_df, hourly_df, minute_df, l2_snapshots)
             else:
                 done += 1
                 print(f"    [{done}/{total}] {pair}: no data")
@@ -999,8 +985,8 @@ def run_all_backtests_parallel(
     # --- Phase 2: Check backtest result cache, identify cache misses ---
     params_hash = _params_signature(params)
     pairs_to_compute: Dict[str, tuple] = {}
-    for pair, (daily_df, hourly_df) in pair_data.items():
-        data_sig = _data_signature(daily_df, hourly_df)
+    for pair, (daily_df, hourly_df, minute_df, l2_snapshots) in pair_data.items():
+        data_sig = _data_signature(daily_df, hourly_df, minute_df)
         cached = load_backtest_result(pair, params_hash, hourly_days, zone_history_days)
         if cached is not None:
             cached_sig, cached_json, strategy_version, cached_run_config_json = cached
@@ -1028,7 +1014,7 @@ def run_all_backtests_parallel(
                     continue
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     pass
-        pairs_to_compute[pair] = (daily_df, hourly_df, data_sig)
+        pairs_to_compute[pair] = (daily_df, hourly_df, minute_df, l2_snapshots, data_sig)
 
     if not pairs_to_compute:
         return results
@@ -1039,7 +1025,7 @@ def run_all_backtests_parallel(
     # First pass: collect all dates per pair
     pair_dates: Dict[str, tuple] = {}
     total_zone_dates = 0
-    for pair, (daily_df, hourly_df, _) in pairs_to_compute.items():
+    for pair, (daily_df, hourly_df, _minute_df, _l2_snapshots, _) in pairs_to_compute.items():
         seen: set = set()
         dates: List[str] = []
         for ts in hourly_df.index:
@@ -1079,11 +1065,11 @@ def run_all_backtests_parallel(
 
             # Submit walk-forward tasks (reuses the same pool — no extra startup)
             walk_futures = {}
-            for pair, (daily_df, hourly_df, data_sig) in pairs_to_compute.items():
+            for pair, (daily_df, hourly_df, minute_df, l2_snapshots, data_sig) in pairs_to_compute.items():
                 pip = pairs[pair].get('pip', 0.0001)
                 pair_zones = {k: v for k, v in zone_cache.items() if k[0] == pair}
                 walk_futures[executor.submit(
-                    run_backtest_fast, hourly_df, pair, params, pair_zones, pip,
+                    run_backtest_fast, hourly_df, pair, params, pair_zones, pip, minute_df, l2_snapshots,
                 )] = (pair, data_sig)
             for future in as_completed(walk_futures):
                 pair, data_sig = walk_futures[future]
@@ -1108,10 +1094,10 @@ def run_all_backtests_parallel(
         print(f"    Process pool unavailable ({exc}); falling back to sequential.")
         for task in zone_tasks:
             zone_cache.update(_detect_zones_for_dates(*task))
-        for pair, (daily_df, hourly_df, data_sig) in pairs_to_compute.items():
+        for pair, (daily_df, hourly_df, minute_df, l2_snapshots, data_sig) in pairs_to_compute.items():
             pip = pairs[pair].get('pip', 0.0001)
             pair_zones = {k: v for k, v in zone_cache.items() if k[0] == pair}
-            result = run_backtest_fast(hourly_df, pair, params, pair_zones, pip)
+            result = run_backtest_fast(hourly_df, pair, params, pair_zones, pip, minute_df, l2_snapshots)
             results[pair] = result
             done += 1
             r = result
@@ -1155,33 +1141,293 @@ def apply_correlation_filter(
         active = [(p, t) for p, t in active
                   if t.exit_time is None or t.exit_time > trade.entry_time]
 
-        correlated = get_correlated_pairs(pair_id)
-        active_correlated = [p for p, t in active if p in correlated or p == pair_id]
-
-        if len(active_correlated) >= params.max_correlated_trades:
-            if params.correlation_prefer_quality:
-                # Find worst-quality active correlated trade
-                worst_idx = None
-                worst_quality = float('inf')
-                for idx, (p, t) in enumerate(active):
-                    if p in correlated or p == pair_id:
-                        if t.quality_score < worst_quality:
-                            worst_quality = t.quality_score
-                            worst_idx = idx
-                if worst_idx is not None and trade.quality_score > worst_quality:
-                    removed_pair, removed_trade = active[worst_idx]
-                    filtered = [(p, t) for p, t in filtered
-                                if not (p == removed_pair and t is removed_trade)]
-                    active.pop(worst_idx)
-                else:
-                    continue
-            else:
-                continue
+        exposures = [
+            CorrelationExposure(
+                pair=active_pair,
+                quality_score=active_trade.quality_score,
+                replaceable=True,
+                payload=(active_pair, active_trade),
+            )
+            for active_pair, active_trade in active
+        ]
+        allowed, replaced = apply_correlation_policy(
+            exposures,
+            candidate_pair=pair_id,
+            candidate_quality=trade.quality_score,
+            params=params,
+        )
+        if not allowed:
+            continue
+        if replaced is not None:
+            removed_pair, removed_trade = replaced.payload
+            filtered = [
+                (p, t) for p, t in filtered
+                if not (p == removed_pair and t is removed_trade)
+            ]
+            active = [
+                (p, t) for p, t in active
+                if not (p == removed_pair and t is removed_trade)
+            ]
 
         filtered.append((pair_id, trade))
         active.append((pair_id, trade))
 
     return filtered
+
+
+def _record_execution_skip(
+    skipped: List[ExecutionAwareSkip],
+    skip_counts: Dict[str, int],
+    pair: str,
+    trade: Trade,
+    reason: str,
+) -> None:
+    """Append one rejected candidate trade with its reason code."""
+
+    skipped.append(ExecutionAwareSkip(pair=pair, trade=trade, reason=reason))
+    skip_counts[reason] = skip_counts.get(reason, 0) + 1
+
+
+def _settle_execution_exposures(
+    active: List[_ActiveExecutionExposure],
+    *,
+    entry_time: pd.Timestamp,
+    state: PortfolioState,
+) -> List[_ActiveExecutionExposure]:
+    """Apply closed accepted trades to the portfolio state before the next batch."""
+
+    remaining: list[_ActiveExecutionExposure] = []
+    closed: list[_ActiveExecutionExposure] = []
+    for exposure in active:
+        if exposure.trade.exit_time is not None and exposure.trade.exit_time <= entry_time:
+            closed.append(exposure)
+        else:
+            remaining.append(exposure)
+
+    closed.sort(
+        key=lambda exposure: (
+            exposure.trade.exit_time,
+            exposure.trade.entry_time,
+            exposure.pair,
+        )
+    )
+    for exposure in closed:
+        state.record_closed_trade(
+            ClosedTradeSummary(
+                pair=exposure.pair,
+                entry_time=exposure.trade.entry_time,
+                exit_time=exposure.trade.exit_time,
+                pnl_r=exposure.trade.pnl_r,
+                quality_score=exposure.trade.quality_score,
+                risk_amount=exposure.risk_amount,
+                pnl_amount=exposure.pnl_amount,
+            )
+        )
+    return remaining
+
+
+def calculate_execution_aware_compounding_pnl(
+    results: Dict[str, BacktestResult],
+    starting_balance: float = 1000.0,
+    risk_pct: float = 0.05,
+    params: StrategyParams = None,
+) -> ExecutionAwarePortfolioResult:
+    """Run the live-style portfolio admission funnel over historical trades."""
+
+    if params is None:
+        params = StrategyParams()
+
+    candidates: list[tuple[str, Trade]] = []
+    raw_total_trades = 0
+    raw_total_wins = 0
+    raw_total_pnl = 0.0
+    for pair, result in results.items():
+        raw_total_trades += int(result.total_trades)
+        raw_total_wins += int(result.winning_trades)
+        raw_total_pnl += float(result.total_pnl_pips)
+        for trade in result.trades:
+            candidates.append((pair, trade))
+
+    candidates.sort(key=lambda item: (item[1].entry_time, item[0]))
+    trade_log: list[tuple[str, Trade, float, float, float]] = []
+    skipped: list[ExecutionAwareSkip] = []
+    skip_counts: dict[str, int] = {}
+    report_balance = float(starting_balance)
+    state = PortfolioState(
+        params=params,
+        balance=float(starting_balance),
+        peak_balance=float(starting_balance),
+    )
+    active: list[_ActiveExecutionExposure] = []
+
+    idx = 0
+    while idx < len(candidates):
+        batch_time = candidates[idx][1].entry_time
+        active = _settle_execution_exposures(active, entry_time=batch_time, state=state)
+
+        current_balance = (
+            float(state.balance)
+            if state.balance is not None
+            else float(starting_balance)
+        )
+        slot_risk_amount = calculate_risk_amount(current_balance, risk_pct)
+        active_reserved_risk = sum(exposure.risk_amount for exposure in active)
+        correlation_cap = max(int(params.max_correlated_trades), 1)
+        max_total_risk = (
+            float(slot_risk_amount) * correlation_cap
+            if params.use_correlation_filter
+            else None
+        )
+
+        batch: list[tuple[str, Trade]] = []
+        while idx < len(candidates) and candidates[idx][1].entry_time == batch_time:
+            batch.append(candidates[idx])
+            idx += 1
+
+        exposures: list[CorrelationExposure] = [
+            CorrelationExposure(
+                pair=exposure.pair,
+                quality_score=float(exposure.trade.quality_score),
+                replaceable=False,
+                payload=exposure.pair,
+            )
+            for exposure in active
+        ]
+        planned: dict[int, tuple[str, Trade, float]] = {}
+        planned_reserved_risk = 0.0
+
+        for batch_idx, (pair_id, trade) in enumerate(batch):
+            block = state.entry_block(pair_id, batch_time)
+            if block is not None:
+                _record_execution_skip(skipped, skip_counts, pair_id, trade, block[0])
+                continue
+
+            effective_risk = calculate_effective_risk_pct(
+                risk_pct,
+                params=params,
+                balance=current_balance,
+                peak_balance=state.peak_balance,
+                quality_score=trade.quality_score,
+            )
+            risk_amount = calculate_risk_amount(current_balance, effective_risk)
+
+            same_pair_nonreplaceable = any(
+                exposure.pair == pair_id and not exposure.replaceable
+                for exposure in exposures
+            )
+            if same_pair_nonreplaceable:
+                _record_execution_skip(skipped, skip_counts, pair_id, trade, 'POSITION_EXISTS')
+                continue
+
+            replace_candidates = {
+                exposure.payload: exposure
+                for exposure in exposures
+                if exposure.pair == pair_id and exposure.replaceable
+            }
+            if replace_candidates:
+                worst_same_pair = min(
+                    replace_candidates.values(),
+                    key=lambda exposure: exposure.quality_score,
+                )
+                if float(trade.quality_score) > float(worst_same_pair.quality_score):
+                    candidate_exposures = [
+                        exposure
+                        for exposure in exposures
+                        if exposure.payload != worst_same_pair.payload
+                    ]
+                else:
+                    _record_execution_skip(
+                        skipped,
+                        skip_counts,
+                        pair_id,
+                        trade,
+                        'DUPLICATE_PAIR_SIGNAL',
+                    )
+                    continue
+            else:
+                worst_same_pair = None
+                candidate_exposures = list(exposures)
+
+            allowed, replaced_corr = apply_correlation_policy(
+                candidate_exposures,
+                candidate_pair=pair_id,
+                candidate_quality=trade.quality_score,
+                params=params,
+            )
+            if not allowed:
+                _record_execution_skip(skipped, skip_counts, pair_id, trade, 'CORRELATION_CAP')
+                continue
+
+            replaced_exposures: dict[object, CorrelationExposure] = {}
+            for exposure in (worst_same_pair, replaced_corr):
+                if exposure is not None:
+                    replaced_exposures[exposure.payload] = exposure
+
+            candidate_reserved_risk = planned_reserved_risk + float(risk_amount)
+            for payload in replaced_exposures:
+                prior = planned.get(payload)
+                if prior is not None:
+                    candidate_reserved_risk -= float(prior[2])
+
+            if (
+                max_total_risk is not None
+                and active_reserved_risk + candidate_reserved_risk > max_total_risk + 1e-9
+            ):
+                _record_execution_skip(skipped, skip_counts, pair_id, trade, 'RISK_BUDGET_FULL')
+                continue
+
+            for payload in replaced_exposures:
+                prior = planned.pop(payload, None)
+                if prior is None:
+                    continue
+                planned_reserved_risk -= float(prior[2])
+                _record_execution_skip(
+                    skipped,
+                    skip_counts,
+                    prior[0],
+                    prior[1],
+                    'REPLACED_BY_HIGHER_QUALITY',
+                )
+                exposures = [
+                    exposure
+                    for exposure in exposures
+                    if exposure.payload != payload
+                ]
+
+            planned[batch_idx] = (pair_id, trade, float(risk_amount))
+            planned_reserved_risk += float(risk_amount)
+            exposures.append(
+                CorrelationExposure(
+                    pair=pair_id,
+                    quality_score=float(trade.quality_score),
+                    replaceable=True,
+                    payload=batch_idx,
+                )
+            )
+
+        for batch_idx in sorted(planned):
+            pair_id, trade, risk_amount = planned[batch_idx]
+            pnl_amount = float(risk_amount) * float(trade.pnl_r)
+            report_balance += pnl_amount
+            trade_log.append((pair_id, trade, float(risk_amount), pnl_amount, report_balance))
+            active.append(
+                _ActiveExecutionExposure(
+                    pair=pair_id,
+                    trade=trade,
+                    risk_amount=float(risk_amount),
+                    pnl_amount=pnl_amount,
+                )
+            )
+
+    return ExecutionAwarePortfolioResult(
+        trade_log=trade_log,
+        skipped=skipped,
+        skip_counts=dict(sorted(skip_counts.items())),
+        raw_total_trades=raw_total_trades,
+        raw_total_wins=raw_total_wins,
+        raw_total_pnl=raw_total_pnl,
+        final_balance=report_balance,
+    )
 
 
 def calculate_compounding_pnl(
@@ -1226,23 +1472,13 @@ def calculate_compounding_pnl(
         if pause_until is not None and t.entry_time <= pause_until:
             continue
 
-        # Dynamic risk sizing: scale risk down during drawdowns
-        if params.dynamic_risk and peak_balance > 0:
-            dd_pct = (peak_balance - balance) / peak_balance * 100
-            if dd_pct <= params.dd_risk_start:
-                effective_risk = risk_pct
-            elif dd_pct >= params.dd_risk_full:
-                effective_risk = params.dd_risk_floor / 100.0
-            else:
-                frac = (dd_pct - params.dd_risk_start) / (params.dd_risk_full - params.dd_risk_start)
-                effective_risk = risk_pct - (risk_pct - params.dd_risk_floor / 100.0) * frac
-        else:
-            effective_risk = risk_pct
-
-        # Quality-based risk scaling
-        if params.quality_sizing:
-            multiplier = params.quality_risk_min + t.quality_score * (params.quality_risk_max - params.quality_risk_min)
-            effective_risk *= multiplier
+        effective_risk = calculate_effective_risk_pct(
+            risk_pct,
+            params=params,
+            balance=balance,
+            peak_balance=peak_balance,
+            quality_score=t.quality_score,
+        )
 
         risk_amt = calculate_risk_amount(balance, effective_risk)
         pnl = risk_amt * t.pnl_r
@@ -1251,19 +1487,13 @@ def calculate_compounding_pnl(
             peak_balance = balance
         trade_log.append((pair, t, risk_amt, pnl, balance))
 
-        # Track consecutive losses for circuit breaker
-        if t.pnl_r <= 0:
-            consecutive_losses += 1
-        else:
-            consecutive_losses = 0
-            pause_until = None
-
-        if (
-            params.streak_pause_trigger > 0
-            and consecutive_losses >= params.streak_pause_trigger
-        ):
-            pause_until = t.exit_time + pd.Timedelta(hours=params.streak_pause_hours)
-            consecutive_losses = 0  # reset after triggering
+        consecutive_losses, pause_until = update_streak_pause_state(
+            consecutive_losses,
+            pause_until,
+            pnl_r=t.pnl_r,
+            exit_time=t.exit_time,
+            params=params,
+        )
 
     return trade_log, balance
 
@@ -1273,11 +1503,15 @@ def format_compounding_results(
     starting_balance: float,
     final_balance: float,
     total_pre_filter: int,
+    *,
+    title: str = "COMPOUNDING P&L REPORT",
+    filter_note: str = "filtered from {total_pre_filter} by correlation",
+    skip_counts: Dict[str, int] | None = None,
 ) -> str:
     """Format compounding P&L results as a readable report."""
     lines = []
     lines.append("=" * 130)
-    lines.append("  COMPOUNDING P&L REPORT")
+    lines.append(f"  {title}")
     lines.append("=" * 130)
     lines.append(
         f"  {'#':>3} {'Date':<20} {'Pair':<8} {'Dir':>5} {'Exit':>10} "
@@ -1357,8 +1591,10 @@ def format_compounding_results(
     lines.append(f"  Final balance:        GBP {final_balance:,.2f}")
     lines.append(f"  Net P&L:              GBP {final_balance - starting_balance:+,.2f} "
                  f"({(final_balance - starting_balance) / starting_balance * 100:+.1f}%)")
-    lines.append(f"  Total trades:         {len(trade_log)} "
-                 f"(filtered from {total_pre_filter} by correlation)")
+    lines.append(
+        f"  Total trades:         {len(trade_log)} "
+        f"({filter_note.format(total_pre_filter=total_pre_filter)})"
+    )
     lines.append(f"  Wins: {len(wins)}  Losses: {len(losses)}  "
                  f"Win rate: {len(wins)/len(trade_log)*100:.1f}%" if trade_log else "")
     lines.append(f"  Avg win: {avg_win:+.2f}R  Avg loss: {avg_loss:+.2f}R")
@@ -1366,6 +1602,8 @@ def format_compounding_results(
     lines.append(f"  Max drawdown:         {max_dd:.1f}%")
     lines.append(f"  Max losing streak:    {max_losing_streak} trades")
     lines.append(f"  Exit types:           {dict(sorted(exit_counts.items()))}")
+    if skip_counts:
+        lines.append(f"  Skip reasons:         {dict(sorted(skip_counts.items()))}")
     lines.append("=" * 130)
 
     return "\n".join(lines)

@@ -12,6 +12,7 @@ from fx_sr.backtest import (
     apply_correlation_filter,
     build_backtest_run_config_json,
     calculate_compounding_pnl,
+    calculate_execution_aware_compounding_pnl,
     format_compounding_results,
     format_results,
     _params_signature,
@@ -36,9 +37,18 @@ from fx_sr.config import (
 from fx_sr.live import (
     build_live_size_plans,
     format_signals_with_sizes,
+    load_portfolio_state,
     scan_opportunities,
     show_zones,
 )
+from fx_sr.backtest_baseline import (
+    build_backtest_baseline_artifact,
+    compare_backtest_baseline_artifacts,
+    format_backtest_baseline_comparison,
+    load_backtest_baseline_artifact,
+    save_backtest_baseline_artifact,
+)
+from fx_sr.live_history import record_detected_signals, record_execution_results
 from fx_sr.profiles import PROFILES, DEFAULT_PROFILE, get_profile
 from fx_sr.strategy import (
     DEFAULT_BLOCKED_DAYS,
@@ -57,6 +67,12 @@ def _configure_ibkr(args) -> int:
     return ibkr.TWS_CLIENT_ID
 
 
+def _requested_profile_name(args) -> str | None:
+    """Return the requested profile/preset name from argparse or tests."""
+
+    return getattr(args, 'profile', None) or getattr(args, 'preset', None)
+
+
 def _add_ibkr_args(parser):
     parser.add_argument(
         '--ibkr-client-id',
@@ -64,6 +80,43 @@ def _add_ibkr_args(parser):
         default=None,
         help='Override IBKR/TWS client ID (default: env IBKR_CLIENT_ID or 60)',
     )
+
+
+def _add_download_args(parser):
+    parser.add_argument(
+        '--pair',
+        type=str,
+        help='Specific pair (e.g., EURUSD). Default: all configured pairs',
+    )
+    parser.add_argument(
+        '--days',
+        type=int,
+        default=730,
+        help='Days of data to download (default: 730, max for hourly)',
+    )
+    parser.add_argument(
+        '--minute-days',
+        type=int,
+        default=0,
+        help='Backfill 1-minute bars for this many days in 7-day chunks (default: 0)',
+    )
+    parser.add_argument(
+        '--minute-only',
+        action='store_true',
+        help='Skip daily/hourly downloads and only backfill 1-minute bars',
+    )
+    parser.add_argument(
+        '--sync-workers',
+        type=int,
+        default=5,
+        help='Concurrent ticker workers for IBKR sync (1-5, default: 5)',
+    )
+    parser.add_argument(
+        '--refresh-all',
+        action='store_true',
+        help='Disable resume mode and force full-range re-download for every interval requested',
+    )
+    _add_ibkr_args(parser)
 
 
 def _resolve_pairs(pair_arg: str | None) -> dict:
@@ -95,8 +148,11 @@ def _format_preset_label(preset_name: str) -> str:
 def _portfolio_summary(
     results: dict[str, object],
     params: StrategyParams,
+    *,
+    starting_balance: float | None = None,
+    risk_pct: float | None = None,
 ) -> dict[str, float | int]:
-    """Return aggregate stats using portfolio-filtered trade counts."""
+    """Return aggregate stats using the execution-aware portfolio benchmark."""
     raw_total_trades = 0
     raw_total_wins = 0
     raw_total_pnl = 0.0
@@ -109,13 +165,29 @@ def _portfolio_summary(
         for trade in result.trades:
             all_trades.append((pair, trade))
 
-    all_trades.sort(key=lambda item: item[1].entry_time)
-    filtered_trades = apply_correlation_filter(all_trades, params=params)
-    total_trades = len(filtered_trades)
-    total_wins = sum(1 for _, trade in filtered_trades if trade.pnl_pips > 0)
-    total_pnl = sum(trade.pnl_pips for _, trade in filtered_trades)
-    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
     raw_win_rate = (raw_total_wins / raw_total_trades * 100) if raw_total_trades > 0 else 0.0
+
+    if starting_balance is None or risk_pct is None:
+        all_trades.sort(key=lambda item: item[1].entry_time)
+        filtered_trades = apply_correlation_filter(all_trades, params=params)
+        total_trades = len(filtered_trades)
+        total_wins = sum(1 for _, trade in filtered_trades if trade.pnl_pips > 0)
+        total_pnl = sum(trade.pnl_pips for _, trade in filtered_trades)
+        win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
+        skip_counts: dict[str, int] = {}
+    else:
+        simulation = calculate_execution_aware_compounding_pnl(
+            results,
+            starting_balance=float(starting_balance),
+            risk_pct=float(risk_pct),
+            params=params,
+        )
+        total_trades = simulation.total_trades
+        total_wins = simulation.total_wins
+        total_pnl = simulation.total_pnl
+        win_rate = simulation.win_rate
+        skip_counts = dict(simulation.skip_counts)
+
     return {
         'total_trades': total_trades,
         'total_wins': total_wins,
@@ -125,6 +197,7 @@ def _portfolio_summary(
         'raw_total_wins': raw_total_wins,
         'raw_total_pnl': raw_total_pnl,
         'raw_win_rate': raw_win_rate,
+        'skip_counts': skip_counts,
     }
 
 
@@ -213,11 +286,17 @@ def _run_backtests_until_target(
     str,
 ]:
     """Run successive relaxations until target trades are reached."""
+    target_profit_floor = float(getattr(args, 'target_profit_floor', 1.0))
+    target_win_rate_floor = float(getattr(args, 'target_win_rate_floor', 1.0))
+    starting_balance = getattr(args, 'balance', None)
+    risk_pct = getattr(args, 'risk_pct', None)
+    force_refresh = bool(getattr(args, 'no_cache', False))
+
     attempts = _build_target_trade_profile_attempts(params)
     print(f'\n  Target trade mode enabled: need >= {target_trades} total trades')
     print(
-        f'  Profit floor: >= {args.target_profit_floor:.2f}x baseline, '
-        f'Win-rate floor: >= {args.target_win_rate_floor:.2f}x baseline'
+        f'  Profit floor: >= {target_profit_floor:.2f}x baseline, '
+        f'Win-rate floor: >= {target_win_rate_floor:.2f}x baseline'
     )
 
     baseline_summary = None
@@ -240,9 +319,9 @@ def _run_backtests_until_target(
             attempt_params,
             hourly_days=hourly_days,
             zone_history_days=zone_days,
-            requested_profile=getattr(args, 'profile', None) or args.preset,
-            starting_balance=args.balance,
-            risk_pct=args.risk_pct,
+            requested_profile=_requested_profile_name(args),
+            starting_balance=starting_balance,
+            risk_pct=risk_pct,
             selection_label=label,
         )
         results = run_all_backtests_parallel(
@@ -250,7 +329,7 @@ def _run_backtests_until_target(
             hourly_days=hourly_days,
             zone_history_days=zone_days,
             pairs=pairs,
-            force_refresh=args.no_cache,
+            force_refresh=force_refresh,
             base_client_id=active_client_id,
             run_config_json=run_config_json,
         )
@@ -260,9 +339,14 @@ def _run_backtests_until_target(
             print(f'    Completed in {elapsed:.1f}s with no results.')
             continue
 
-        summary = _portfolio_summary(results, attempt_params)
+        summary = _portfolio_summary(
+            results,
+            attempt_params,
+            starting_balance=starting_balance,
+            risk_pct=risk_pct / 100.0 if risk_pct is not None else None,
+        )
         summary_line = (
-            f"portfolio_trades={summary['total_trades']} "
+            f"execution_portfolio_trades={summary['total_trades']} "
             f"wr={summary['win_rate']:.1f}% "
             f"pnl={summary['total_pnl']:.1f} "
             f"(raw={summary['raw_total_trades']} trades, {summary['raw_total_pnl']:.1f} pips)"
@@ -284,8 +368,8 @@ def _run_backtests_until_target(
         if baseline_summary is None:
             baseline_summary = summary
 
-        min_pnl = baseline_summary['total_pnl'] * args.target_profit_floor
-        min_wr = baseline_summary['win_rate'] * args.target_win_rate_floor
+        min_pnl = baseline_summary['total_pnl'] * target_profit_floor
+        min_wr = baseline_summary['win_rate'] * target_win_rate_floor
 
         qualifies = (
             summary['total_trades'] >= target_trades
@@ -373,6 +457,7 @@ def _run_backtests_until_target(
             'raw_total_wins': 0,
             'raw_total_pnl': 0.0,
             'raw_win_rate': 0.0,
+            'skip_counts': {},
         },
         'baseline',
     )
@@ -380,7 +465,7 @@ def _run_backtests_until_target(
 
 def _build_strategy_params(args) -> StrategyParams:
     # Use --profile if provided, otherwise fall back to --preset
-    profile_name = getattr(args, 'profile', None) or args.preset
+    profile_name = _requested_profile_name(args)
     profile = get_profile(profile_name)
 
     # CLI overrides take precedence over profile values
@@ -540,20 +625,20 @@ def _add_risk_sizing_args(
             '--balance',
             type=float,
             default=None,
-            help='Starting balance for compounding/live sizing (default: from profile)',
+            help='Starting balance for compounding/live sizing (default: from IBKR NetLiquidation)',
         )
     parser.add_argument(
         '--risk-pct',
         type=float,
-        default=5.0,
+        default=None,
         help='Risk per trade as %% of balance (default: from profile)',
     )
     if include_account_currency:
         parser.add_argument(
             '--account-currency',
             type=str,
-            default=None,
-            help='Account currency for live sizing (default: --account-currency, IBKR_ACCOUNT_CURRENCY, or IBKR NetLiquidation currency when not BASE)',
+            default='GBP',
+            help='Account currency for live sizing (default: GBP; used as fallback when IBKR returns BASE)',
         )
 
 
@@ -580,21 +665,25 @@ def cmd_backtest(args):
     """Run backtesting mode."""
 
     active_client_id = _configure_ibkr(args)
-    profile_name = getattr(args, 'profile', None) or args.preset
+    profile_name = _requested_profile_name(args)
     profile = get_profile(profile_name)
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
     # Use profile defaults for days/zone-history if not overridden on CLI
-    zone_days = args.zone_history if args.zone_history != DEFAULT_ZONE_HISTORY_DAYS else profile.get('zone_history_days', args.zone_history)
-    if args.days == 30:  # argparse default — use profile value
-        args.days = profile.get('hourly_days', args.days)
+    zone_days = (
+        args.zone_history
+        if args.zone_history is not None
+        else profile.get('zone_history_days', DEFAULT_ZONE_HISTORY_DAYS)
+    )
+    if args.days is None:
+        args.days = profile.get('hourly_days', 30)
     # Use profile defaults for balance/risk-pct if not overridden on CLI
     if args.balance is None:
         args.balance = profile.get('starting_balance', None)
-    if args.risk_pct == 5.0:  # argparse default — use profile value
+    if args.risk_pct is None:
         args.risk_pct = profile.get('risk_pct', 5.0)
 
-    profile_name = getattr(args, 'profile', None) or args.preset
+    profile_name = _requested_profile_name(args)
     print(f"\n  IBKR client ID: {active_client_id}")
     print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
@@ -645,7 +734,12 @@ def cmd_backtest(args):
             run_config_json=run_config_json,
         )
         attempt_logs: list[dict[str, float | int | str]] = []
-        summary = _portfolio_summary(results, params) if results else {
+        summary = _portfolio_summary(
+            results,
+            params,
+            starting_balance=args.balance,
+            risk_pct=args.risk_pct / 100.0 if args.risk_pct is not None else None,
+        ) if results else {
             'total_trades': 0,
             'total_wins': 0,
             'total_pnl': 0.0,
@@ -654,6 +748,7 @@ def cmd_backtest(args):
             'raw_total_wins': 0,
             'raw_total_pnl': 0.0,
             'raw_win_rate': 0.0,
+            'skip_counts': {},
         }
         selected_label = 'baseline'
         attempt_logs.append({
@@ -669,7 +764,7 @@ def cmd_backtest(args):
     if results:
         print(
             f"\n  Selected profile: {selected_label} "
-            f"({summary.get('total_trades', 0)} portfolio trades, "
+            f"({summary.get('total_trades', 0)} execution-aware portfolio trades, "
             f"{summary.get('win_rate', 0.0):.1f}% WR, "
             f"{summary.get('total_pnl', 0.0):.1f} pips; "
             f"raw={summary.get('raw_total_trades', 0)} trades, "
@@ -687,14 +782,61 @@ def cmd_backtest(args):
 
     if args.balance:
         risk_pct = args.risk_pct / 100.0
-        total_pre = sum(result.total_trades for result in results.values())
+        execution_sim = calculate_execution_aware_compounding_pnl(
+            results,
+            starting_balance=args.balance,
+            risk_pct=risk_pct,
+            params=params,
+        )
+        total_pre = execution_sim.raw_total_trades
         trade_log, final_bal = calculate_compounding_pnl(
             results,
             starting_balance=args.balance,
             risk_pct=risk_pct,
             params=params,
         )
-        print(f'\n{format_compounding_results(trade_log, args.balance, final_bal, total_pre)}')
+        execution_report = format_compounding_results(
+            execution_sim.trade_log,
+            args.balance,
+            execution_sim.final_balance,
+            total_pre,
+            title='EXECUTION-AWARE COMPOUNDING REPORT',
+            filter_note='accepted from {total_pre_filter} raw candidates after execution-aware portfolio filtering',
+            skip_counts=execution_sim.skip_counts,
+        )
+        raw_report = format_compounding_results(
+            trade_log,
+            args.balance,
+            final_bal,
+            total_pre,
+            title='RAW COMPOUNDING REPORT',
+            filter_note='filtered from {total_pre_filter} by correlation only',
+        )
+        print(f'\n{execution_report}')
+        print(f'\n{raw_report}')
+
+    if args.save_baseline or args.compare_baseline:
+        artifact = build_backtest_baseline_artifact(
+            results=results,
+            params=params,
+            requested_profile=profile_name,
+            selection_label=selected_label,
+            hourly_days=args.days,
+            zone_history_days=zone_days,
+            starting_balance=args.balance,
+            risk_pct=args.risk_pct,
+            portfolio_summary=summary,
+            attempt_logs=attempt_logs,
+        )
+        if args.save_baseline:
+            baseline_path = save_backtest_baseline_artifact(args.save_baseline, artifact)
+            print(f'\n  Saved baseline artifact: {baseline_path}')
+        if args.compare_baseline:
+            expected = load_backtest_baseline_artifact(args.compare_baseline)
+            comparison = compare_backtest_baseline_artifacts(expected, artifact)
+            print(format_backtest_baseline_comparison(comparison))
+            if not comparison['match']:
+                sys.exit(1)
 
     if args.pair and args.verbose:
         key = args.pair.upper().replace('/', '')
@@ -725,8 +867,195 @@ def cmd_backtest(args):
                 )
 
 
+def cmd_status():
+    """Show cache coverage for all pairs and intervals."""
+
+    from fx_sr.db import get_cache_summary, get_db_path, init_db
+
+    init_db()
+    print(f'\n  Database: {get_db_path()}')
+
+    summary = get_cache_summary()
+    all_tickers = sorted(info['ticker'] for info in PAIRS.values())
+    ticker_to_pair = {v['ticker']: k for k, v in PAIRS.items()}
+    intervals = ['1d', '1h', '1m']
+
+    if summary.empty:
+        print('  No cached data found.\n')
+        return
+
+    # Build lookup: (ticker, interval) -> (bars, last_ts)
+    cached = {}
+    for _, row in summary.iterrows():
+        cached[(row['ticker'], row['interval'])] = (row['bars'], str(row['last_ts'])[:19])
+
+    print(f"\n  {'Pair':<10} {'Ticker':<14} {'1d bars':>8} {'1d last':>20}  {'1h bars':>8} {'1h last':>20}  {'1m bars':>8} {'1m last':>20}")
+    print('  ' + '-' * 118)
+
+    missing = []
+    for ticker in all_tickers:
+        pair = ticker_to_pair.get(ticker, ticker)
+        parts = []
+        for iv in intervals:
+            if (ticker, iv) in cached:
+                bars, last = cached[(ticker, iv)]
+                parts.append((str(bars), last))
+            else:
+                parts.append(('---', '---'))
+                missing.append((pair, iv))
+        print(
+            f'  {pair:<10} {ticker:<14} '
+            f'{parts[0][0]:>8} {parts[0][1]:>20}  '
+            f'{parts[1][0]:>8} {parts[1][1]:>20}  '
+            f'{parts[2][0]:>8} {parts[2][1]:>20}'
+        )
+
+    print()
+    if missing:
+        print(f'  Missing ({len(missing)}):')
+        for pair, iv in missing:
+            print(f'    {pair:<10} {iv}')
+    else:
+        print('  All 22 pairs synced for all intervals.')
+    print()
+
+
+def _find_cache_gaps(target_days: int = 365) -> list[tuple[str, str, str]]:
+    """Return list of (pair, ticker, interval) tuples that are missing or stale."""
+
+    from fx_sr.db import get_cache_summary, init_db
+
+    import pandas as pd
+
+    init_db()
+    summary = get_cache_summary()
+    now = pd.Timestamp.now(tz='UTC')
+    intervals = ['1d', '1h', '1m']
+
+    # Build lookup
+    cached = {}
+    for _, row in summary.iterrows():
+        cached[(row['ticker'], row['interval'])] = (row['bars'], pd.Timestamp(row['last_ts']))
+
+    # Expected minimum bars per interval for target_days
+    # FX trades ~5d/week: daily ~0.7*days, hourly ~16*days, minute ~1000*days
+    # (1440 min/day * 5/7 weekdays ≈ 1028 bars/day; use 1000 as floor)
+    min_bars = {
+        '1d': int(target_days * 0.7),
+        '1h': int(target_days * 16),
+        '1m': int(target_days * 1000),
+    }
+    gaps = []
+    for pair_id, pair_info in PAIRS.items():
+        ticker = pair_info['ticker']
+        for iv in intervals:
+            if (ticker, iv) not in cached:
+                gaps.append((pair_id, ticker, iv))
+                continue
+            bars, _last_ts = cached[(ticker, iv)]
+            if bars < min_bars[iv]:
+                gaps.append((pair_id, ticker, iv))
+
+    return gaps
+
+
+def cmd_fill(args):
+    """Identify cache gaps and fill them from IBKR."""
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from fx_sr.data import download_single_interval
+    from fx_sr.db import get_db_path, init_db
+
+    active_client_id = _configure_ibkr(args)
+    target_days = args.days
+
+    init_db()
+    print(f'\n  Database: {get_db_path()}')
+    print(f'  IBKR client ID: {active_client_id}')
+    print(f'  Target: {target_days} days across all pairs and intervals')
+
+    gaps = _find_cache_gaps(target_days)
+
+    if not gaps:
+        print('\n  All 22 pairs fully synced for 1d, 1h, and 1m. Nothing to do.')
+        return
+
+    print(f'\n  Gaps found ({len(gaps)}):')
+    for pair_id, _ticker, iv in gaps:
+        print(f'    {pair_id:<10} {iv}')
+
+    # Each work item is a single (pair, interval) — run 3 at a time to stay
+    # under IBKR's ~5 concurrent historical-data request limit.
+    # Each thread keeps a stable client ID so it reuses the same IBKR
+    # connection across all its work items (avoids Error 326 collisions).
+    MAX_WORKERS = 3
+    work_items = [(pair_id, PAIRS[pair_id], iv) for pair_id, _ticker, iv in gaps]
+
+    import threading
+    _slot_lock = threading.Lock()
+    _next_slot = [0]
+
+    def _get_thread_client_id():
+        """Assign each thread a stable client ID on first call."""
+        local = threading.current_thread()
+        if not hasattr(local, '_fill_client_id'):
+            with _slot_lock:
+                local._fill_client_id = active_client_id + _next_slot[0]
+                _next_slot[0] += 1
+        return local._fill_client_id
+
+    def _run_work_item(pair_id, pair_info, iv):
+        cid = _get_thread_client_id()
+        return download_single_interval(pair_id, pair_info, iv, target_days, client_id=cid)
+
+    MAX_RETRIES = 3
+    t0 = time.time()
+    pending = list(work_items)
+    attempt = 0
+
+    while pending and attempt < MAX_RETRIES:
+        attempt += 1
+        if attempt > 1:
+            print(f'\n  Retry {attempt}/{MAX_RETRIES} — {len(pending)} items remaining, waiting 5s...')
+            time.sleep(5)
+
+        completed = 0
+        total = len(pending)
+        failed = []
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {}
+            for pair_id, pair_info, iv in pending:
+                fut = executor.submit(_run_work_item, pair_id, pair_info, iv)
+                futures[fut] = (pair_id, pair_info, iv)
+
+            for fut in as_completed(futures):
+                pair_id, pair_info, iv = futures[fut]
+                completed += 1
+                try:
+                    rows = fut.result()
+                    print(f'  [{completed}/{total}] {pair_id} {iv} done ({rows} rows)')
+                except Exception as e:
+                    print(f'  [{completed}/{total}] {pair_id} {iv} FAILED: {e}')
+                    failed.append((pair_id, pair_info, iv))
+
+        pending = failed
+
+    elapsed = time.time() - t0
+    print(f'\n  Fill completed in {elapsed:.1f}s')
+
+    # Re-check
+    remaining = _find_cache_gaps(target_days)
+    if remaining:
+        print(f'\n  Still missing ({len(remaining)}):')
+        for pair_id, _ticker, iv in remaining:
+            print(f'    {pair_id:<10} {iv}')
+    else:
+        print('\n  All gaps filled.')
+
+
 def cmd_download(args):
-    """Download and cache price data to SQLite."""
+    """Download and cache price data to PostgreSQL."""
 
     from fx_sr.data import download_all_data
     from fx_sr.db import get_cache_summary, get_db_path
@@ -739,7 +1068,20 @@ def cmd_download(args):
 
     print(f'\n  Database: {get_db_path()}')
     print(f'  IBKR client ID: {active_client_id}')
-    download_all_data(pairs, hourly_days=args.days, daily_days=args.days)
+    if args.minute_only and args.minute_days <= 0:
+        print('  --minute-only requires --minute-days > 0')
+        sys.exit(1)
+    max_workers = max(1, min(5, int(args.sync_workers)))
+    download_all_data(
+        pairs,
+        hourly_days=0 if args.minute_only else args.days,
+        daily_days=0 if args.minute_only else args.days,
+        minute_days=args.minute_days,
+        minute_only=args.minute_only,
+        client_id=active_client_id,
+        max_workers=max_workers,
+        resume=not args.refresh_all,
+    )
 
     elapsed = time.time() - t0
     print(f'\n  Download completed in {elapsed:.1f}s')
@@ -864,13 +1206,15 @@ def cmd_live(args):
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
     zone_days = args.zone_history
+    profile_name = _requested_profile_name(args)
+    if args.risk_pct is None:
+        args.risk_pct = get_profile(profile_name).get('risk_pct', 5.0)
 
     if args.zones:
         for pair_id, pair_info in pairs.items():
             print(show_zones(pair_id, pair_info, zone_history_days=zone_days))
         return
 
-    profile_name = getattr(args, 'profile', None) or args.preset
     print(f"\n  IBKR client ID: {active_client_id}")
     print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
@@ -894,8 +1238,9 @@ def cmd_live(args):
     can_execute = live_balance is not None and live_currency is not None
     if args.paper_trade and not can_execute:
         print(
-            "\n  ERROR: --paper-trade requires both balance and account currency.\n"
-            "  Pass --balance and --account-currency, or ensure IBKR is connected."
+            "\n  ERROR: paper trading requires both balance and account currency.\n"
+            "  Ensure IB Gateway is running on port 4002, or pass --balance and --account-currency.\n"
+            "  Use --no-paper-trade for scan-only mode."
         )
         sys.exit(1)
 
@@ -906,6 +1251,7 @@ def cmd_live(args):
             from fx_sr.positions import sync_positions
 
             tracked = sync_positions(params, zone_days)
+        portfolio_state = load_portfolio_state(params, current_balance=live_balance)
         pending_pairs = ibkr.fetch_open_order_pairs()
         market_prices = {}
         hourly_data_cache = {}
@@ -921,14 +1267,27 @@ def cmd_live(args):
             daily_data_cache=daily_data_cache,
             zone_cache=zone_cache,
             hourly_data_cache=hourly_data_cache,
+            portfolio_state=portfolio_state,
         )
         size_plans = build_live_size_plans(
             signals,
             balance=live_balance,
             risk_pct=args.risk_pct / 100.0,
             account_currency=live_currency,
+            params=params,
+            portfolio_state=portfolio_state,
             price_cache=market_prices,
             hourly_data_cache=hourly_data_cache,
+        )
+        from fx_sr import ibkr as _ibkr_mod
+        _exec_mode = _ibkr_mod.get_execution_mode() if args.paper_trade else 'scan'
+        _ibkr_acct = _ibkr_mod.fetch_account_id() if args.paper_trade else None
+        record_detected_signals(
+            signals,
+            size_plans,
+            execute_orders=args.paper_trade,
+            execution_mode=_exec_mode,
+            ibkr_account=_ibkr_acct,
         )
         print(format_signals_with_sizes(signals, size_plans))
         if args.paper_trade:
@@ -947,6 +1306,11 @@ def cmd_live(args):
                 account_currency=live_currency,
                 price_cache=market_prices,
                 hourly_data_cache=hourly_data_cache,
+            )
+            record_execution_results(
+                signals, size_plans, execution_results,
+                execution_mode=_exec_mode,
+                ibkr_account=_ibkr_acct,
             )
             print(format_execution_results(execution_results))
         return
@@ -979,8 +1343,9 @@ def main():
     )
     epilog = (
         'Examples:\n'
-        '  python run.py download\n'
-        '  python run.py download --days 365 --pair EURUSD\n'
+        '  python run.py sync\n'
+        '  python run.py sync --days 365 --pair EURUSD\n'
+        '  (legacy: python run.py download)\n'
         '  python run.py backtest --days 365 --balance 1000 --risk-pct 5\n'
         '  python run.py backtest --profile source\n'
         '  python run.py backtest --profile aggressive\n'
@@ -1001,29 +1366,36 @@ def main():
 
     subparsers = parser.add_subparsers(dest='command', help='Mode')
 
-    dl = subparsers.add_parser('download', help='Download and cache price data from IBKR')
-    dl.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all configured pairs')
-    dl.add_argument(
+    subparsers.add_parser('status', help='Show cache coverage for all pairs and intervals')
+
+    fl = subparsers.add_parser('fill', help='Detect cache gaps and fill from IBKR')
+    fl.add_argument(
         '--days',
         type=int,
-        default=730,
-        help='Days of data to download (default: 730, max for hourly)',
+        default=365,
+        help='Target days of coverage per interval (default: 365)',
     )
-    _add_ibkr_args(dl)
+    _add_ibkr_args(fl)
+
+    dl = subparsers.add_parser('sync', help='Sync and cache price data from IBKR')
+    _add_download_args(dl)
+
+    legacy_dl = subparsers.add_parser('download', help='[legacy] Same as `sync`')
+    _add_download_args(legacy_dl)
 
     bt = subparsers.add_parser('backtest', help='Backtest using daily zones + hourly execution')
     bt.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all configured pairs')
     bt.add_argument(
         '--days',
         type=int,
-        default=30,
-        help='Days of hourly data for execution (default: 30)',
+        default=None,
+        help='Days of hourly data for execution (default: from profile, fallback 30)',
     )
     bt.add_argument(
         '--zone-history',
         type=int,
-        default=DEFAULT_ZONE_HISTORY_DAYS,
-        help=f'Days of daily data for zone detection (default: {DEFAULT_ZONE_HISTORY_DAYS})',
+        default=None,
+        help='Days of daily data for zone detection (default: from profile)',
     )
     _add_ibkr_args(bt)
     _add_strategy_args(bt)
@@ -1031,7 +1403,7 @@ def main():
     bt.add_argument(
         '--no-cache',
         action='store_true',
-        help='Bypass SQLite cache and refresh directly from IBKR',
+        help='Bypass PostgreSQL cache and refresh directly from IBKR',
     )
     bt.add_argument(
         '--target-trades',
@@ -1050,6 +1422,18 @@ def main():
         type=float,
         default=1.0,
         help='Minimum baseline win-rate multiplier for target mode (default: 1.0)',
+    )
+    bt.add_argument(
+        '--save-baseline',
+        type=str,
+        default=None,
+        help='Write a reproducible backtest baseline artifact JSON to this path',
+    )
+    bt.add_argument(
+        '--compare-baseline',
+        type=str,
+        default=None,
+        help='Compare the current backtest run against a saved baseline artifact and exit non-zero on mismatch',
     )
     bt.add_argument('-v', '--verbose', action='store_true', help='Show individual trade details')
 
@@ -1080,7 +1464,14 @@ def main():
     lv.add_argument(
         '--paper-trade',
         action='store_true',
-        help='Submit paper-market orders for sized signals (explicit opt-in)',
+        default=True,
+        help='Submit paper-market orders for sized signals (default: on)',
+    )
+    lv.add_argument(
+        '--no-paper-trade',
+        action='store_false',
+        dest='paper_trade',
+        help='Disable paper-trade order submission (scan only)',
     )
     lv.add_argument(
         '--port',
@@ -1098,7 +1489,7 @@ def main():
     l2p.add_argument(
         '--pair',
         type=str,
-        required=True,
+        required=False,
         help='Specific pair to capture (for example EURUSD)',
     )
     l2p.add_argument(
@@ -1150,7 +1541,11 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    if args.command == 'download':
+    if args.command == 'status':
+        cmd_status()
+    elif args.command == 'fill':
+        cmd_fill(args)
+    elif args.command in ('download', 'sync'):
         cmd_download(args)
     elif args.command == 'backtest':
         cmd_backtest(args)

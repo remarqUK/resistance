@@ -14,7 +14,7 @@
           <span class="eyebrow">FX support / resistance</span>
           <h1>Trade Diary</h1>
         </div>
-        <div class="hero-actions">
+        <div class="hero-actions hero-actions-vertical">
           <a href="/" class="hero-action">Back to Live Board</a>
           <a href="/replay" class="hero-action">Strategy Replay</a>
           <a href="/backtest-trades" class="hero-action">All Backtest Trades</a>
@@ -25,6 +25,12 @@
 
     <section class="panel">
       <div class="filter-toolbar">
+        <div class="field">
+          <label for="backtest-filter">Backtest</label>
+          <select id="backtest-filter">
+            <option value="">Loading runs...</option>
+          </select>
+        </div>
         <button id="load-btn" class="toolbar-btn">Load Diary</button>
         <div class="toolbar-meta" id="month-range"></div>
         <div class="toolbar-meta" id="summary"></div>

@@ -9,7 +9,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fx_sr.profiles import PAIRS, get_profile, DEFAULT_PROFILE
 from fx_sr.data import fetch_daily_data, fetch_hourly_data
 from fx_sr.strategy import StrategyParams, params_from_profile
-from fx_sr.backtest import run_backtest_fast, precompute_zone_cache_parallel, calculate_compounding_pnl
+from fx_sr.backtest import (
+    calculate_execution_aware_compounding_pnl,
+    precompute_zone_cache_parallel,
+    run_backtest_fast,
+)
 
 _PROFILE = get_profile()
 HOURLY_DAYS = _PROFILE['hourly_days']
@@ -61,12 +65,14 @@ def run_sweep_iteration(data, zone_cache, overrides):
         return None
 
     total_trades = sum(r.total_trades for r in results.values())
-    trade_log, final_balance = calculate_compounding_pnl(
+    simulation = calculate_execution_aware_compounding_pnl(
         results,
         starting_balance=STARTING_BALANCE,
         risk_pct=RISK_PCT,
         params=params,
     )
+    trade_log = simulation.trade_log
+    final_balance = simulation.final_balance
 
     wins = sum(1 for _, trade, _, _, _ in trade_log if trade.pnl_r > 0)
     win_rate = wins / len(trade_log) * 100 if trade_log else 0
@@ -82,7 +88,7 @@ def run_sweep_iteration(data, zone_cache, overrides):
 
     return {
         'trades': len(trade_log),
-        'trades_pre': total_trades,
+        'trades_pre': simulation.raw_total_trades,
         'wr': win_rate,
         'final': final_balance,
         'ret': (final_balance - STARTING_BALANCE) / STARTING_BALANCE * 100,
@@ -92,7 +98,7 @@ def run_sweep_iteration(data, zone_cache, overrides):
 
 if __name__ == '__main__':
     print(f'  Profile: {DEFAULT_PROFILE}')
-    print('  Loading data from SQLite cache...')
+    print('  Loading data from PostgreSQL cache...')
     t0 = time.time()
     data = {}
     for pair, info in PAIRS.items():

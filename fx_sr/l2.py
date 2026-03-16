@@ -38,7 +38,6 @@ def _persist_snapshot(snapshot: dict, db_path: str | None = None) -> int:
         mid_price=snapshot.get('mid_price'),
         best_bid=snapshot.get('best_bid'),
         best_ask=snapshot.get('best_ask'),
-        source='IBKR',
         db_path=db_path,
     )
 

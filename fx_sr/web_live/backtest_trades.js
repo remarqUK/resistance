@@ -5,6 +5,7 @@ const summaryEl = document.getElementById("summary");
 const bodyEl = document.getElementById("trades-body");
 const sortHeaders = Array.from(document.querySelectorAll("th[data-sort-key]"));
 const BACKTEST_CURRENCY = "GBP";
+const PRICE_DISPLAY_DECIMALS = 5;
 let selectedBacktest = null;
 let loadedTrades = [];
 const sortState = {
@@ -49,7 +50,7 @@ function openReplay(pair, date, entryTime = "", backtestKey = "", preset = "") {
   window.location.href = `/replay?${params.toString()}`;
 }
 
-function formatNumber(value, digits = 2) {
+function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "–";
   }
@@ -97,6 +98,21 @@ function formatTime(isoTime) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+  });
+}
+
+function formatBacktestDate(isoTime) {
+  if (!isoTime) {
+    return "";
+  }
+  const parsed = new Date(isoTime);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(isoTime).slice(0, 10);
+  }
+  return parsed.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
   });
 }
 
@@ -197,7 +213,7 @@ function buildRows(trades) {
   bodyEl.innerHTML = trades.map((trade) => {
     const pnlClass = (trade.pnl_pips || 0) >= 0 ? "up" : "down";
     const directionClass = (trade.direction || "").toLowerCase();
-    const digits = trade.decimals || 5;
+    const digits = PRICE_DISPLAY_DECIMALS;
     const tradeDate = replayDateForTrade(trade);
     const exitPrice = trade.exit_price ? formatNumber(trade.exit_price, digits) : "—";
     const balanceDisplay = formatCurrency(trade.balance_after);
@@ -256,7 +272,16 @@ function populatePairs(pairs) {
 
 function formatBacktestOption(backtest) {
   if (!backtest) return "Unknown backtest";
-  const parts = [backtest.label || backtest.profile_name || "cached run"];
+  const parts = [];
+  const dateLabel = formatBacktestDate(backtest.updated_at);
+  const nameLabel = backtest.label || backtest.profile_name || "cached run";
+  if (dateLabel) {
+    parts.push(dateLabel);
+  }
+  parts.push(nameLabel);
+  if (backtest.description && backtest.description !== nameLabel) {
+    parts.push(backtest.description);
+  }
   if (backtest.hourly_days && backtest.zone_history_days) {
     parts.push(`${backtest.hourly_days}d / ${backtest.zone_history_days}d`);
   }

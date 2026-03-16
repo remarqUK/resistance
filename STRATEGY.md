@@ -60,6 +60,8 @@ This does not create true tick-level path simulation, but it removes the most op
 
 The repo default profile is `high_volume`. It is also the only benchmark maintained as current in the repo docs.
 
+The headline benchmark now uses execution-aware portfolio filtering. Raw per-pair backtest totals remain available in the CLI and artifacts for comparison.
+
 | Parameter | Default |
 |-----------|---------|
 | `rr_ratio` | `1.1` |
@@ -127,3 +129,39 @@ There is no Yahoo Finance path left in the strategy, backtest, live scanner, or 
 - Computes SL/TP levels from the same strategy parameters
 - Runs exit rule checks and prints alerts
 - Persists tracked state in SQLite for restart resilience
+
+## Live Execution
+
+The live runner is scan-first by default, but it can submit paper trades when `--paper-trade` is passed to `python run.py live`.
+
+- Order submission is explicit opt-in only
+- Balance and account currency must be resolved from CLI arguments or IBKR `NetLiquidation`
+- Signals are sized with the same compounding helper used by backtests
+- Existing positions, open orders, correlation caps, and portfolio risk budget can block execution
+- Successful submissions use market-entry FX bracket orders with attached TP and SL
+
+## Real-time Streaming
+
+In continuous mode the dashboard streams real-time IBKR quotes via `stream_live_quotes` (`live_stream.py`). A two-tier architecture keeps latency low:
+
+1. **Tier 1 — Zone gate (every tick):** each tick is checked against the cached daily S/R zones. If price is not inside or within `0.30%` of any zone, the tick is discarded. This is O(1) per pair per tick.
+2. **Tier 2 — Signal evaluation (on demand):** when a tick passes the gate, the scanner fetches the cached hourly bars and runs the full `select_entry_signal` logic. A per-pair debounce (default 5 seconds) prevents thrashing at zone boundaries.
+3. **Tick exits:** TP, SL, and zone-break checks run inline on every tick for all tracked positions using the same spread model as `check_exit`. Bar-shape exits (sideways, time, Friday) remain in the periodic scan cycle.
+
+Zones refresh once per day. Hourly bars refresh once per hour. The periodic scan cycle still runs every `--interval` seconds for dashboard updates, IBKR position syncs, and bar-dependent exit rules.
+
+## Signal History
+
+Every detected signal is persisted in the `detected_signal` SQLite table (`live_history.py`). The table tracks the full signal lifecycle:
+
+| Phase | Fields |
+|-------|--------|
+| Detection | `signal_id`, `pair`, `direction`, `signal_time`, `entry_price`, `sl_price`, `tp_price`, `zone_*`, `quality_score` |
+| Sizing | `planned_units`, `risk_amount`, `account_currency`, `notional_account` |
+| Execution | `status`, `order_id`, `take_profit_order_id`, `stop_loss_order_id`, `executed_at` |
+| Position | `opened_at`, `opened_price`, `open_units` |
+| Exit signal | `exit_signal_at`, `exit_signal_reason`, `exit_signal_price` |
+| Close | `closed_at`, `closed_price`, `close_reason`, `close_source`, `pnl_pips` |
+| Context | `execution_mode` (`scan`/`paper`/`live`), `ibkr_account` |
+
+The `execution_mode` is derived from the configured IBKR API port: `4002`/`7497` = `paper`, `4001`/`7496` = `live`. The `ibkr_account` is the managed account ID from TWS or IB Gateway. Scan-only runs record `execution_mode='scan'` with no account.

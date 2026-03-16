@@ -46,6 +46,20 @@ def _build_hourly_df(rows: list[tuple[str, float, float, float, float]]) -> pd.D
     )
 
 
+def _build_minute_df(rows: list[tuple[str, float]]) -> pd.DataFrame:
+    index = pd.DatetimeIndex([pd.Timestamp(ts, tz='UTC') for ts, _ in rows])
+    return pd.DataFrame(
+        {
+            'Open': [price for _, price in rows],
+            'High': [price for _, price in rows],
+            'Low': [price for _, price in rows],
+            'Close': [price for _, price in rows],
+            'Volume': [0.0] * len(rows),
+        },
+        index=index,
+    )
+
+
 def _support_zone(lower: float, upper: float) -> SRZone:
     return SRZone(
         lower=lower,
@@ -130,6 +144,7 @@ class ReplayTests(unittest.TestCase):
             use_time_filters=False,
             use_pair_direction_filter=False,
         )
+        minute_df = _build_minute_df([('2026-02-04 00:00:00', 1.1006)])
 
         with patch('fx_sr.replay.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]):
             result = generate_replay_frames(
@@ -139,16 +154,15 @@ class ReplayTests(unittest.TestCase):
                 date(2026, 2, 3),
                 params=params,
                 zone_history_days=20,
+                minute_df=minute_df,
             )
 
         self.assertEqual(result['summary']['selected_day_bars'], 1)
-        self.assertEqual(result['summary']['replay_bars'], 2)
-        self.assertTrue(result['summary']['continues_after_selected_day'])
+        self.assertEqual(result['summary']['replay_bars'], 1)
+        self.assertFalse(result['summary']['continues_after_selected_day'])
         self.assertEqual(result['frames'][0]['time'][:10], '2026-02-03')
-        self.assertEqual(result['frames'][-1]['time'][:10], '2026-02-04')
-        self.assertEqual(result['frames'][-1]['exit']['reason'], 'TP')
-        self.assertEqual(result['all_completed_trades'][0]['active_dates'], ['2026-02-03', '2026-02-04'])
-        self.assertEqual(result['summary']['total_trades'], 1)
+        self.assertEqual(result['all_completed_trades'][0]['active_dates'], ['2026-02-04'])
+        self.assertEqual(result['summary']['total_trades'], 0)
 
     def test_load_cached_backtest_trades_adds_running_balance(self):
         trades = [
@@ -279,8 +293,10 @@ class ReplayTests(unittest.TestCase):
 
         self.assertEqual(len(selected_rows), 1)
         self.assertEqual(selected['profile_name'], 'high_volume')
+        self.assertEqual(selected['description'], get_profile('high_volume')['description'])
         self.assertEqual(selected_rows[0]['params_hash'], _params_signature(default_params))
         self.assertEqual(backtests[0]['profile_name'], 'high_volume')
+        self.assertEqual(backtests[0]['description'], get_profile('high_volume')['description'])
 
 
 if __name__ == '__main__':

@@ -9,6 +9,7 @@ const PAIRS = [
   'USDCAD','USDCHF','USDJPY',
 ];
 const BACKTEST_CURRENCY = 'GBP';
+const REPLAY_DECIMALS = 5;
 
 const replay = {
   frames: [],
@@ -570,7 +571,7 @@ async function refreshData() {
 function initChart() {
   if (replay.chart) { replay.chart.remove(); }
   replay.zoneLines = [];
-  const dec = replay.summary?.decimals || 5;
+  const dec = REPLAY_DECIMALS;
   const priceFormat = {
     type: 'price',
     precision: dec,
@@ -874,7 +875,7 @@ function _infoRow(label, value) {
 
 function renderInfo(index) {
   const f = replay.frames[index];
-  const dec = replay.summary?.decimals || 5;
+  const dec = REPLAY_DECIMALS;
 
   if (!f) {
     // No frames for target day — clear bar/trade panels but still show trades list

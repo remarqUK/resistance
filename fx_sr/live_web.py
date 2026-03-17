@@ -1272,7 +1272,7 @@ def run_live_web_app(
         client_id=client_id,
         port=port,
     )
-    from .replay import handle_replay, handle_replay_dates, handle_replay_page, handle_replay_refresh, handle_replay_presets
+    from .replay import handle_replay, handle_replay_bars, handle_replay_dates, handle_replay_page, handle_replay_refresh, handle_replay_presets
     from .replay import (
         handle_backtest_trades_api,
         handle_backtest_trades_page,
@@ -1292,6 +1292,7 @@ def run_live_web_app(
     app.router.add_get('/backtest-diary', handle_backtest_diary_page)
     app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)
     app.router.add_get('/api/replay', handle_replay)
+    app.router.add_get('/api/replay/bars', handle_replay_bars)
     app.router.add_get('/api/replay/dates', handle_replay_dates)
     app.router.add_post('/api/replay/refresh', handle_replay_refresh)
     app.router.add_get('/api/replay/presets', handle_replay_presets)

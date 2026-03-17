@@ -86,6 +86,8 @@
         },
       });
 
+      chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+
       new ResizeObserver(() => {
         chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
       }).observe(container);
@@ -143,6 +145,8 @@
         if (data.bars && data.bars.length) {
           loadedBars = data.bars;
           candleSeries.setData(data.bars);
+          streamEarliest = data.bars[0].time;
+          streamLatest = data.bars[data.bars.length - 1].time;
           const last = data.bars[data.bars.length - 1];
           document.getElementById('live-price').textContent = last.close.toFixed(decimals);
         }
@@ -190,6 +194,98 @@
     let lastBarTime = null;
     let currentBar = null;
     let loadedBars = [];
+
+    // Scroll-streaming state
+    let streamedBars = [];
+    let streamEarliest = null;   // unix timestamp (seconds)
+    let streamLatest = null;     // unix timestamp (seconds)
+    let streamLoading = false;
+    let _streamTimer = null;
+
+    function onVisibleRangeChange(logicalRange) {
+      if (!logicalRange || streamLoading) return;
+      if (_streamTimer) clearTimeout(_streamTimer);
+      _streamTimer = setTimeout(() => {
+        // Preload when visible edge is within 24h of loaded data boundary
+        const vr = chart.timeScale().getVisibleRange();
+        if (!vr) return;
+        const buffer = 24 * 3600; // 24h in seconds
+        if (streamEarliest != null && vr.from - buffer < streamEarliest) {
+          streamBars('backward');
+        }
+        if (streamLatest != null && vr.to + buffer > streamLatest) {
+          streamBars('forward');
+        }
+      }, 150);
+    }
+
+    async function streamBars(direction) {
+      if (streamLoading || !pair) return;
+      streamLoading = true;
+      try {
+        const daysToLoad = 7;
+        let start, end;
+        if (direction === 'backward') {
+          end = new Date((streamEarliest - 1) * 1000);
+          start = new Date(end.getTime() - daysToLoad * 86400000);
+        } else {
+          start = new Date((streamLatest + 1) * 1000);
+          end = new Date(start.getTime() + daysToLoad * 86400000);
+          if (start > new Date(Date.now() + 86400000)) return;
+        }
+        const params = new URLSearchParams({
+          pair, tf: '1h',
+          start: start.toISOString(),
+          end: end.toISOString(),
+        });
+        const res = await fetch(`/api/replay/bars?${params}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const newBars = data.bars || [];
+        if (!newBars.length) {
+          if (direction === 'backward') streamEarliest = null;
+          else streamLatest = null;
+          return;
+        }
+        // Convert ISO to unix timestamps and deduplicate
+        const existingTimes = new Set(loadedBars.map(b => b.time));
+        for (const b of streamedBars) existingTimes.add(b.time);
+
+        const converted = [];
+        for (const b of newBars) {
+          const t = Math.floor(new Date(b.time).getTime() / 1000);
+          if (existingTimes.has(t)) continue;
+          existingTimes.add(t);
+          converted.push({ time: t, open: b.open, high: b.high, low: b.low, close: b.close });
+        }
+        if (!converted.length) {
+          if (direction === 'backward') streamEarliest = null;
+          else streamLatest = null;
+          return;
+        }
+        streamedBars = streamedBars.concat(converted);
+        streamedBars.sort((a, b) => a.time - b.time);
+        rebuildChart();
+      } catch (e) {
+        console.warn('Stream bars error:', e);
+      } finally {
+        streamLoading = false;
+      }
+    }
+
+    function rebuildChart() {
+      // Merge streamed + loaded, sort, deduplicate
+      const merged = new Map();
+      for (const b of streamedBars) merged.set(b.time, b);
+      for (const b of loadedBars) merged.set(b.time, b);
+      const all = [...merged.values()].sort((a, b) => a.time - b.time);
+      candleSeries.setData(all);
+      // Update bounds
+      if (all.length) {
+        streamEarliest = all[0].time;
+        streamLatest = all[all.length - 1].time;
+      }
+    }
 
     function updateLivePrice(price) {
       if (price == null || price <= 0) return;

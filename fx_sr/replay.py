@@ -553,8 +553,14 @@ def generate_replay_frames(
             'bars_held': bars_held,
         }
 
+    # Track date of carry exit so we keep emitting frames for the rest of that day
+    carry_exit_date: Optional[date] = None
+    # Track last frame date so we can add tail context bars
+    target_ended = False
+
     def on_bar(step: WalkForwardBar) -> None:
         nonlocal frame_index, selected_day_bar_count, day_zones, carry_trade_entry_time
+        nonlocal carry_exit_date, target_ended
 
         row = step.row
         current_time = step.bar_time
@@ -576,6 +582,30 @@ def generate_replay_frames(
                     'low': round(float(row['Low']), decimals),
                     'close': round(float(row['Close']), decimals),
                 })
+
+        # After target day ends (and any carry bars), add tail context bars
+        # for the next 24h so the chart shows price action continuing
+        if target_ended and not is_target:
+            if carry_exit_date is not None and current_date <= carry_exit_date:
+                # Still on carry exit day — include as tail context
+                context_bars.append({
+                    'time': pd.Timestamp(current_time).isoformat(),
+                    'open': round(float(row['Open']), decimals),
+                    'high': round(float(row['High']), decimals),
+                    'low': round(float(row['Low']), decimals),
+                    'close': round(float(row['Close']), decimals),
+                })
+                return
+            tail_cutoff = target_date + timedelta(days=2)
+            if current_date <= tail_cutoff and carry_trade_entry_time is None:
+                context_bars.append({
+                    'time': pd.Timestamp(current_time).isoformat(),
+                    'open': round(float(row['Open']), decimals),
+                    'high': round(float(row['High']), decimals),
+                    'low': round(float(row['Low']), decimals),
+                    'close': round(float(row['Close']), decimals),
+                })
+            return
 
         if is_target and not day_zones and step.zones:
             day_zones = [_zone_to_dict(zone) for zone in step.zones]
@@ -621,6 +651,7 @@ def generate_replay_frames(
                     selected_day_bar_count += 1
             if was_carry_trade:
                 carry_trade_entry_time = None
+                carry_exit_date = current_date
             return
 
         is_carry_continuation = (
@@ -665,6 +696,19 @@ def generate_replay_frames(
                 decimals,
             ))
             frame_index += 1
+            return
+
+        # Past target day, no carry — mark target as ended so tail bars get added
+        if current_date > target_date:
+            target_ended = True
+            # Add this bar as tail context
+            context_bars.append({
+                'time': pd.Timestamp(current_time).isoformat(),
+                'open': round(float(row['Open']), decimals),
+                'high': round(float(row['High']), decimals),
+                'low': round(float(row['Low']), decimals),
+                'close': round(float(row['Close']), decimals),
+            })
 
     run_walk_forward(
         hourly_df,
@@ -962,6 +1006,58 @@ async def handle_replay(request: web.Request) -> web.Response:
     result['summary']['timeframe'] = actual_tf
     result['summary']['timeframe_requested'] = timeframe
     return web.json_response(result)
+
+
+async def handle_replay_bars(request: web.Request) -> web.Response:
+    """``GET /api/replay/bars?pair=EURUSD&tf=1h&start=2025-03-01&end=2025-03-10``
+
+    Lightweight endpoint returning raw OHLC bars from cache, used for
+    scroll-based streaming in the replay chart.
+    """
+    pair = request.query.get('pair', '').upper()
+    tf = request.query.get('tf', '1h')
+    start_str = request.query.get('start', '')
+    end_str = request.query.get('end', '')
+
+    if pair not in PAIRS:
+        return web.json_response({'error': f'Unknown pair: {pair}'}, status=400)
+    if tf not in ('1h', '1m'):
+        return web.json_response({'error': f'Unsupported timeframe: {tf}'}, status=400)
+
+    def _parse_iso(s: str):
+        if not s:
+            return None
+        # JS toISOString() produces "2025-03-10T00:00:00.000Z" — strip Z/milliseconds
+        s = s.replace('Z', '+00:00')
+        return pd.Timestamp(s).to_pydatetime().replace(tzinfo=None)
+
+    try:
+        start_dt = _parse_iso(start_str)
+    except Exception:
+        return web.json_response({'error': f'Invalid start: {start_str}'}, status=400)
+    try:
+        end_dt = _parse_iso(end_str)
+    except Exception:
+        return web.json_response({'error': f'Invalid end: {end_str}'}, status=400)
+
+    ticker = PAIRS[pair]['ticker']
+    decimals = PAIRS[pair].get('decimals', 5)
+    df = db.load_ohlc(ticker, tf, start=start_dt, end=end_dt)
+
+    if df.empty:
+        return web.json_response({'bars': []})
+
+    bars = []
+    for ts, row in df.iterrows():
+        bars.append({
+            'time': pd.Timestamp(ts).isoformat(),
+            'open': round(float(row['Open']), decimals),
+            'high': round(float(row['High']), decimals),
+            'low': round(float(row['Low']), decimals),
+            'close': round(float(row['Close']), decimals),
+        })
+
+    return web.json_response({'bars': bars})
 
 
 async def handle_replay_dates(request: web.Request) -> web.Response:

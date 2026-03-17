@@ -29,6 +29,12 @@ const replay = {
   navigationTrades: [],
   tradeNavCache: {},
   activeTradeIndex: -1,
+  // Scroll-streaming state
+  streamedBars: [],          // extra bars loaded via scroll (sorted by time)
+  streamEarliestIso: null,   // ISO string of earliest loaded bar
+  streamLatestIso: null,     // ISO string of latest loaded bar
+  streamLoading: false,      // debounce flag
+  streamTf: '1h',            // active timeframe for streaming
 };
 
 // DOM refs
@@ -192,6 +198,10 @@ async function loadReplay() {
     replay.allTrades = (trades && trades.length > 0) ? trades : (data.all_completed_trades || []);
     replay.currentIndex = -1;
     replay.markers = [];
+    // Reset scroll-streaming state
+    replay.streamedBars = [];
+    replay.streamLoading = false;
+    replay.streamTf = tf;
     replay.navigationTrades = trades || [];
     syncTradeNavigation(dateVal, requestedTradeEntry);
     const activeTrade = replay.navigationTrades[replay.activeTradeIndex];
@@ -200,6 +210,7 @@ async function loadReplay() {
 
     initChart();
     drawZoneLines();
+    _updateStreamBounds();
 
     playbackRow.style.display = 'flex';
     infoGrid.style.display = '';
@@ -227,6 +238,7 @@ async function loadReplay() {
       }
     } else {
       // No target-day bars — still render context bars and trades
+      _updateStreamBounds();
       const candles = replay.contextBars
         .map((b) => {
           const time = parseTime(b.time);
@@ -625,11 +637,252 @@ function initChart() {
     priceFormat,
   });
 
+  // Stream bars on scroll
+  replay.chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+
   // Resize handler
   const ro = new ResizeObserver(() => {
     replay.chart.applyOptions({ width: chartEl.clientWidth });
   });
   ro.observe(chartEl);
+}
+
+// ── Scroll streaming ──
+
+let _streamDebounceTimer = null;
+
+function onVisibleRangeChange(logicalRange) {
+  if (!logicalRange || replay.streamLoading) return;
+
+  // Debounce — wait 200ms after last scroll event
+  if (_streamDebounceTimer) clearTimeout(_streamDebounceTimer);
+  _streamDebounceTimer = setTimeout(() => _checkStreamEdges(logicalRange), 200);
+}
+
+function _checkStreamEdges(_logicalRange) {
+  // Preload when visible edge is within 24h of loaded data boundary
+  const vr = replay.chart.timeScale().getVisibleRange();
+  if (!vr) return;
+  const buffer = 24 * 3600; // 24h in seconds
+
+  if (replay.streamEarliestIso) {
+    const earliest = Math.floor(new Date(replay.streamEarliestIso).getTime() / 1000);
+    if (vr.from - buffer < earliest) {
+      _streamBars('backward');
+    }
+  }
+  if (replay.streamLatestIso) {
+    const latest = Math.floor(new Date(replay.streamLatestIso).getTime() / 1000);
+    if (vr.to + buffer > latest) {
+      _streamBars('forward');
+    }
+  }
+}
+
+async function _streamBars(direction) {
+  if (replay.streamLoading || !replay.pair) return;
+  replay.streamLoading = true;
+
+  try {
+    const tf = replay.streamTf;
+    const daysToLoad = tf === '1m' ? 1 : 7;
+    let start, end;
+
+    if (direction === 'backward') {
+      const earliest = new Date(replay.streamEarliestIso);
+      end = new Date(earliest.getTime() - 1000); // 1 second before earliest
+      start = new Date(end.getTime() - daysToLoad * 24 * 60 * 60 * 1000);
+      // Don't go further back than 180 days from the context
+      const limit = new Date(earliest.getTime() - 180 * 24 * 60 * 60 * 1000);
+      if (start < limit) return;
+    } else {
+      const latest = new Date(replay.streamLatestIso);
+      start = new Date(latest.getTime() + 1000);
+      end = new Date(start.getTime() + daysToLoad * 24 * 60 * 60 * 1000);
+      // Don't go further than today + 1 day
+      const limit = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      if (start > limit) return;
+    }
+
+    const params = new URLSearchParams({
+      pair: replay.pair,
+      tf,
+      start: start.toISOString(),
+      end: end.toISOString(),
+    });
+
+    const res = await fetch(`/api/replay/bars?${params}`);
+    if (!res.ok) {
+      console.warn('Stream bars failed:', res.status, await res.text().catch(() => ''));
+      return;
+    }
+    const data = await res.json();
+    const newBars = data.bars || [];
+    if (!newBars.length) {
+      // No more bars in this direction — stop trying
+      if (direction === 'backward') replay.streamEarliestIso = null;
+      else replay.streamLatestIso = null;
+      return;
+    }
+
+    // Merge into streamedBars, deduplicating by time
+    const existingTimes = new Set();
+    // Collect times from all sources
+    for (const b of replay.streamedBars) existingTimes.add(b.time);
+    for (const b of replay.contextBars) existingTimes.add(b.time);
+    for (const f of replay.frames) existingTimes.add(f.time);
+
+    const unique = newBars.filter(b => !existingTimes.has(b.time));
+    if (!unique.length) return;
+
+    replay.streamedBars = replay.streamedBars.concat(unique);
+    replay.streamedBars.sort((a, b) => new Date(a.time) - new Date(b.time));
+
+    // Update range bounds
+    _updateStreamBounds();
+
+    // Re-render chart with all data
+    _renderAllBars();
+  } catch (e) {
+    console.warn('Stream bars error:', e);
+  } finally {
+    replay.streamLoading = false;
+  }
+}
+
+function _updateStreamBounds() {
+  // Find the absolute earliest and latest across all bar sources
+  let earliest = null;
+  let latest = null;
+
+  const allSources = [replay.streamedBars, replay.contextBars, replay.frames];
+  for (const source of allSources) {
+    if (!source || !source.length) continue;
+    const first = source[0].time;
+    const last = source[source.length - 1].time;
+    if (!earliest || first < earliest) earliest = first;
+    if (!latest || last > latest) latest = last;
+  }
+
+  replay.streamEarliestIso = earliest;
+  replay.streamLatestIso = latest;
+}
+
+function _renderAllBars() {
+  // Build the full candle array: streamed-before + context + frames + streamed-after
+  // First, collect everything into one sorted array
+  const allBars = [];
+  const seen = new Set();
+
+  function addBar(b, isFrame) {
+    const time = parseTime(b.time);
+    if (time == null) return;
+    if (seen.has(time)) return;
+    seen.add(time);
+    allBars.push({
+      time,
+      open: b.open,
+      high: b.high,
+      low: b.low,
+      close: b.close,
+      _isFrame: isFrame,
+      _source: b,
+    });
+  }
+
+  // Streamed bars that come before context
+  for (const b of replay.streamedBars) addBar(b, false);
+  for (const b of replay.contextBars) addBar(b, false);
+
+  // Target-day frames up to currentIndex
+  const targetIdx = replay.currentIndex >= 0 ? replay.currentIndex : replay.frames.length - 1;
+  for (let i = 0; i <= targetIdx && i < replay.frames.length; i++) {
+    addBar(replay.frames[i], true);
+  }
+
+  // Streamed bars after frames are already included above (dedup handles it)
+
+  // Sort by time
+  allBars.sort((a, b) => a.time - b.time);
+
+  const candles = allBars.map(b => ({
+    time: b.time,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+  }));
+
+  // Rebuild markers — cached trade markers go on ALL bars (context + frames)
+  const markers = [];
+  const selectedDate = replay.summary?.date || '';
+  const allBarTimes = new Set(allBars.map(b => b.time));
+
+  const relevantTrades = (replay.allTrades || []).filter(t => tradeTouchesSelectedDate(t, selectedDate));
+  for (const t of relevantTrades) {
+    const entryTs = parseTime(t.entry_time);
+    if (entryTs != null && allBarTimes.has(entryTs)) {
+      markers.push({
+        time: entryTs,
+        position: t.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: t.direction === 'LONG' ? '#1f7a49' : '#b23b29',
+        shape: t.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text: t.direction,
+      });
+    }
+    if (t.exit_time) {
+      const exitTs = parseTime(t.exit_time);
+      if (exitTs != null && allBarTimes.has(exitTs)) {
+        const win = (t.pnl_pips || 0) > 0;
+        markers.push({
+          time: exitTs,
+          position: 'inBar',
+          color: win ? '#1f7a49' : '#b23b29',
+          shape: 'circle',
+          text: `${t.exit_reason} ${win ? '+' : ''}${t.pnl_pips}p`,
+        });
+      }
+    }
+  }
+
+  // Frame markers
+  for (let i = 0; i <= targetIdx && i < replay.frames.length; i++) {
+    const f = replay.frames[i];
+    const t = parseTime(f.time);
+    if (t == null) continue;
+    if (f.signal) {
+      markers.push({
+        time: t,
+        position: f.signal.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: f.signal.direction === 'LONG' ? '#1f7a49' : '#b23b29',
+        shape: f.signal.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text: f.signal.direction,
+      });
+    }
+    if (f.exit) {
+      const win = f.exit.pnl_pips > 0;
+      markers.push({
+        time: t,
+        position: 'inBar',
+        color: win ? '#1f7a49' : '#b23b29',
+        shape: 'circle',
+        text: `${f.exit.reason} ${f.exit.pnl_pips > 0 ? '+' : ''}${f.exit.pnl_pips}p`,
+      });
+    }
+  }
+
+  replay.candleSeries.setData(candles);
+  replay.zoneSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
+  // Deduplicate markers — keep one per (time, text) pair
+  markers.sort((a, b) => a.time - b.time);
+  const seenMarkers = new Set();
+  const unique = markers.filter(m => {
+    const key = `${m.time}|${m.text}`;
+    if (seenMarkers.has(key)) return false;
+    seenMarkers.add(key);
+    return true;
+  });
+  replay.candleSeries.setMarkers(unique);
 }
 
 function drawZoneLines() {
@@ -695,6 +948,33 @@ function tradeTouchesSelectedDate(trade, selectedDate) {
 
 function renderToFrame(targetIndex) {
   if (targetIndex < 0 || targetIndex >= replay.frames.length) return;
+
+  // When streamed bars exist, use the unified renderer
+  if (replay.streamedBars.length > 0) {
+    _renderAllBars();
+    // Still handle SL/TP lines
+    removeTradeLevels();
+    const currentFrame = replay.frames[targetIndex];
+    if (currentFrame.open_trade) {
+      const t = currentFrame.open_trade;
+      replay._slLine = replay.candleSeries.createPriceLine({
+        price: t.sl_price, color: '#b23b29', lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true, title: 'SL',
+      });
+      replay._tpLine = replay.candleSeries.createPriceLine({
+        price: t.tp_price, color: '#1f7a49', lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true, title: 'TP',
+      });
+      replay._entryLine = replay.candleSeries.createPriceLine({
+        price: t.entry_price, color: '#b88917', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: 'Entry',
+      });
+    }
+    return;
+  }
 
   // Start with context bars (prior days, always fully visible)
   const candles = replay.contextBars

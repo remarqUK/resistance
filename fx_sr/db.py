@@ -178,6 +178,9 @@ class _CompatCursor:
             return self._raw_cursor.fetchmany()
         return self._raw_cursor.fetchmany(size=size)
 
+    def __iter__(self):
+        return iter(self._raw_cursor)
+
     def close(self):
         return self._raw_cursor.close()
 

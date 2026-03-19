@@ -43,6 +43,54 @@ from .walkforward import WalkForwardBar, run_walk_forward, slice_daily_window
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
 
 
+def _extend_hourly_with_minute_tail(
+    hourly_df: pd.DataFrame,
+    minute_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fill missing trailing 1h bars from the finer-grained minute cache.
+
+    Replay charts are driven from hourly bars. On the current trading day the
+    hourly cache can lag while the minute cache already contains newer price
+    action. Aggregate those trailing minute bars into synthetic 1h bars so the
+    replay can continue past the last completed cached hourly candle.
+    """
+
+    if hourly_df.empty or minute_df.empty:
+        return hourly_df
+
+    hourly = hourly_df.sort_index()
+    minute = minute_df.sort_index()
+
+    last_hourly = pd.Timestamp(hourly.index[-1])
+    tail_start = last_hourly + pd.Timedelta(hours=1)
+    minute_tail = minute[minute.index >= tail_start]
+    if minute_tail.empty:
+        return hourly
+
+    agg_map = {
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+    }
+    if 'Volume' in minute_tail.columns:
+        agg_map['Volume'] = 'sum'
+
+    extended = minute_tail.resample('1h', label='left', closed='left').agg(agg_map)
+    extended = extended.dropna(subset=['Open', 'High', 'Low', 'Close'])
+    if extended.empty:
+        return hourly
+
+    if 'Volume' not in extended.columns:
+        extended['Volume'] = 0.0
+
+    extended = extended[~extended.index.isin(hourly.index)]
+    if extended.empty:
+        return hourly
+
+    return pd.concat([hourly, extended]).sort_index()
+
+
 def _trade_active_dates(
     entry_time: pd.Timestamp | str | None,
     exit_time: pd.Timestamp | str | None,
@@ -117,6 +165,7 @@ def _trade_row_to_dict(
 ) -> dict:
     return {
         'pair': pair,
+        'status': 'OPEN' if trade.exit_time is None else 'CLOSED',
         'entry_time': pd.Timestamp(trade.entry_time).isoformat(),
         'exit_time': pd.Timestamp(trade.exit_time).isoformat() if trade.exit_time is not None else None,
         'direction': trade.direction,
@@ -132,7 +181,7 @@ def _trade_row_to_dict(
         'bars_held': int(trade.bars_held),
         'pnl_pips': round(float(trade.pnl_pips), 1),
         'pnl_r': round(float(trade.pnl_r), 2),
-        'exit_reason': trade.exit_reason,
+        'exit_reason': trade.exit_reason or ('OPEN' if trade.exit_time is None else None),
         'active_dates': _trade_active_dates(trade.entry_time, trade.exit_time),
         'hourly_days': source_row['hourly_days'],
         'zone_history_days': source_row['zone_history_days'],
@@ -423,6 +472,15 @@ def _load_cached_backtest_trades(
                     balance_after=balance_data.get('balance_after'),
                     risk_amount=balance_data.get('risk_amount'),
                     pnl_amount=balance_data.get('pnl_amount'),
+                )
+            )
+        for trade in getattr(result, 'pending_trades', []):
+            trades.append(
+                _trade_row_to_dict(
+                    row['pair'],
+                    trade,
+                    decimals,
+                    row,
                 )
             )
 
@@ -843,6 +901,35 @@ def _pair_from_request(request: web.Request) -> str | None:
     return pair or None
 
 
+async def handle_trade_log_page(_request: web.Request) -> web.StreamResponse:
+    """Serve the live trade log page."""
+    return web.FileResponse(WEB_DIR / 'trade_log.html')
+
+
+async def handle_trade_log_api(_request: web.Request) -> web.Response:
+    """Return detected signals from the live history database."""
+    from .live_history import load_detected_signals
+
+    pair = _pair_from_request(_request)
+    status = (_request.query.get('status', '') or '').strip() or None
+    limit = int(_request.query.get('limit', '200'))
+
+    signals = load_detected_signals(pair=pair, status=status, limit=limit)
+    all_pairs = sorted({s['pair'] for s in signals})
+
+    # Ensure JSON-safe values
+    for s in signals:
+        for k, v in s.items():
+            if hasattr(v, 'isoformat'):
+                s[k] = v.isoformat()
+
+    return web.json_response({
+        'signals': signals,
+        'pairs': all_pairs,
+        'count': len(signals),
+    })
+
+
 async def handle_backtest_trades_page(_request: web.Request) -> web.StreamResponse:
     """Serve the backtest trades page."""
     return web.FileResponse(WEB_DIR / 'backtest_trades.html')
@@ -876,7 +963,7 @@ async def handle_backtest_trades_api(_request: web.Request) -> web.Response:
 
 
 async def handle_backtest_diary_api(_request: web.Request) -> web.Response:
-    """Return trades whose entry or exit occurs on the selected date."""
+    """Return trades whose entry occurs on the selected date."""
     pair_filter = _pair_from_request(_request)
     date_str = _request.query.get('date', '')
     if pair_filter is not None and pair_filter not in PAIRS:
@@ -891,19 +978,14 @@ async def handle_backtest_diary_api(_request: web.Request) -> web.Response:
     selected_str = str(selected)
 
     trades, compounding = _load_cached_backtest_trades(pair=pair_filter)
-    matches = []
-    for trade in trades:
-        if _trade_is_active_on_date(trade, selected_str):
-            matches.append(trade)
-
-    realized_matches = [
-        trade for trade in matches
-        if _trade_realized_date(trade) == selected_str
+    matches = [
+        trade for trade in trades
+        if str(trade.get('entry_time') or '')[:10] == selected_str
     ]
-    wins = sum(1 for trade in realized_matches if trade['pnl_pips'] > 0)
-    losses = sum(1 for trade in realized_matches if trade['pnl_pips'] < 0)
-    total_pnl_pips = round(sum(trade['pnl_pips'] for trade in realized_matches), 1)
-    total_pnl_r = round(sum(trade['pnl_r'] for trade in realized_matches), 2)
+    wins = sum(1 for trade in matches if trade['pnl_pips'] > 0)
+    losses = sum(1 for trade in matches if trade['pnl_pips'] < 0)
+    total_pnl_pips = round(sum(trade['pnl_pips'] for trade in matches), 1)
+    total_pnl_r = round(sum(trade['pnl_r'] for trade in matches), 2)
 
     return web.json_response({
         'date': selected_str,
@@ -935,6 +1017,9 @@ async def handle_replay_page(_request: web.Request) -> web.StreamResponse:
 
 async def handle_replay(request: web.Request) -> web.Response:
     """``GET /api/replay?pair=EURUSD&date=2025-03-10&preset=optimized&tf=1m``"""
+    import time as _time
+    _t0 = _time.perf_counter()
+
     pair = request.query.get('pair', '').upper()
     date_str = request.query.get('date', '')
     preset = request.query.get('preset', 'optimized')
@@ -958,17 +1043,24 @@ async def handle_replay(request: web.Request) -> web.Response:
     # Load only reads from cache — use "Update Data" to fetch from IBKR
     daily_start = datetime(target.year, target.month, target.day) - timedelta(days=zone_history_days + 10)
     daily_end = datetime(target.year, target.month, target.day, 23, 59, 59)
+
+    _t1 = _time.perf_counter()
     daily_df = db.load_ohlc(ticker, '1d', start=daily_start, end=daily_end)
+    _t2 = _time.perf_counter()
 
     hourly_start = datetime(target.year, target.month, target.day) - timedelta(days=30)
     today = date.today()
     hourly_end_date = max(target, today)
     hourly_end = datetime(hourly_end_date.year, hourly_end_date.month, hourly_end_date.day, 23, 59, 59)
     hourly_df = db.load_ohlc(ticker, '1h', start=hourly_start, end=hourly_end)
-    minute_df = db.load_ohlc(ticker, '1m')
-    l2_snapshots = db.load_l2_snapshots(ticker)
+    _t3 = _time.perf_counter()
+    minute_df = db.load_ohlc(ticker, '1m', start=hourly_start, end=hourly_end)
+    _t4 = _time.perf_counter()
+    l2_snapshots = db.load_l2_snapshots(ticker, start=hourly_start, end=hourly_end)
+    _t5 = _time.perf_counter()
+    display_hourly_df = _extend_hourly_with_minute_tail(hourly_df, minute_df)
 
-    if daily_df.empty or hourly_df.empty:
+    if daily_df.empty or display_hourly_df.empty:
         return web.json_response(
             {'error': f'No cached data for {pair}. Click "Update Data" to fetch from IBKR.'},
             status=404,
@@ -978,7 +1070,7 @@ async def handle_replay(request: web.Request) -> web.Response:
     decimals = PAIRS[pair].get('decimals', 5)
     result = generate_replay_frames(
         daily_df,
-        hourly_df,
+        display_hourly_df,
         pair,
         target,
         params,
@@ -986,7 +1078,9 @@ async def handle_replay(request: web.Request) -> web.Response:
         minute_df=minute_df,
         l2_snapshots=l2_snapshots,
     )
+    _t6 = _time.perf_counter()
     account_trades, compounding = _load_cached_backtest_trades(backtest_key=backtest_key)
+    _t7 = _time.perf_counter()
     result['summary']['account'] = _build_account_day_summary(target, account_trades, compounding)
 
     if not result['frames'] and not result['context_bars']:
@@ -1005,6 +1099,13 @@ async def handle_replay(request: web.Request) -> web.Response:
 
     result['summary']['timeframe'] = actual_tf
     result['summary']['timeframe_requested'] = timeframe
+
+    _t8 = _time.perf_counter()
+    print(f"[REPLAY TIMING] {pair} {date_str} tf={timeframe} total={_t8-_t0:.3f}s | "
+          f"daily={_t2-_t1:.3f}s hourly={_t3-_t2:.3f}s minute={_t4-_t3:.3f}s "
+          f"l2={_t5-_t4:.3f}s walkforward={_t6-_t5:.3f}s "
+          f"backtest_trades={_t7-_t6:.3f}s serialize={_t8-_t7:.3f}s")
+
     return web.json_response(result)
 
 
@@ -1043,6 +1144,9 @@ async def handle_replay_bars(request: web.Request) -> web.Response:
     ticker = PAIRS[pair]['ticker']
     decimals = PAIRS[pair].get('decimals', 5)
     df = db.load_ohlc(ticker, tf, start=start_dt, end=end_dt)
+    if tf == '1h':
+        minute_df = db.load_ohlc(ticker, '1m', start=start_dt, end=end_dt)
+        df = _extend_hourly_with_minute_tail(df, minute_df)
 
     if df.empty:
         return web.json_response({'bars': []})

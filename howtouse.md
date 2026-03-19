@@ -56,7 +56,7 @@ What this does:
 
 - scans configured pairs for valid entry signals
 - sizes the signals
-- writes them to `detected_signal` in `fx_data.db`
+- writes them to the `detected_signal` table in PostgreSQL
 - does not submit any orders
 
 If you want one pair only:
@@ -131,9 +131,7 @@ Execution only happens when:
 
 ## 5. What Gets Recorded
 
-The main audit table is `detected_signal` in:
-
-[`fx_data.db`](/mnt/h/source/repos/Resistance/fx_data.db)
+The main audit table is `detected_signal` in PostgreSQL.
 
 Important fields:
 
@@ -188,15 +186,14 @@ Close attribution works in this order:
 
 ## 7. How To Inspect Recent Signal History
 
-The machine does not currently include the `sqlite3` CLI, so use Python.
-
 Recent lifecycle rows:
 
 ```bash
 python3 - <<'PY'
-import sqlite3
+import psycopg
+from fx_sr.db import get_connection_string
 
-conn = sqlite3.connect("fx_data.db")
+conn = psycopg.connect(get_connection_string())
 for row in conn.execute("""
     SELECT pair, direction, signal_time, status, transacted,
            opened_price, closed_price, close_reason, close_source, pnl_pips
@@ -212,9 +209,10 @@ Only closed trades:
 
 ```bash
 python3 - <<'PY'
-import sqlite3
+import psycopg
+from fx_sr.db import get_connection_string
 
-conn = sqlite3.connect("fx_data.db")
+conn = psycopg.connect(get_connection_string())
 for row in conn.execute("""
     SELECT pair, direction, signal_time, opened_price, closed_price,
            close_reason, close_source, pnl_pips

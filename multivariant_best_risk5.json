@@ -1,0 +1,163 @@
+{
+  "baseline": {
+    "final_balance": 70855514.50672545,
+    "max_dd": 15.118437690277753,
+    "overrides": {},
+    "raw_trades": 771,
+    "raw_wr": 51.10246433203631,
+    "return_pct": 7085451.450672545,
+    "skip_counts": {
+      "RISK_BUDGET_FULL": 7
+    },
+    "status": "ok",
+    "trades": 764,
+    "wr": 50.916230366492144
+  },
+  "best": {
+    "final_balance": 53588043.38079454,
+    "max_dd": 13.878914057334432,
+    "overrides": {
+      "rr_ratio": 1.0
+    },
+    "raw_trades": 778,
+    "raw_wr": 53.59897172236504,
+    "return_pct": 5358704.338079453,
+    "score": 0.8584901286067977,
+    "skip_counts": {
+      "RISK_BUDGET_FULL": 5
+    },
+    "status": "ok",
+    "trades": 773,
+    "variant_idx": 1,
+    "wr": 53.42820181112549
+  },
+  "dd_wr_sorted": [
+    {
+      "final_balance": 84149938.64852771,
+      "max_dd": 15.72002126170648,
+      "overrides": {
+        "early_exit_r": 0.55
+      },
+      "raw_trades": 762,
+      "raw_wr": 52.0997375328084,
+      "return_pct": 8414893.864852771,
+      "score": 1.10786588685569,
+      "skip_counts": {
+        "RISK_BUDGET_FULL": 7
+      },
+      "status": "ok",
+      "trades": 755,
+      "variant_idx": 11,
+      "wr": 51.9205298013245
+    },
+    {
+      "final_balance": 82194100.31594549,
+      "max_dd": 15.118437690277755,
+      "overrides": {
+        "early_exit_r": 0.45
+      },
+      "raw_trades": 769,
+      "raw_wr": 51.62548764629389,
+      "return_pct": 8219310.031594548,
+      "score": 1.0954922199126211,
+      "skip_counts": {
+        "RISK_BUDGET_FULL": 6
+      },
+      "status": "ok",
+      "trades": 763,
+      "variant_idx": 9,
+      "wr": 51.37614678899083
+    },
+    {
+      "final_balance": 78207867.37508695,
+      "max_dd": 15.346738074884097,
+      "overrides": {
+        "early_exit_r": 0.5
+      },
+      "raw_trades": 763,
+      "raw_wr": 51.900393184796854,
+      "return_pct": 7820686.737508695,
+      "score": 1.0585952146979476,
+      "skip_counts": {
+        "RISK_BUDGET_FULL": 6
+      },
+      "status": "ok",
+      "trades": 757,
+      "variant_idx": 10,
+      "wr": 51.651254953764855
+    },
+    {
+      "final_balance": 64681429.38517437,
+      "max_dd": 15.118437690277748,
+      "overrides": {
+        "min_entry_candle_body_pct": 0.08
+      },
+      "raw_trades": 751,
+      "raw_wr": 51.1318242343542,
+      "return_pct": 6468042.938517437,
+      "score": 0.9377698571749582,
+      "skip_counts": {
+        "RISK_BUDGET_FULL": 6
+      },
+      "status": "ok",
+      "trades": 745,
+      "variant_idx": 19,
+      "wr": 51.006711409395976
+    },
+    {
+      "final_balance": 53588043.38079454,
+      "max_dd": 13.878914057334432,
+      "overrides": {
+        "rr_ratio": 1.0
+      },
+      "raw_trades": 778,
+      "raw_wr": 53.59897172236504,
+      "return_pct": 5358704.338079453,
+      "score": 0.8584901286067977,
+      "skip_counts": {
+        "RISK_BUDGET_FULL": 5
+      },
+      "status": "ok",
+      "trades": 773,
+      "variant_idx": 1,
+      "wr": 53.42820181112549
+    }
+  ],
+  "evaluated_variants": 20,
+  "generated_variants": 20,
+  "profile": "high_volume",
+  "profile_overrides": {
+    "hourly_days": 365,
+    "risk_pct": 8.0,
+    "starting_balance": 1000.0,
+    "zone_history_days": 180
+  },
+  "search": {
+    "max_variants": 20,
+    "max_workers": 8,
+    "seed": 42,
+    "target_dd": 17.3,
+    "target_trades": 768,
+    "target_wr": 51.0
+  },
+  "valid_sorted": [
+    {
+      "final_balance": 53588043.38079454,
+      "max_dd": 13.878914057334432,
+      "overrides": {
+        "rr_ratio": 1.0
+      },
+      "raw_trades": 778,
+      "raw_wr": 53.59897172236504,
+      "return_pct": 5358704.338079453,
+      "score": 0.8584901286067977,
+      "skip_counts": {
+        "RISK_BUDGET_FULL": 5
+      },
+      "status": "ok",
+      "trades": 773,
+      "variant_idx": 1,
+      "wr": 53.42820181112549
+    }
+  ]
+}

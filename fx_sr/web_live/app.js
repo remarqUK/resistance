@@ -12,6 +12,10 @@ let socket = null;
 let reconnectTimer = null;
 let countdownTimer = null;
 let executionTogglePending = false;
+let selectedExecutionKey = null;
+let selectedExecutionChart = null;
+let selectedExecutionSeries = null;
+let selectedExecutionLines = [];
 let transactionBeepState = {
   nextHourBucket: null,
   milestones: {
@@ -22,6 +26,8 @@ let transactionBeepState = {
 };
 let transactionAudioContext = null;
 let isTransactionBeeping = false;
+let previousBacktestStatus = null;
+let rerunBacktestBtn = null;
 
 const els = {
   connectionPill: document.getElementById("connection-pill"),
@@ -44,6 +50,138 @@ const els = {
   logList: document.getElementById("log-list"),
 };
 const PRICE_DISPLAY_DECIMALS = 5;
+const FILL_ENDPOINT_PATHS = [
+  "/api/fill",
+  "/api/fill/",
+  "/api/fill-cache",
+  "/fill",
+  "/fill/",
+  "/fill-cache",
+  "/fill_cache",
+];
+const BACKTEST_RERUN_ENDPOINT_PATHS = [
+  "/api/backtest-rerun",
+  "/backtest-rerun",
+  "/api/backtest-rerun/",
+  "/backtest-rerun/",
+];
+
+function buildEndpointCandidates(rawPaths) {
+  const candidates = Array.from(new Set(rawPaths.map((path) => `/${String(path).replace(/^\/+/, "")}`)));
+  const currentPath = window.location.pathname || "/";
+  const directory = currentPath.endsWith("/") ? currentPath : currentPath.replace(/[^/]*$/, "");
+  const relativeDir = directory || "/";
+  const normalisedRelative = relativeDir.endsWith("/") ? relativeDir : `${relativeDir}/`;
+
+  const allCandidates = [...candidates];
+  for (const directoryPrefix of [normalisedRelative, "/"]) {
+    const prefix = directoryPrefix === "/" ? "" : directoryPrefix;
+    for (const rawPath of candidates) {
+      const trimmedPath = String(rawPath).replace(/^\/+/, "");
+      if (!trimmedPath) {
+        continue;
+      }
+      allCandidates.push(`${prefix}${trimmedPath}`);
+    }
+  }
+
+  return [...new Set(allCandidates)];
+}
+
+async function postToFirstAvailableEndpoint(endpoints, options = {}) {
+  let response = null;
+  let payload = {};
+
+  const requestOptions = {
+    method: "POST",
+    ...options,
+  };
+
+  for (const endpoint of endpoints) {
+    const attemptResponse = await fetch(endpoint, requestOptions);
+    const attemptPayload = await attemptResponse.json().catch(() => ({}));
+    response = attemptResponse;
+    payload = attemptPayload;
+    if (attemptResponse.ok || attemptResponse.status !== 404) {
+      return { response, payload };
+    }
+  }
+
+  return { response, payload };
+}
+
+async function invokeDashboardAction({
+  button,
+  confirmMessage,
+  endpointPaths,
+  loadingText,
+  resetText = null,
+  requestOptions = {},
+  successMessage,
+  successLogLevel = "success",
+  errorTitle,
+  statusErrorHandlers = {},
+  onSuccess,
+  onFinally,
+}) {
+  if (!button) {
+    return { initiated: false };
+  }
+  if (!confirm(confirmMessage)) {
+    return { initiated: false };
+  }
+
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = loadingText;
+
+  try {
+    const endpoints = buildEndpointCandidates(endpointPaths);
+    const { response, payload } = await postToFirstAvailableEndpoint(endpoints, requestOptions);
+    if (!response.ok) {
+      const baseMessage = payload?.message || payload?.error || `HTTP ${response.status}`;
+      const handler = statusErrorHandlers[response.status] || statusErrorHandlers[String(response.status)];
+      const message = handler ? handler(baseMessage, response, payload) : baseMessage;
+      throw new Error(message);
+    }
+
+    const finalMessage = payload?.message || successMessage;
+    if (finalMessage) {
+      if (typeof onSuccess === "function") {
+        await onSuccess({ response, payload, message: finalMessage });
+      } else {
+        pushLog({
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          level: successLogLevel,
+          message: finalMessage,
+        });
+      }
+    }
+
+    return { response, payload, initiated: true };
+  } catch (error) {
+    const message = error?.message || "Request failed.";
+    pushLog({
+      ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      level: "error",
+      message,
+    });
+    if (errorTitle) {
+      window.alert(`${errorTitle}: ${message}`);
+    }
+    return { initiated: false, message };
+  } finally {
+    button.disabled = false;
+    if (typeof resetText === "string") {
+      button.textContent = resetText;
+    } else if (resetText === null) {
+      button.textContent = originalText;
+    }
+    if (typeof onFinally === "function") {
+      await onFinally();
+    }
+  }
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -203,7 +341,171 @@ function formatTimestamp(isoString) {
   if (Number.isNaN(date.getTime())) {
     return "–";
   }
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatDateOnly(isoString) {
+  if (!isoString) {
+    return "–";
+  }
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    return "–";
+  }
+  return date.toLocaleDateString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  });
+}
+
+function executionKey(execution) {
+  return [
+    execution.pair || "",
+    execution.direction || "",
+    execution.order_id || "",
+    execution.time || "",
+  ].join("|");
+}
+
+function replayDateForExecution(execution) {
+  if (!execution?.time) {
+    return "";
+  }
+  const date = new Date(execution.time);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function destroySelectedExecutionChart() {
+  selectedExecutionLines = [];
+  selectedExecutionSeries = null;
+  if (selectedExecutionChart) {
+    selectedExecutionChart.remove();
+    selectedExecutionChart = null;
+  }
+}
+
+function formatExecutionPrice(value, execution) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "–";
+  }
+  const digits = execution?.pair?.includes("JPY") ? 3 : PRICE_DISPLAY_DECIMALS;
+  return formatNumber(value, digits);
+}
+
+function createExecutionPriceLine(price, color, title) {
+  if (!selectedExecutionSeries || price === null || price === undefined || Number.isNaN(Number(price))) {
+    return;
+  }
+  const line = selectedExecutionSeries.createPriceLine({
+    price: Number(price),
+    color,
+    lineWidth: 2,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title,
+  });
+  selectedExecutionLines.push(line);
+}
+
+async function renderSelectedExecutionChart() {
+  destroySelectedExecutionChart();
+
+  if (!selectedExecutionKey) {
+    return;
+  }
+  const execution = [...state.executions].reverse().find((item) => executionKey(item) === selectedExecutionKey);
+  const chartEl = document.getElementById("selected-execution-chart");
+  const statusEl = document.getElementById("selected-execution-chart-status");
+  if (!execution || !chartEl || !statusEl || typeof LightweightCharts === "undefined") {
+    return;
+  }
+
+  const replayDate = replayDateForExecution(execution);
+  if (!replayDate) {
+    statusEl.textContent = "No valid replay date for this transaction.";
+    return;
+  }
+
+  statusEl.textContent = `Loading ${execution.pair} ${replayDate}…`;
+  const startIso = `${replayDate}T00:00:00Z`;
+  const endIso = `${replayDate}T23:59:59Z`;
+
+  try {
+    const params = new URLSearchParams({
+      pair: execution.pair,
+      tf: "1h",
+      start: startIso,
+      end: endIso,
+    });
+    const res = await fetch(`/api/replay/bars?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || "Failed to load replay bars.");
+    }
+
+    const bars = (data.bars || []).map((bar) => ({
+      time: Math.floor(new Date(bar.time).getTime() / 1000),
+      open: Number(bar.open),
+      high: Number(bar.high),
+      low: Number(bar.low),
+      close: Number(bar.close),
+    })).filter((bar) => Number.isFinite(bar.time));
+
+    if (!bars.length) {
+      statusEl.textContent = "No replay bars found for that date.";
+      return;
+    }
+
+    selectedExecutionChart = LightweightCharts.createChart(chartEl, {
+      layout: {
+        background: { type: "solid", color: "#fffaf2" },
+        textColor: "#5b4b3a",
+      },
+      grid: {
+        vertLines: { color: "rgba(91, 75, 58, 0.08)" },
+        horzLines: { color: "rgba(91, 75, 58, 0.08)" },
+      },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      rightPriceScale: { borderColor: "rgba(91, 75, 58, 0.18)" },
+      timeScale: {
+        borderColor: "rgba(91, 75, 58, 0.18)",
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      width: chartEl.clientWidth || 520,
+      height: 220,
+    });
+
+    selectedExecutionSeries = selectedExecutionChart.addCandlestickSeries({
+      upColor: "#1f7a49",
+      downColor: "#b23b29",
+      borderUpColor: "#1f7a49",
+      borderDownColor: "#b23b29",
+      wickUpColor: "#1f7a49",
+      wickDownColor: "#b23b29",
+    });
+    selectedExecutionSeries.setData(bars);
+    selectedExecutionChart.timeScale().fitContent();
+
+    createExecutionPriceLine(execution.submitted_entry_price, "#456b8c", "Entry");
+    createExecutionPriceLine(execution.submitted_sl_price, "#b23b29", "SL");
+    createExecutionPriceLine(execution.submitted_tp_price, "#1f7a49", "TP");
+
+    statusEl.textContent = `${execution.pair} replay for ${replayDate}`;
+  } catch (error) {
+    statusEl.textContent = error.message || "Failed to load replay bars.";
+  }
 }
 
 function badgeClass(value) {
@@ -222,6 +524,58 @@ function levelTone(level) {
   if (token === "error") return "tone-error";
   if (token === "muted") return "tone-muted";
   return "tone-info";
+}
+
+function formatBacktestButtonText(backtest) {
+  const status = String(backtest.status || "idle");
+  if (status === "starting") {
+    const total = Number(backtest.items_requested || 0);
+    const processed = Number(backtest.items_processed || 0);
+    if (total > 0) {
+      const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
+      return `Re-running ${processed}/${total} (${pct}%)`;
+    }
+    return "Starting…";
+  }
+  if (status === "running") {
+    const total = Number(backtest.items_requested || 0);
+    const processed = Number(backtest.items_processed || 0);
+    const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
+    return `Re-running ${processed}/${total} (${pct}%)`;
+  }
+  return "Re-run Backtest";
+}
+
+function updateRerunBacktestButton() {
+  if (!rerunBacktestBtn) {
+    return;
+  }
+  const backtest = (state.summary || {}).backtest || {};
+  const status = String(backtest.status || "idle");
+
+  if (previousBacktestStatus !== status) {
+    if ((previousBacktestStatus === "starting" || previousBacktestStatus === "running") && status === "complete") {
+      pushLog({
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        level: "success",
+        message: "Backtest rerun completed.",
+      });
+    } else if (
+      (previousBacktestStatus === "starting" || previousBacktestStatus === "running")
+      && (status === "error" || status === "canceled")
+    ) {
+      pushLog({
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        level: "warning",
+        message: `Backtest rerun ${status}.`,
+      });
+    }
+  }
+
+  rerunBacktestBtn.textContent = formatBacktestButtonText(backtest);
+  rerunBacktestBtn.disabled = status === "starting" || status === "running";
+
+  previousBacktestStatus = status;
 }
 
 function sortPairs() {
@@ -279,6 +633,7 @@ function applyState(nextState) {
   state.executions = nextState.executions || [];
   state.log = nextState.log || [];
   renderAll();
+  updateRerunBacktestButton();
 }
 
 function upsertPair(row, summary) {
@@ -379,7 +734,32 @@ function renderSummary() {
 function renderScanProgress() {
   const summary = state.summary || {};
   const backfill = summary.backfill || {};
+  const fill = summary.fill || {};
+  const backtest = summary.backtest || {};
   renderTransactionCountdown();
+
+  if (fill.status && fill.status !== "idle") {
+    const total = Number(fill.items_requested || 0);
+    const processed = Number(fill.items_processed || 0);
+    const attempts = Number(fill.attempts || 0);
+    const errors = Number(fill.errors || 0);
+    const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
+    const current = fill.current_item ? ` ${String.fromCharCode(0x2022)} ${fill.current_item}` : "";
+    const statusLabel = fill.status === "running" ? "Fill" : `Fill ${fill.status}`;
+    const attemptsText = attempts > 0 ? ` ${String.fromCharCode(0x2022)} attempts ${attempts}` : "";
+    const errorsText = errors > 0 ? ` ${String.fromCharCode(0x2022)} errors ${errors}` : "";
+    els.scanProgress.textContent = `${statusLabel}: ${processed} of ${total} (${pct}%)${attemptsText}${errorsText}${current}`;
+    return;
+  }
+  if (backtest.status && backtest.status !== "idle" && backtest.status !== "complete") {
+    const total = Number(backtest.items_requested || 0);
+    const processed = Number(backtest.items_processed || 0);
+    const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
+    const current = backtest.current_item ? ` ${String.fromCharCode(0x2022)} ${backtest.current_item}` : "";
+    const statusLabel = backtest.status === "starting" ? "Backtest" : (backtest.status === "running" ? "Backtest" : `Backtest ${backtest.status}`);
+    els.scanProgress.textContent = `${statusLabel}: ${processed} of ${total} (${pct}%)${current}`;
+    return;
+  }
 
   if (summary.status === "backfilling" && backfill.phase && backfill.phase !== "done") {
     const phase = backfill.phase === "zones" ? "Loading zones" : backfill.phase === "hourly" ? "Loading hourly" : "Scanning";
@@ -536,12 +916,16 @@ function renderAlerts() {
 
 function renderExecutions() {
   if (!state.executions.length) {
+    destroySelectedExecutionChart();
     els.executionsList.innerHTML = `<div class="empty-card">No execution activity.</div>`;
     return;
   }
 
-  els.executionsList.innerHTML = state.executions.map((execution) => `
-    <article class="mini-card">
+  els.executionsList.innerHTML = [...state.executions].reverse().map((execution) => {
+    const key = executionKey(execution);
+    const isSelected = key === selectedExecutionKey;
+    return `
+    <article class="mini-card mini-card-clickable ${isSelected ? "mini-card-selected" : ""}" data-execution-key="${escapeHtml(key)}">
       <div class="mini-head">
         <div>
           <strong>${escapeHtml(execution.pair)}</strong>
@@ -550,11 +934,25 @@ function renderExecutions() {
         ${renderBadge(execution.status)}
       </div>
       <div class="mini-meta">
-        <div><span class="value-label">Order</span><span class="value">${escapeHtml(execution.order_id || "–")}</span></div>
+        <div><span class="value-label">When / Order</span><span class="value">${escapeHtml(formatTimestamp(execution.time))} · #${escapeHtml(execution.order_id || "–")}</span></div>
         <div><span class="value-label">Note</span><span class="value">${escapeHtml(execution.note || "–")}</span></div>
       </div>
+      ${isSelected ? `
+      <div class="mini-detail">
+        <div><span class="value-label">Ticker</span><span class="value">${escapeHtml(execution.pair || "–")}</span></div>
+        <div><span class="value-label">Date</span><span class="value">${escapeHtml(formatDateOnly(execution.time))}</span></div>
+        <div><span class="value-label">Entry</span><span class="value">${escapeHtml(formatExecutionPrice(execution.submitted_entry_price, execution))}</span></div>
+        <div><span class="value-label">SL / TP</span><span class="value">${escapeHtml(formatExecutionPrice(execution.submitted_sl_price, execution))} / ${escapeHtml(formatExecutionPrice(execution.submitted_tp_price, execution))}</span></div>
+        <div class="mini-detail-wide">
+          <div id="selected-execution-chart-status" class="chart-status">Loading replay…</div>
+          <div id="selected-execution-chart" class="execution-mini-chart"></div>
+        </div>
+      </div>
+      ` : ""}
     </article>
-  `).join("");
+  `;
+  }).join("");
+  void renderSelectedExecutionChart();
 }
 
 function renderLog() {
@@ -661,12 +1059,21 @@ function connect() {
     }
     if (message.type === "bootstrap") {
       applyState(message.state || {});
+      updateRerunBacktestButton();
       return;
     }
     if (message.type === "scan_status" || message.type === "backfill_progress") {
       state.summary = message.summary || {};
       renderSummary();
       renderWatchlist();
+      updateRerunBacktestButton();
+      return;
+    }
+    if (message.type === "fill_progress" || message.type === "backtest_progress") {
+      state.summary = message.summary || {};
+      renderSummary();
+      renderWatchlist();
+      updateRerunBacktestButton();
       return;
     }
     if (message.type === "pair_update") {
@@ -707,6 +1114,17 @@ countdownTimer = window.setInterval(renderScanProgress, 1000);
 if (els.tradeToggleBtn) {
   els.tradeToggleBtn.addEventListener("click", toggleExecutionPaused);
 }
+if (els.executionsList) {
+  els.executionsList.addEventListener("click", (event) => {
+    const card = event.target.closest("[data-execution-key]");
+    if (!card) {
+      return;
+    }
+    const key = card.dataset.executionKey || null;
+    selectedExecutionKey = selectedExecutionKey === key ? null : key;
+    renderExecutions();
+  });
+}
 
 const stopBtn = document.getElementById("stop-server-btn");
 if (stopBtn) {
@@ -735,4 +1153,61 @@ if (stopBtn) {
   });
 }
 
+const fillCacheBtn = document.getElementById("fill-cache-btn");
+if (fillCacheBtn) {
+  fillCacheBtn.addEventListener("click", () => {
+    void invokeDashboardAction({
+      button: fillCacheBtn,
+      confirmMessage: "Run cache fill now?",
+      endpointPaths: FILL_ENDPOINT_PATHS,
+      loadingText: "Filling...",
+      resetText: "Fill",
+      errorTitle: "Unable to start cache fill",
+      statusErrorHandlers: {
+        404: (message, response) => `${message} (fill endpoint not found at ${response.url}). Restart dashboard and hard refresh the browser.`,
+      },
+      successMessage: "Cache fill started.",
+      onSuccess: ({ message }) => {
+        pushLog({
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          level: "success",
+          message,
+        });
+      },
+      requestOptions: { method: "POST" },
+    });
+  });
+}
+
+rerunBacktestBtn = document.getElementById("rerun-backtest-btn");
+if (rerunBacktestBtn) {
+  rerunBacktestBtn.addEventListener("click", () => {
+    previousBacktestStatus = "starting";
+    void invokeDashboardAction({
+      button: rerunBacktestBtn,
+      confirmMessage: "Re-run full backtest now?",
+      endpointPaths: BACKTEST_RERUN_ENDPOINT_PATHS,
+      loadingText: "Starting...",
+      errorTitle: "Unable to start backtest rerun",
+      statusErrorHandlers: {
+        409: (message) => message,
+      },
+      successMessage: "Backtest rerun started.",
+      onSuccess: ({ message }) => {
+        pushLog({
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          level: "success",
+          message,
+        });
+      },
+      onFinally: updateRerunBacktestButton,
+      requestOptions: { method: "POST" },
+    });
+  });
+}
+
+updateRerunBacktestButton();
+
 connect();
+
+

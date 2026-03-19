@@ -134,7 +134,8 @@ class PositionBarTrackingTests(unittest.TestCase):
         self.assertEqual(tracked['EURUSD:LONG']['last_processed_bar_time'], hourly_df.index[-1])
         save_tracking_mock.assert_called_once_with('EURUSD', 'LONG', 3, hourly_df.index[-1])
 
-    def test_short_position_can_take_profitable_time_exit(self):
+    def test_short_position_skips_time_exit_when_profitable(self):
+        """Profitable short should NOT be time-exited — let winners run."""
         tracked = {
             'EURUSD:SHORT': {
                 'pair': 'EURUSD',
@@ -156,23 +157,10 @@ class PositionBarTrackingTests(unittest.TestCase):
                 patch('fx_sr.positions._save_bar_tracking') as save_tracking_mock:
             alerts, snapshots = check_position_exits(tracked, params)
 
-        self.assertEqual(len(alerts), 1)
-        self.assertEqual(alerts[0]['direction'], 'SHORT')
-        self.assertEqual(alerts[0]['exit_reason'], 'TIME')
-        self.assertGreater(alerts[0]['pnl_pips'], 0.0)
+        self.assertEqual(len(alerts), 0)
         self.assertEqual(snapshots['EURUSD:SHORT']['current_price'], 1.0998)
         self.assertGreater(snapshots['EURUSD:SHORT']['pnl_pips'], 0.0)
         self.assertEqual(tracked['EURUSD:SHORT']['bars_monitored'], 1)
-        self.assertEqual(
-            tracked['EURUSD:SHORT']['last_processed_bar_time'],
-            pd.Timestamp('2026-02-03 11:00:00', tz='UTC'),
-        )
-        save_tracking_mock.assert_called_once_with(
-            'EURUSD',
-            'SHORT',
-            1,
-            pd.Timestamp('2026-02-03 11:00:00', tz='UTC'),
-        )
 
     def test_sync_positions_uses_actual_broker_entry_price_for_claimed_signal(self):
         signal_row = {

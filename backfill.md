@@ -4,7 +4,7 @@ Use this file as the handoff point after running the minute-data backfill from W
 
 ## Goal
 
-Fill `fx_data.db` with `1m` bars for the last `365` days so the strict backtest has historical submit-time quotes.
+Fill PostgreSQL with `1m` bars for the last `365` days so the strict backtest has historical submit-time quotes.
 
 ## Expected Port
 
@@ -34,7 +34,7 @@ python run.py download --minute-days 365 --minute-only
 ## What Success Looks Like
 
 - The command prints minute-chunk progress instead of failing immediately.
-- `fx_data.db` ends up with `1m` coverage well before March 2026.
+- PostgreSQL ends up with `1m` coverage well before March 2026.
 - No `ConnectionRefusedError` for `127.0.0.1:4002`.
 
 ## After It Finishes
@@ -48,7 +48,7 @@ Tell me:
 If you want a quick DB check from Windows after the backfill, run:
 
 ```powershell
-python -c "import sqlite3; c=sqlite3.connect('fx_data.db'); cur=c.cursor(); print(cur.execute(\"select ticker,min(ts),max(ts),count(*) from ohlc where interval='1m' group by ticker order by ticker\").fetchall())"
+python -c "import psycopg; from fx_sr.db import get_connection_string; conn=psycopg.connect(get_connection_string()); print(conn.execute(\"select ticker,min(ts),max(ts),count(*) from ohlc where interval='1m' group by ticker order by ticker\").fetchall())"
 ```
 
 ## What I Will Do Next

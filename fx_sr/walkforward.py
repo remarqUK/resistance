@@ -53,6 +53,8 @@ def finalize_trade(
     exit_reason: str,
     bars_held: int,
     pip: float,
+    commission_pips: float = 0.0,
+    commission_cost: float = 0.0,
 ) -> Trade:
     """Populate final trade state and derived P&L metrics."""
 
@@ -60,15 +62,20 @@ def finalize_trade(
     trade.exit_price = float(exit_price)
     trade.exit_reason = exit_reason
     trade.bars_held = bars_held
+    trade.commission_cost = commission_cost
 
     if trade.direction == 'LONG':
-        trade.pnl_pips = (trade.exit_price - trade.entry_price) / pip
+        raw_price_move = trade.exit_price - trade.entry_price
+        trade.pnl_pips = raw_price_move / pip - commission_pips
         if trade.risk > 0:
-            trade.pnl_r = (trade.exit_price - trade.entry_price) / trade.risk
+            commission_price = commission_pips * pip
+            trade.pnl_r = (raw_price_move - commission_price) / trade.risk
     else:
-        trade.pnl_pips = (trade.entry_price - trade.exit_price) / pip
+        raw_price_move = trade.entry_price - trade.exit_price
+        trade.pnl_pips = raw_price_move / pip - commission_pips
         if trade.risk > 0:
-            trade.pnl_r = (trade.entry_price - trade.exit_price) / trade.risk
+            commission_price = commission_pips * pip
+            trade.pnl_r = (raw_price_move - commission_price) / trade.risk
 
     return trade
 
@@ -292,7 +299,14 @@ def run_walk_forward(
                 resistance_zone=nearest_resistance,
             )
             if signal is not None:
-                pending_signal = signal
+                if skip_execution_plan:
+                    # Immediate execution on the signal bar (no 1-bar delay).
+                    # Realistic for limit-order entries at zones.
+                    current_trade = build_trade_from_signal(signal)
+                    trade_entry_bar = i
+                    opened_trade = current_trade
+                else:
+                    pending_signal = signal
 
         bars_held = 0 if current_trade is None else i - trade_entry_bar
         if on_bar is not None:

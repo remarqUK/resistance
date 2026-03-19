@@ -106,6 +106,7 @@ def serialize_trade(
                 'pnl_pips': pnl_pips,
                 'pnl_r': pnl_r,
                 'bars_held': int(trade.bars_held),
+                'commission_cost': float(trade.commission_cost),
             }
         )
     elif include_risk:
@@ -117,6 +118,7 @@ def serialize_trade(
                 'pnl_pips': float(trade.pnl_pips),
                 'pnl_r': float(trade.pnl_r),
                 'bars_held': int(trade.bars_held),
+                'commission_cost': float(trade.commission_cost),
             }
         )
 

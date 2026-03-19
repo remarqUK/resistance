@@ -1,0 +1,36 @@
+{
+  "baseline": {
+    "final_balance": 1223401947.681795,
+    "max_dd": 18.158891688012197,
+    "overrides": {},
+    "raw_trades": 771,
+    "raw_wr": 51.10246433203631,
+    "return_pct": 122340094.76817949,
+    "skip_counts": {
+      "RISK_BUDGET_FULL": 6
+    },
+    "status": "ok",
+    "trades": 765,
+    "wr": 50.98039215686274
+  },
+  "best": null,
+  "dd_wr_sorted": [],
+  "evaluated_variants": 20,
+  "generated_variants": 20,
+  "profile": "high_volume",
+  "profile_overrides": {
+    "hourly_days": 365,
+    "risk_pct": 8.0,
+    "starting_balance": 1000.0,
+    "zone_history_days": 180
+  },
+  "search": {
+    "max_variants": 20,
+    "max_workers": 8,
+    "seed": 42,
+    "target_dd": 17.3,
+    "target_trades": 768,
+    "target_wr": 51.0
+  },
+  "valid_sorted": []
+}

@@ -79,6 +79,7 @@ class Trade:
     pnl_r: float = 0.0     # P&L in R-multiples
     bars_held: int = 0      # 1H bars the trade was open
     quality_score: float = 0.0
+    commission_cost: float = 0.0    # round-turn commission in account currency
 
 
 from .profiles import BLOCKED_PAIR_DIRECTIONS
@@ -148,6 +149,13 @@ class StrategyParams:
     # Historical execution parity
     strict_backtest_execution: bool = False    # require historical execution quotes for backtests
     allow_h1_execution_fallback: bool = True   # allow next-hour modeled fallback when quote data is missing
+    # Margin enforcement (FCA UK retail)
+    enforce_margin: bool = True               # enable margin and min-size checks
+    margin_cushion_pct: float = 10.0          # keep 10% margin buffer to avoid liquidation
+    min_order_units: int = 1000               # IBKR odd-lot minimum
+    # IBKR commission model
+    commission_bps: float = 0.20              # basis points per side (0.20 = 0.002%)
+    commission_min_usd: float = 2.00          # USD minimum per order per side
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -202,6 +210,11 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         prefer_l2_submit_quote=merged.get('prefer_l2_submit_quote', True),
         strict_backtest_execution=merged.get('strict_backtest_execution', False),
         allow_h1_execution_fallback=merged.get('allow_h1_execution_fallback', True),
+        enforce_margin=merged.get('enforce_margin', True),
+        margin_cushion_pct=merged.get('margin_cushion_pct', 10.0),
+        min_order_units=merged.get('min_order_units', 1000),
+        commission_bps=merged.get('commission_bps', 0.20),
+        commission_min_usd=merged.get('commission_min_usd', 2.00),
     )
 
 
@@ -664,14 +677,14 @@ def check_price_exit(
         if close_price < trade.zone_lower or loss_r >= early_exit_r:
             return ('EARLY_EXIT', market_exit)
 
-        if allow_sideways and bars_held is not None and bars_held >= params.sideways_bars:
+        if allow_sideways and bars_held is not None and bars_held >= params.sideways_bars and market_exit <= trade.entry_price:
             tp_dist = trade.tp_price - trade.entry_price
             if tp_dist > 0:
                 progress = max(0.0, (market_exit - trade.entry_price) / tp_dist)
                 if progress < params.sideways_threshold:
                     return ('SIDEWAYS', market_exit)
 
-        if allow_time and bars_held is not None and bars_held >= params.max_hold_bars:
+        if allow_time and bars_held is not None and bars_held >= params.max_hold_bars and market_exit <= trade.entry_price:
             return ('TIME', market_exit)
 
     else:
@@ -698,14 +711,14 @@ def check_price_exit(
         if close_price > trade.zone_upper or loss_r >= early_exit_r:
             return ('EARLY_EXIT', market_exit)
 
-        if allow_sideways and bars_held is not None and bars_held >= params.sideways_bars:
+        if allow_sideways and bars_held is not None and bars_held >= params.sideways_bars and market_exit >= trade.entry_price:
             tp_dist = trade.entry_price - trade.tp_price
             if tp_dist > 0:
                 progress = max(0.0, (trade.entry_price - market_exit) / tp_dist)
                 if progress < params.sideways_threshold:
                     return ('SIDEWAYS', market_exit)
 
-        if allow_time and bars_held is not None and bars_held >= params.max_hold_bars:
+        if allow_time and bars_held is not None and bars_held >= params.max_hold_bars and market_exit >= trade.entry_price:
             return ('TIME', market_exit)
 
     return None

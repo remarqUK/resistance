@@ -16,11 +16,10 @@ import json
 import os
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
-from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
-from .execution import historical_execution_quote
+from .execution import build_execution_plan, historical_execution_quote
 from .levels import detect_zones, SRZone
 from .portfolio import (
     ClosedTradeSummary,
@@ -50,7 +49,105 @@ from .serialization import (
 )
 from .db import load_backtest_result, save_backtest_result, load_l2_snapshots, load_ohlc
 from . import ibkr
+from .commission import compute_round_turn_commission
 from .sizing import calculate_risk_amount
+
+
+class BacktestCacheMissingError(RuntimeError):
+    """Raised when cached market data is missing or insufficient for a backtest run."""
+
+
+def _load_cached_data_window(
+    ticker: str,
+    interval: str,
+    days: int,
+    *,
+    enforce_coverage: bool = True,
+) -> pd.DataFrame:
+    """Load a trailing interval window from cache and enforce strict coverage checks."""
+    if days <= 0:
+        return pd.DataFrame()
+
+    now = pd.Timestamp.now(tz='UTC')
+    start = now - pd.Timedelta(days=int(days))
+    df = load_ohlc(
+        ticker,
+        interval,
+        start=start.to_pydatetime(),
+        end=now.to_pydatetime(),
+    )
+    if df.empty:
+        raise BacktestCacheMissingError(
+            f'No cached {interval} data for {ticker}; run `python run.py fill` first'
+        )
+
+    if not enforce_coverage:
+        return df
+
+    now = pd.Timestamp.now(tz='UTC')
+    start = now - pd.Timedelta(days=int(days))
+    target_days = int(days)
+    if interval == '1d':
+        trading_days = len(pd.bdate_range(start.normalize(), now.normalize(), freq='B'))
+        window_rows = max(1, int(trading_days * 0.9))
+    else:
+        # FX hourly candles are typically 16 trading hours per day (weekdays),
+        # so use the same calendar-to-trading-hour assumption as fill checks.
+        window_rows = {
+            '1h': max(1, int(target_days * 16 * 0.9)),
+            '1m': max(1, int(target_days * 1000 * 0.9)),
+        }.get(interval, max(1, int(target_days * 0.9)))
+
+    if len(df) < window_rows:
+        raise BacktestCacheMissingError(
+            f'Cached {interval} data for {ticker} is too short '
+            f'({len(df)} rows; expected at least {window_rows})'
+        )
+
+    start_tolerance = {
+        '1d': pd.Timedelta(days=2),
+        '1h': pd.Timedelta(hours=6),
+    }.get(interval, pd.Timedelta(hours=1))
+    stale_tolerance = {
+        '1d': pd.Timedelta(days=3),
+        '1h': pd.Timedelta(hours=3),
+    }.get(interval, pd.Timedelta(hours=1))
+
+    first_ts = pd.Timestamp(df.index.min())
+    last_ts = pd.Timestamp(df.index.max())
+    if first_ts > start + start_tolerance:
+        raise BacktestCacheMissingError(
+            f'Cached {interval} data for {ticker} starts too late for '
+            f'{days}d backtest window ({first_ts} -> {last_ts})'
+        )
+
+    if last_ts < now - stale_tolerance:
+        raise BacktestCacheMissingError(
+            f'Cached {interval} data for {ticker} is stale ({last_ts} < {now - stale_tolerance})'
+        )
+
+    return df
+
+
+def _load_cached_backtest_data(
+    ticker: str,
+    hourly_days: int,
+    zone_history_days: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load strictly cached inputs for one backtest pair."""
+    # Daily zones are evaluated with a rolling lookback (`zone_history_days`) at each
+    # hourly bar, so we only need enough daily rows to cover the larger of the
+    # execution horizon and zone-history horizon for strict cache checks.
+    daily_days = max(1, int(max(hourly_days, zone_history_days)))
+    daily_df = _load_cached_data_window(ticker, '1d', daily_days)
+    hourly_df = _load_cached_data_window(ticker, '1h', int(hourly_days))
+    minute_df = _load_cached_data_window(
+        ticker,
+        '1m',
+        max(1, min(int(hourly_days), 7)),
+        enforce_coverage=False,
+    )
+    return daily_df, hourly_df, minute_df
 
 
 @dataclass
@@ -70,6 +167,7 @@ class BacktestResult:
     max_loss_pips: float
     profit_factor: float
     trades: List[Trade]
+    pending_trades: List[Trade]
     zones: List[SRZone]
 
 
@@ -119,9 +217,36 @@ class _ActiveExecutionExposure:
     trade: Trade
     risk_amount: float
     pnl_amount: float
+    margin_required: float = 0.0
 
 
-BACKTEST_CACHE_VERSION = '8'
+class _MarginTracker:
+    """Track margin utilisation across concurrent backtest positions."""
+
+    def __init__(self, starting_balance: float, account_currency: str = 'GBP') -> None:
+        self.balance = starting_balance
+        self.account_currency = account_currency
+        self._active_margins: dict[str, float] = {}
+
+    @property
+    def total_margin_used(self) -> float:
+        return sum(self._active_margins.values())
+
+    @property
+    def available_margin(self) -> float:
+        return max(0.0, self.balance - self.total_margin_used)
+
+    def add_position(self, key: str, margin_required: float) -> None:
+        self._active_margins[key] = margin_required
+
+    def remove_position(self, key: str) -> None:
+        self._active_margins.pop(key, None)
+
+    def sync_balance(self, new_balance: float) -> None:
+        self.balance = new_balance
+
+
+BACKTEST_CACHE_VERSION = '11'
 
 
 def _serialize_timestamp(value: pd.Timestamp | None) -> str | None:
@@ -156,6 +281,7 @@ def _serialize_backtest_result(result: BacktestResult) -> str:
         'max_loss_pips': float(result.max_loss_pips),
         'profit_factor': float(result.profit_factor),
         'trades': [_trade_to_dict(t) for t in result.trades],
+        'pending_trades': [_trade_to_dict(t) for t in result.pending_trades],
         'zones': [_zone_to_dict(z) for z in result.zones],
     }
     return json.dumps(payload, sort_keys=True)
@@ -184,6 +310,31 @@ def _deserialize_backtest_result(raw: str) -> BacktestResult:
                 pnl_r=float(trade.get('pnl_r', 0.0)),
                 bars_held=int(trade.get('bars_held', 0)),
                 quality_score=float(trade.get('quality_score', 0.0)),
+                commission_cost=float(trade.get('commission_cost', 0.0)),
+            )
+        )
+
+    pending_trades = []
+    for trade in data.get('pending_trades', []):
+        pending_trades.append(
+            Trade(
+                entry_time=_deserialize_timestamp(trade.get('entry_time')),
+                entry_price=float(trade['entry_price']),
+                direction=trade['direction'],
+                sl_price=float(trade['sl_price']),
+                tp_price=float(trade['tp_price']),
+                zone_upper=float(trade['zone_upper']),
+                zone_lower=float(trade['zone_lower']),
+                zone_strength=trade['zone_strength'],
+                risk=float(trade['risk']),
+                exit_time=_deserialize_timestamp(trade.get('exit_time')),
+                exit_price=trade.get('exit_price'),
+                exit_reason=trade.get('exit_reason'),
+                pnl_pips=float(trade.get('pnl_pips', 0.0)),
+                pnl_r=float(trade.get('pnl_r', 0.0)),
+                bars_held=int(trade.get('bars_held', 0)),
+                quality_score=float(trade.get('quality_score', 0.0)),
+                commission_cost=float(trade.get('commission_cost', 0.0)),
             )
         )
 
@@ -217,6 +368,7 @@ def _deserialize_backtest_result(raw: str) -> BacktestResult:
         max_loss_pips=float(data['max_loss_pips']),
         profit_factor=float(data['profit_factor']),
         trades=trades,
+        pending_trades=pending_trades,
         zones=zones,
     )
 
@@ -324,6 +476,101 @@ def _finalize_trade(
     return shared_finalize_trade(trade, exit_time, exit_price, exit_reason, bars_held, pip)
 
 
+def _build_pending_end_trade(
+    hourly_df: pd.DataFrame,
+    pair: str,
+    params: StrategyParams,
+    pip: float,
+    zone_provider,
+    execution_quote_provider,
+    trades: List[Trade],
+) -> Trade | None:
+    """Materialize a final pending signal when submit-time data already exists.
+
+    Live submits on the hour after bar ``T`` closes. For the last cached hourly
+    bar, strict backtests can still reproduce that submission if minute/L2 data
+    already contains a quote for ``T+1`` even though the next 1h candle has not
+    been persisted yet.
+    """
+
+    if hourly_df.empty or execution_quote_provider is None:
+        return None
+    if not bool(params.strict_backtest_execution):
+        return None
+
+    last_time = pd.Timestamp(hourly_df.index[-1])
+    if any(
+        trade.exit_reason == 'END'
+        and trade.exit_time is not None
+        and pd.Timestamp(trade.exit_time) == last_time
+        for trade in trades
+    ):
+        return None
+
+    last_row = hourly_df.iloc[-1]
+    current_date = last_time.date() if hasattr(last_time, 'date') else last_time
+    current_zones = list(zone_provider(last_time, current_date, len(hourly_df) - 1) or [])
+    nearest_support, nearest_resistance = get_tradeable_zones(current_zones, float(last_row['Close']))
+
+    last_closed_trade = max(
+        (
+            trade for trade in trades
+            if trade.exit_time is not None and pd.Timestamp(trade.exit_time) <= last_time
+        ),
+        key=lambda trade: pd.Timestamp(trade.exit_time),
+        default=None,
+    )
+    if is_pair_cooldown_active(
+        last_time,
+        last_exit_time=(
+            pd.Timestamp(last_closed_trade.exit_time)
+            if last_closed_trade is not None and last_closed_trade.exit_time is not None
+            else None
+        ),
+        last_pnl_r=(last_closed_trade.pnl_r if last_closed_trade is not None else None),
+        params=params,
+    ):
+        return None
+
+    signal = select_entry_signal(
+        hourly_df=hourly_df,
+        bar_idx=len(hourly_df) - 1,
+        pair=pair,
+        params=params,
+        support_zone=nearest_support,
+        resistance_zone=nearest_resistance,
+    )
+    if signal is None:
+        return None
+
+    submit_time = last_time + pd.Timedelta(hours=1)
+    quote, _quote_note = execution_quote_provider(
+        signal,
+        submit_time,
+        len(hourly_df),
+        last_row,
+    )
+    if quote is None:
+        return None
+
+    execution_plan, _plan_note = build_execution_plan(
+        signal,
+        quote,
+        params,
+        now=submit_time,
+    )
+    if execution_plan is None:
+        return None
+
+    return build_trade_from_signal(
+        signal,
+        entry_price=execution_plan.entry_price,
+        entry_time=execution_plan.quote.captured_at,
+        sl_price=execution_plan.stop_price,
+        tp_price=execution_plan.take_profit_price,
+    )
+
+
 def _load_minute_execution_data(
     ticker: str,
     hourly_days: int,
@@ -332,19 +579,8 @@ def _load_minute_execution_data(
     client_id: int | None = None,
 ) -> pd.DataFrame:
     """Load cached minute bars used for strict execution-parity entries."""
-
     end = pd.Timestamp.now(tz='UTC')
     start = end - pd.Timedelta(days=int(hourly_days))
-
-    if force_refresh:
-        refresh_days = max(1, min(int(hourly_days), 7))
-        fetch_minute_data_cached(
-            ticker,
-            days=refresh_days,
-            allow_stale_cache=False,
-            client_id=client_id,
-        )
-
     return load_ohlc(
         ticker,
         '1m',
@@ -444,7 +680,17 @@ def run_backtest(
         force_close_end=True,
         skip_execution_plan=not bool(params.strict_backtest_execution),
     )
-    return _compile_results(pair, result.trades, result.zones)
+    pending_trade = _build_pending_end_trade(
+        hourly_df,
+        pair,
+        params,
+        pip,
+        zone_provider,
+        execution_quote_provider,
+        result.trades,
+    )
+    pending_trades = [pending_trade] if pending_trade is not None else []
+    return _compile_results(pair, result.trades, result.zones, pending_trades=pending_trades)
 
 
 def precompute_zone_cache(
@@ -590,36 +836,68 @@ def _fetch_pair_data_only(
     zone_history_days: int,
     force_refresh: bool,
     client_id: int | None,
+    *,
+    debug: bool = False,
 ) -> Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Fetch daily and hourly data for a pair without running the backtest."""
-    daily_df = fetch_daily_data(
-        pair_info['ticker'],
-        days=zone_history_days + hourly_days,
-        force_refresh=force_refresh,
-        allow_stale_cache=not force_refresh,
-        client_id=client_id,
-    )
-    hourly_df = fetch_hourly_data(
-        pair_info['ticker'],
-        days=hourly_days,
-        force_refresh=force_refresh,
-        allow_stale_cache=not force_refresh,
-        client_id=client_id,
-    )
-    minute_df = _load_minute_execution_data(
-        pair_info['ticker'],
-        hourly_days,
-        force_refresh=force_refresh,
-        client_id=client_id,
-    )
-    end = pd.Timestamp.now(tz='UTC')
-    start = end - pd.Timedelta(days=int(hourly_days))
-    l2_snapshots = load_l2_snapshots(
-        pair_info['ticker'],
-        start=start.to_pydatetime(),
-        end=end.to_pydatetime(),
-    )
-    return pair, daily_df, hourly_df, minute_df, l2_snapshots
+    ticker = pair_info['ticker']
+    t0 = time.perf_counter()
+
+    def _dbg(message: str) -> None:
+        if debug:
+            print(f'    [DEBUG] {message}')
+
+    _dbg(f'phase1-worker: start pair={pair} ticker={ticker} client_id={client_id}')
+    try:
+        t_stage = time.perf_counter()
+        _dbg(f'phase1-worker: pair={pair} daily cache load start')
+        daily_df, hourly_df, minute_df = _load_cached_backtest_data(
+            ticker,
+            hourly_days,
+            zone_history_days,
+        )
+        _dbg(
+            f'phase1-worker: pair={pair} daily cache load complete rows={len(daily_df)} '
+            f'elapsed={time.perf_counter() - t_stage:.2f}s'
+        )
+
+        t_stage = time.perf_counter()
+        _dbg(f'phase1-worker: pair={pair} hourly cache load start')
+        _dbg(
+            f'phase1-worker: pair={pair} hourly cache load complete rows={len(hourly_df)} '
+            f'elapsed={time.perf_counter() - t_stage:.2f}s'
+        )
+
+        t_stage = time.perf_counter()
+        _dbg(f'phase1-worker: pair={pair} minute cache load start')
+        _dbg(
+            f'phase1-worker: pair={pair} minute cache load complete rows={len(minute_df)} '
+            f'elapsed={time.perf_counter() - t_stage:.2f}s'
+        )
+
+        end = pd.Timestamp.now(tz='UTC')
+        start = end - pd.Timedelta(days=int(hourly_days))
+        t_stage = time.perf_counter()
+        _dbg(f'phase1-worker: pair={pair} l2 snapshot query start')
+        l2_snapshots = load_l2_snapshots(
+            ticker,
+            start=start.to_pydatetime(),
+            end=end.to_pydatetime(),
+        )
+        _dbg(
+            f'phase1-worker: pair={pair} l2 snapshot query complete rows={len(l2_snapshots)} '
+            f'elapsed={time.perf_counter() - t_stage:.2f}s'
+        )
+        _dbg(
+            f'phase1-worker: finished pair={pair} total_elapsed={time.perf_counter() - t0:.2f}s'
+        )
+        return pair, daily_df, hourly_df, minute_df, l2_snapshots
+    except Exception as exc:
+        _dbg(
+            f'phase1-worker: error pair={pair} client_id={client_id} '
+            f'elapsed={time.perf_counter() - t0:.2f}s err={type(exc).__name__}: {exc}'
+        )
+        raise
 
 
 def run_backtest_fast(
@@ -665,11 +943,25 @@ def run_backtest_fast(
         force_close_end=True,
         skip_execution_plan=skip_exec,
     )
-    return _compile_results(pair, result.trades, result.zones)
+    pending_trade = _build_pending_end_trade(
+        hourly_df,
+        pair,
+        params,
+        pip,
+        zone_provider,
+        execution_quote_provider,
+        result.trades,
+    )
+    pending_trades = [pending_trade] if pending_trade is not None else []
+    return _compile_results(pair, result.trades, result.zones, pending_trades=pending_trades)
 
 
 def _compile_results(
-    pair: str, trades: List[Trade], zones: List[SRZone]
+    pair: str,
+    trades: List[Trade],
+    zones: List[SRZone],
+    *,
+    pending_trades: List[Trade] | None = None,
 ) -> BacktestResult:
     """Calculate performance statistics from trade list."""
     wins = [t for t in trades if t.pnl_pips > 0]
@@ -698,6 +990,7 @@ def _compile_results(
         max_loss_pips=min((t.pnl_pips for t in trades), default=0),
         profit_factor=gross_profit / gross_loss if gross_loss > 0 else float('inf'),
         trades=trades,
+        pending_trades=list(pending_trades or []),
         zones=zones,
     )
 
@@ -745,25 +1038,10 @@ def _backtest_pair(
     """Fetch data and run backtest for a single pair."""
     params_hash = _params_signature(params)
 
-    daily_df = fetch_daily_data(
-        pair_info['ticker'],
-        days=zone_history_days + hourly_days,
-        force_refresh=force_refresh,
-        allow_stale_cache=not force_refresh,
-        client_id=client_id,
-    )
-    hourly_df = fetch_hourly_data(
-        pair_info['ticker'],
-        days=hourly_days,
-        force_refresh=force_refresh,
-        allow_stale_cache=not force_refresh,
-        client_id=client_id,
-    )
-    minute_df = _load_minute_execution_data(
+    daily_df, hourly_df, minute_df = _load_cached_backtest_data(
         pair_info['ticker'],
         hourly_days,
-        force_refresh=force_refresh,
-        client_id=client_id,
+        zone_history_days,
     )
     end = pd.Timestamp.now(tz='UTC')
     start = end - pd.Timedelta(days=int(hourly_days))
@@ -866,6 +1144,12 @@ def _pair_client_id(base_client_id: int | None, offset: int) -> int | None:
     return int(base_client_id) + offset
 
 
+def _backtest_debug_enabled() -> bool:
+    """Whether to emit verbose backtest execution diagnostics."""
+    value = os.getenv('FX_SR_BACKTEST_DEBUG', '').strip().lower()
+    return value in {'1', 'true', 'yes', 'on', 'debug'}
+
+
 def run_all_backtests_parallel(
     params: StrategyParams = None,
     hourly_days: int = 30,
@@ -874,6 +1158,8 @@ def run_all_backtests_parallel(
     force_refresh: bool = False,
     base_client_id: int | None = None,
     run_config_json: str | None = None,
+    debug: bool = False,
+    fetch_workers: int | None = None,
 ) -> Dict[str, BacktestResult]:
     """Run all pair backtests with maximum CPU utilisation.
 
@@ -891,6 +1177,11 @@ def run_all_backtests_parallel(
         pairs = PAIRS
     if base_client_id is None:
         base_client_id = ibkr.TWS_CLIENT_ID
+    debug = bool(debug) or _backtest_debug_enabled()
+
+    def _debug(message: str) -> None:
+        if debug:
+            print(f'    [DEBUG] {message}')
 
     results = {}
     pair_items = [
@@ -917,6 +1208,9 @@ def run_all_backtests_parallel(
     if force_refresh:
         print(f"  Refreshing {total} backtests from IBKR/TWS sequentially{client_id_suffix}...")
         for offset, (pair, info) in enumerate(pair_items):
+            cid = _pair_client_id(base_client_id, offset)
+            _debug(f'phase0: sequential run pair={pair} client_id={cid}')
+            t_pair = time.perf_counter()
             pair, result = _backtest_pair(
                 pair,
                 info,
@@ -924,7 +1218,7 @@ def run_all_backtests_parallel(
                 hourly_days,
                 zone_history_days,
                 force_refresh,
-                client_id=_pair_client_id(base_client_id, offset),
+                client_id=cid,
             )
             done += 1
             if result:
@@ -932,43 +1226,122 @@ def run_all_backtests_parallel(
                 r = result
                 print(f"    [{done}/{total}] {pair}: {r.total_trades} trades, "
                       f"{r.win_rate:.0f}% WR, {r.total_pnl_pips:+.0f} pips")
+                _debug(f'phase0: completed pair={pair} in {time.perf_counter() - t_pair:.2f}s')
             else:
                 print(f"    [{done}/{total}] {pair}: no data")
+                _debug(f'phase0: pair={pair} returned no data')
         return results
 
     cpu_count = os.cpu_count() or 1
-    # Windows caps ProcessPoolExecutor at 61 workers (MAXIMUM_WAIT_OBJECTS - 3)
-    max_pool_workers = min(cpu_count, 61)
+    # Use only as many workers as we have actual pair jobs; avoid oversubscription.
+    # Windows also caps ProcessPoolExecutor at 61 workers (MAXIMUM_WAIT_OBJECTS - 3).
+    max_pool_workers = min(cpu_count, total, 61)
     print(f"  Launching {total} backtests across {max_pool_workers} workers "
           f"(using cache when available{client_id_suffix})...")
+    _debug(f'launch plan: cpu_count={os.cpu_count() or 1} max_pool_workers={max_pool_workers}')
 
     # --- Phase 1: Fetch data for all pairs concurrently ---
-    t_phase = time.time()
+    t_phase = time.perf_counter()
+    t_phase_wall = time.time()
     pair_data: Dict[str, tuple] = {}
-    fetch_workers = min(total, 20)
+    # Thread fan-out is bounded to avoid overwhelming shared DB/IBKR resources.
+    if fetch_workers is not None:
+        if fetch_workers < 1:
+            raise ValueError('fetch_workers must be >= 1')
+        fetch_workers = min(total, fetch_workers)
+        _debug(f'phase1: fetch_workers override from CLI = {fetch_workers} total_pairs={total}')
+    else:
+        env_fetch_workers = os.getenv('FX_SR_FETCH_WORKERS')
+        if env_fetch_workers is not None:
+            try:
+                fetch_workers = max(1, int(env_fetch_workers.strip()))
+            except ValueError:
+                _debug(
+                    f'phase1: invalid FX_SR_FETCH_WORKERS={env_fetch_workers!r}, '
+                    'falling back to automatic sizing'
+                )
+                fetch_workers = None
+        else:
+            fetch_workers = None
+    if fetch_workers is None:
+        fetch_workers = min(total, max_pool_workers, 20)
+    _debug(f'phase1: fetch_workers={fetch_workers} total_pairs={total}')
     try:
+        fetch_futures = {}
+        fetch_started = {}
         with ThreadPoolExecutor(max_workers=fetch_workers) as executor:
-            futures = {
-                executor.submit(
+            for offset, (pair, info) in enumerate(pair_items):
+                cid = _pair_client_id(base_client_id, offset)
+                _debug(f'phase1: submit fetch pair={pair} client_id={cid}')
+                future = executor.submit(
                     _fetch_pair_data_only,
-                    pair, info, hourly_days, zone_history_days,
-                    force_refresh, _pair_client_id(base_client_id, offset),
-                ): pair
-                for offset, (pair, info) in enumerate(pair_items)
-            }
-            for future in as_completed(futures):
-                pair, daily_df, hourly_df, minute_df, l2_snapshots = future.result()
-                if (daily_df is not None and not daily_df.empty
-                        and hourly_df is not None and not hourly_df.empty):
-                    pair_data[pair] = (daily_df, hourly_df, minute_df, l2_snapshots)
-                else:
-                    done += 1
-                    print(f"    [{done}/{total}] {pair}: no data")
+                    pair,
+                    info,
+                    hourly_days,
+                    zone_history_days,
+                    force_refresh,
+                    cid,
+                    debug=debug,
+                )
+                fetch_futures[future] = pair
+                fetch_started[future] = time.perf_counter()
+
+            pending = set(fetch_futures.keys())
+            while pending:
+                done_futures, pending = wait(
+                    pending,
+                    timeout=15,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_futures:
+                    pending_pairs = [fetch_futures[f] for f in list(pending)[:3]]
+                    _debug(
+                        f'phase1: still waiting after {time.perf_counter() - t_phase:.1f}s; '
+                        f'pending={len(pending)} (e.g. {pending_pairs})'
+                    )
+                    continue
+
+                for future in done_futures:
+                    pair = fetch_futures[future]
+                    try:
+                        pair, daily_df, hourly_df, minute_df, l2_snapshots = future.result()
+                    except Exception as exc:
+                        done += 1
+                        if isinstance(exc, BacktestCacheMissingError):
+                            raise BacktestCacheMissingError(f'{pair}: {exc}') from exc
+                        print(f"    [{done}/{total}] {pair}: fetch failed ({type(exc).__name__}: {exc})")
+                        _debug(
+                            f'phase1: fetch failed pair={pair} '
+                            f'elapsed={time.perf_counter() - fetch_started[future]:.2f}s err={type(exc).__name__}: {exc}'
+                        )
+                        continue
+
+                    _debug(
+                        f'phase1: fetch done pair={pair} '
+                        f'rows={len(daily_df)}/{len(hourly_df)}/{len(minute_df)} '
+                        f'elapsed={time.perf_counter() - fetch_started[future]:.2f}s'
+                    )
+                    if (
+                        daily_df is not None
+                        and not daily_df.empty
+                        and hourly_df is not None
+                        and not hourly_df.empty
+                    ):
+                        pair_data[pair] = (daily_df, hourly_df, minute_df, l2_snapshots)
+                        _debug(f'phase1: pair_data stored pair={pair}')
+                    else:
+                        done += 1
+                        print(f"    [{done}/{total}] {pair}: no data")
+                        _debug(f'phase1: no usable data pair={pair}')
     except (OSError, ValueError):
+        _debug('phase1: process pool unavailable; using sequential fetch fallback')
         for offset, (pair, info) in enumerate(pair_items):
             cid = _pair_client_id(base_client_id, offset)
+            t_fetch = time.perf_counter()
+            _debug(f'phase1: sequential fetch pair={pair} client_id={cid}')
             pair, daily_df, hourly_df, minute_df, l2_snapshots = _fetch_pair_data_only(
                 pair, info, hourly_days, zone_history_days, force_refresh, cid,
+                debug=debug,
             )
             if (daily_df is not None and not daily_df.empty
                     and hourly_df is not None and not hourly_df.empty):
@@ -976,15 +1349,20 @@ def run_all_backtests_parallel(
             else:
                 done += 1
                 print(f"    [{done}/{total}] {pair}: no data")
+                _debug(f'phase1: sequential no data pair={pair}')
+            _debug(f'phase1: sequential fetch complete pair={pair} in {time.perf_counter() - t_fetch:.2f}s')
 
     if not pair_data:
         return results
 
-    print(f"    Data fetched in {time.time() - t_phase:.1f}s")
+    print(f"    Data fetched in {time.time() - t_phase_wall:.1f}s")
 
     # --- Phase 2: Check backtest result cache, identify cache misses ---
     params_hash = _params_signature(params)
     pairs_to_compute: Dict[str, tuple] = {}
+    cache_hits = 0
+    cache_misses = 0
+    cache_t = time.perf_counter()
     for pair, (daily_df, hourly_df, minute_df, l2_snapshots) in pair_data.items():
         data_sig = _data_signature(daily_df, hourly_df, minute_df)
         cached = load_backtest_result(pair, params_hash, hourly_days, zone_history_days)
@@ -1011,13 +1389,20 @@ def run_all_backtests_parallel(
                     r = result
                     print(f"    [{done}/{total}] {pair}: {r.total_trades} trades, "
                           f"{r.win_rate:.0f}% WR, {r.total_pnl_pips:+.0f} pips (cached)")
+                    cache_hits += 1
+                    _debug(f'phase2: cache HIT pair={pair}')
                     continue
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     pass
+            else:
+                _debug(f'phase2: cache MISS pair={pair} strategy_version={strategy_version}')
         pairs_to_compute[pair] = (daily_df, hourly_df, minute_df, l2_snapshots, data_sig)
+        cache_misses += 1
 
     if not pairs_to_compute:
+        _debug(f'phase2: completed cache scan hits={cache_hits} misses={cache_misses} in {time.perf_counter() - cache_t:.2f}s')
         return results
+    _debug(f'phase2: completed cache scan hits={cache_hits} misses={cache_misses} in {time.perf_counter() - cache_t:.2f}s')
 
     # --- Phase 3+4: Zone pre-computation + walk-forwards (single process pool) ---
     # Build zone computation tasks so we can saturate all cores.
@@ -1037,6 +1422,7 @@ def run_all_backtests_parallel(
         dates.sort()
         pair_dates[pair] = (daily_df, dates)
         total_zone_dates += len(dates)
+        _debug(f'phase3: pair={pair} unique_dates={len(dates)}')
 
     # Second pass: chunk dates to create ~2x cpu_count tasks for load balancing
     zone_tasks: list = []
@@ -1044,33 +1430,48 @@ def run_all_backtests_parallel(
     for pair, (daily_df, dates) in pair_dates.items():
         for i in range(0, len(dates), dates_per_chunk):
             zone_tasks.append((daily_df, pair, dates[i:i + dates_per_chunk], zone_history_days))
+            if len(zone_tasks) <= 6:
+                chunk = dates[i:i + dates_per_chunk]
+                _debug(f'phase3: zone task pair={pair} chunk={chunk[0]}..{chunk[-1]} size={len(chunk)}')
 
     num_compute = len(pairs_to_compute)
     print(f"    {total_zone_dates} zone detections + {num_compute} walk-forwards "
           f"across {max_pool_workers} workers...")
+    _debug(f'phase3: total_zone_dates={total_zone_dates}, zone_tasks={len(zone_tasks)}, dates_per_chunk={dates_per_chunk}')
 
     zone_cache: Dict[tuple, List[SRZone]] = {}
     try:
         with ProcessPoolExecutor(max_workers=max_pool_workers) as executor:
             # Submit all zone computation tasks
-            zone_futures = [
-                executor.submit(_detect_zones_for_dates, *task)
-                for task in zone_tasks
-            ]
+            zone_futures = []
+            zone_started: Dict = {}
+            for task in zone_tasks:
+                fut = executor.submit(_detect_zones_for_dates, *task)
+                zone_futures.append(fut)
+                zone_started[fut] = time.perf_counter()
+            _debug(f'phase3: submitted {len(zone_futures)} zone tasks')
             for future in as_completed(zone_futures):
+                _debug(f'phase3: zone task complete in {time.perf_counter() - zone_started[future]:.2f}s')
                 zone_cache.update(future.result())
 
             t_zones = time.time()
             print(f"    Zones computed in {t_zones - t_phase:.1f}s")
 
-            # Submit walk-forward tasks (reuses the same pool — no extra startup)
+            # Submit walk-forward tasks (reuses the same pool - no extra startup)
             walk_futures = {}
+            walk_started: Dict = {}
+            per_pair_zone_cache: Dict[str, Dict[tuple, List[SRZone]]] = {}
+            for (pair_key, date_str), zones in zone_cache.items():
+                per_pair_zone_cache.setdefault(pair_key, {})[(pair_key, date_str)] = zones
             for pair, (daily_df, hourly_df, minute_df, l2_snapshots, data_sig) in pairs_to_compute.items():
                 pip = pairs[pair].get('pip', 0.0001)
-                pair_zones = {k: v for k, v in zone_cache.items() if k[0] == pair}
-                walk_futures[executor.submit(
+                pair_zones = per_pair_zone_cache.get(pair, {})
+                fut = executor.submit(
                     run_backtest_fast, hourly_df, pair, params, pair_zones, pip, minute_df, l2_snapshots,
-                )] = (pair, data_sig)
+                )
+                walk_futures[fut] = (pair, data_sig)
+                walk_started[fut] = time.perf_counter()
+            _debug(f'phase4: submitted {len(walk_futures)} walk-forward tasks')
             for future in as_completed(walk_futures):
                 pair, data_sig = walk_futures[future]
                 result = future.result()
@@ -1079,6 +1480,7 @@ def run_all_backtests_parallel(
                 r = result
                 print(f"    [{done}/{total}] {pair}: {r.total_trades} trades, "
                       f"{r.win_rate:.0f}% WR, {r.total_pnl_pips:+.0f} pips")
+                _debug(f'phase4: walk task complete pair={pair} in {time.perf_counter() - walk_started[future]:.2f}s')
                 save_backtest_result(
                     pair=pair,
                     params_hash=params_hash,
@@ -1092,17 +1494,24 @@ def run_all_backtests_parallel(
                 )
     except (OSError, ValueError) as exc:
         print(f"    Process pool unavailable ({exc}); falling back to sequential.")
+        _debug('phase3/4: process pool unavailable; falling back to sequential.')
         for task in zone_tasks:
             zone_cache.update(_detect_zones_for_dates(*task))
         for pair, (daily_df, hourly_df, minute_df, l2_snapshots, data_sig) in pairs_to_compute.items():
             pip = pairs[pair].get('pip', 0.0001)
-            pair_zones = {k: v for k, v in zone_cache.items() if k[0] == pair}
+            t_walk = time.perf_counter()
+            pair_zones = {
+                (k[0], k[1]): v
+                for k, v in zone_cache.items()
+                if k[0] == pair
+            }
             result = run_backtest_fast(hourly_df, pair, params, pair_zones, pip, minute_df, l2_snapshots)
             results[pair] = result
             done += 1
             r = result
             print(f"    [{done}/{total}] {pair}: {r.total_trades} trades, "
                   f"{r.win_rate:.0f}% WR, {r.total_pnl_pips:+.0f} pips")
+            _debug(f'phase4: sequential fallback complete pair={pair} in {time.perf_counter() - t_walk:.2f}s')
             save_backtest_result(
                 pair=pair,
                 params_hash=params_hash,
@@ -1193,6 +1602,7 @@ def _settle_execution_exposures(
     *,
     entry_time: pd.Timestamp,
     state: PortfolioState,
+    margin_tracker: Optional[_MarginTracker] = None,
 ) -> List[_ActiveExecutionExposure]:
     """Apply closed accepted trades to the portfolio state before the next batch."""
 
@@ -1223,7 +1633,34 @@ def _settle_execution_exposures(
                 pnl_amount=exposure.pnl_amount,
             )
         )
+        if margin_tracker is not None:
+            key = f"{exposure.pair}_{id(exposure.trade)}"
+            margin_tracker.remove_position(key)
+            if state.balance is not None:
+                margin_tracker.sync_balance(state.balance)
     return remaining
+
+
+def _compute_trade_commission(
+    pair: str,
+    est_units: int,
+    entry_price: float,
+    account_currency: str,
+    price_lookup,
+    commission_bps: float,
+    commission_min_usd: float,
+) -> float:
+    """Compute round-turn commission in account currency for the portfolio sim."""
+    cost = compute_round_turn_commission(
+        units=est_units,
+        entry_price=entry_price,
+        pair=pair,
+        account_currency=account_currency,
+        price_lookup=price_lookup,
+        commission_bps=commission_bps,
+        commission_min_usd=commission_min_usd,
+    )
+    return float(cost) if cost is not None else 0.0
 
 
 def calculate_execution_aware_compounding_pnl(
@@ -1231,8 +1668,11 @@ def calculate_execution_aware_compounding_pnl(
     starting_balance: float = 1000.0,
     risk_pct: float = 0.05,
     params: StrategyParams = None,
+    account_currency: str = 'GBP',
 ) -> ExecutionAwarePortfolioResult:
     """Run the live-style portfolio admission funnel over historical trades."""
+
+    from .margin import compute_margin_requirement, check_margin_available
 
     if params is None:
         params = StrategyParams()
@@ -1259,11 +1699,12 @@ def calculate_execution_aware_compounding_pnl(
         peak_balance=float(starting_balance),
     )
     active: list[_ActiveExecutionExposure] = []
+    margin_tracker = _MarginTracker(float(starting_balance), account_currency) if params.enforce_margin else None
 
     idx = 0
     while idx < len(candidates):
         batch_time = candidates[idx][1].entry_time
-        active = _settle_execution_exposures(active, entry_time=batch_time, state=state)
+        active = _settle_execution_exposures(active, entry_time=batch_time, state=state, margin_tracker=margin_tracker)
 
         current_balance = (
             float(state.balance)
@@ -1376,6 +1817,34 @@ def calculate_execution_aware_compounding_pnl(
                 _record_execution_skip(skipped, skip_counts, pair_id, trade, 'RISK_BUDGET_FULL')
                 continue
 
+            # Estimate units from risk amount and stop distance
+            stop_dist = abs(trade.entry_price - trade.sl_price)
+            est_units = int(risk_amount / stop_dist) if stop_dist > 0 else 0
+
+            # Margin and minimum-size checks
+            trade_margin = 0.0
+            if margin_tracker is not None:
+                if est_units < params.min_order_units:
+                    _record_execution_skip(skipped, skip_counts, pair_id, trade, 'BELOW_MIN_SIZE')
+                    continue
+
+                # Build a simple price lookup from the batch entry prices
+                batch_prices = {p: t.entry_price for p, t in batch}
+                margin_req = compute_margin_requirement(
+                    pair_id, est_units, trade.entry_price,
+                    account_currency, lambda pid: batch_prices.get(pid),
+                )
+                if margin_req is not None:
+                    allowed_margin, _ = check_margin_available(
+                        margin_req.margin_required,
+                        margin_tracker.available_margin,
+                        params.margin_cushion_pct,
+                    )
+                    if not allowed_margin:
+                        _record_execution_skip(skipped, skip_counts, pair_id, trade, 'MARGIN_INSUFFICIENT')
+                        continue
+                    trade_margin = margin_req.margin_required
+
             for payload in replaced_exposures:
                 prior = planned.pop(payload, None)
                 if prior is None:
@@ -1394,7 +1863,7 @@ def calculate_execution_aware_compounding_pnl(
                     if exposure.payload != payload
                 ]
 
-            planned[batch_idx] = (pair_id, trade, float(risk_amount))
+            planned[batch_idx] = (pair_id, trade, float(risk_amount), trade_margin, est_units)
             planned_reserved_risk += float(risk_amount)
             exposures.append(
                 CorrelationExposure(
@@ -1406,18 +1875,33 @@ def calculate_execution_aware_compounding_pnl(
             )
 
         for batch_idx in sorted(planned):
-            pair_id, trade, risk_amount = planned[batch_idx]
-            pnl_amount = float(risk_amount) * float(trade.pnl_r)
+            pair_id, trade, risk_amount, trade_margin, est_units = planned[batch_idx]
+
+            # Compute commission and deduct from P&L
+            commission_cost = 0.0
+            if est_units > 0 and params.commission_bps > 0:
+                batch_prices = {p: t.entry_price for p, t in batch}
+                commission_cost = _compute_trade_commission(
+                    pair_id, est_units, trade.entry_price,
+                    account_currency, lambda pid, _bp=batch_prices: _bp.get(pid),
+                    params.commission_bps, params.commission_min_usd,
+                )
+            trade.commission_cost = commission_cost
+            pnl_amount = float(risk_amount) * float(trade.pnl_r) - commission_cost
             report_balance += pnl_amount
             trade_log.append((pair_id, trade, float(risk_amount), pnl_amount, report_balance))
-            active.append(
-                _ActiveExecutionExposure(
-                    pair=pair_id,
-                    trade=trade,
-                    risk_amount=float(risk_amount),
-                    pnl_amount=pnl_amount,
-                )
+            exposure = _ActiveExecutionExposure(
+                pair=pair_id,
+                trade=trade,
+                risk_amount=float(risk_amount),
+                pnl_amount=pnl_amount,
+                margin_required=trade_margin,
             )
+            active.append(exposure)
+            if margin_tracker is not None and trade_margin > 0:
+                key = f"{pair_id}_{id(trade)}"
+                margin_tracker.add_position(key, trade_margin)
+                margin_tracker.sync_balance(report_balance)
 
     return ExecutionAwarePortfolioResult(
         trade_log=trade_log,

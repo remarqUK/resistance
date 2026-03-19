@@ -24,6 +24,10 @@ class PositionSizePlan:
     account_currency: str
     risk_per_unit_account: float
     notional_account: float
+    margin_required: Optional[float] = None
+    margin_rate: Optional[float] = None
+    is_odd_lot: Optional[bool] = None
+    estimated_commission: Optional[float] = None
 
 
 def calculate_risk_amount(balance: float, risk_pct: float) -> float:
@@ -101,6 +105,11 @@ def build_position_size_plan(
     risk_pct: float,
     account_currency: str,
     price_lookup: PriceLookup,
+    *,
+    available_margin: Optional[float] = None,
+    margin_cushion_pct: float = 10.0,
+    enforce_margin: bool = True,
+    min_order_units: int = 1000,
 ) -> Optional[PositionSizePlan]:
     """Size a live FX trade from account risk and stop distance.
 
@@ -118,6 +127,10 @@ def build_position_size_plan(
         risk_amount=risk_amount,
         account_currency=account_currency,
         price_lookup=price_lookup,
+        available_margin=available_margin,
+        margin_cushion_pct=margin_cushion_pct,
+        enforce_margin=enforce_margin,
+        min_order_units=min_order_units,
     )
 
 
@@ -157,8 +170,19 @@ def build_position_size_plan_for_risk_amount(
     risk_amount: float,
     account_currency: str,
     price_lookup: PriceLookup,
+    *,
+    available_margin: Optional[float] = None,
+    margin_cushion_pct: float = 10.0,
+    enforce_margin: bool = True,
+    min_order_units: int = 1000,
 ) -> Optional[PositionSizePlan]:
     """Size a live FX trade for an explicit account-currency risk amount."""
+
+    from .margin import (
+        MIN_UNITS_IDEAL_PRO,
+        compute_margin_requirement,
+        clamp_units_to_margin,
+    )
 
     _, quote = split_pair(pair)
     stop_distance = abs(float(entry_price) - float(stop_price))
@@ -179,6 +203,29 @@ def build_position_size_plan_for_risk_amount(
     if units <= 0:
         return None
 
+    # Enforce minimum order size
+    effective_min = max(int(min_order_units), 1) if enforce_margin else 1
+    if units < effective_min:
+        return None
+
+    # Clamp units to available margin budget
+    if enforce_margin and available_margin is not None:
+        units = clamp_units_to_margin(
+            pair, units, entry_price, available_margin,
+            account_currency, price_lookup, margin_cushion_pct,
+        )
+        if units < effective_min:
+            return None
+
+    # Compute margin requirement for the (possibly clamped) units
+    margin_req = compute_margin_requirement(
+        pair, units, entry_price, account_currency, price_lookup,
+    )
+    margin_required = margin_req.margin_required if margin_req else None
+    margin_rate = margin_req.margin_rate if margin_req else None
+    is_odd_lot = (units < MIN_UNITS_IDEAL_PRO) if margin_req else None
+
+    # Recompute notional with potentially-clamped units
     notional_quote = units * float(entry_price)
     notional_account = convert_currency(
         notional_quote,
@@ -188,6 +235,16 @@ def build_position_size_plan_for_risk_amount(
     )
     if notional_account is None:
         return None
+
+    # Estimate round-turn commission
+    from .commission import compute_round_turn_commission
+    estimated_commission = compute_round_turn_commission(
+        units=units,
+        entry_price=float(entry_price),
+        pair=pair,
+        account_currency=account_currency.upper(),
+        price_lookup=price_lookup,
+    )
 
     return PositionSizePlan(
         pair=pair,
@@ -199,6 +256,10 @@ def build_position_size_plan_for_risk_amount(
         account_currency=account_currency.upper(),
         risk_per_unit_account=float(risk_per_unit_account),
         notional_account=float(notional_account),
+        margin_required=margin_required,
+        margin_rate=margin_rate,
+        is_odd_lot=is_odd_lot,
+        estimated_commission=estimated_commission,
     )
 
 

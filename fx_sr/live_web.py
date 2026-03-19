@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timedelta
+import os
+import re
 from pathlib import Path
 import sys
 import threading
@@ -30,21 +32,26 @@ from .live import (
 )
 from .live_history import (
     enqueue_write_async,
+    load_execution_activity,
     record_detected_signals,
     record_exit_signal,
     record_execution_results,
     start_background_writer,
     stop_background_writer,
 )
+from .data import _remaining_days_to_fetch, download_single_interval
+from .db import get_cached_range, init_db
 from .portfolio import build_portfolio_state, closed_trade_summary_from_row, get_entry_block
 from .live_stream import StreamingScanner
 from .positions import calc_pnl_pips, pair_pip, process_hourly_exit_bars, sync_positions
 
 
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
+RUN_PY_PATH = Path(__file__).resolve().parent.parent / 'run.py'
 LOG_LIMIT = 80
 ALERT_LIMIT = 200
 EXECUTION_LIMIT = 200
+_BACKTEST_PROGRESS_RE = re.compile(r'^\s*\[(\d+)\s*/\s*(\d+)\]\s+([A-Za-z0-9]+)')
 
 
 def _configure_windows_event_loop_policy() -> None:
@@ -106,6 +113,30 @@ class LiveDashboardHub:
         self._lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._scan_task: Optional[asyncio.Task] = None
+        self._fill_task: Optional[asyncio.Task] = None
+        self._fill_lock = asyncio.Lock()
+        self._backtest_task: Optional[asyncio.Task] = None
+        self._backtest_lock = asyncio.Lock()
+        self._fill_progress = {
+            'status': 'idle',
+            'items_requested': 0,
+            'items_processed': 0,
+            'attempts': 0,
+            'errors': 0,
+            'remaining': 0,
+            'current_item': None,
+            'message': 'No fill running.',
+            'last_pct_reported': -1,
+        }
+        self._backtest_progress = {
+            'status': 'idle',
+            'items_requested': 0,
+            'items_processed': 0,
+            'current_item': None,
+            'message': 'No backtest running.',
+            'last_pct_reported': -1,
+            'returncode': None,
+        }
         self._scan_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='ibkr-scan',
         )
@@ -158,21 +189,691 @@ class LiveDashboardHub:
             'mode': 'scanner + positions' if self.track_positions else 'scanner',
             'url': self._ws_url(),
             'backfill': dict(self._backfill_progress),
+            'fill': dict(self._fill_progress),
+            'backtest': dict(self._backtest_progress),
             'balance': self.balance,
             'account_currency': self.account_currency,
             'risk_pct': self.risk_pct * 100.0 if self.risk_pct is not None else None,
         }
 
-    def _append_log(self, level: str, message: str) -> None:
+    def _append_log(self, level: str, message: str) -> dict:
         """Append a structured log entry."""
 
-        self._log.append(
-            {
-                'ts': datetime.now().strftime('%H:%M:%S'),
-                'level': level,
+        entry = {
+            'ts': datetime.now().strftime('%H:%M:%S'),
+            'level': level,
+            'message': message,
+        }
+        self._log.append(entry)
+        return entry
+
+    async def _broadcast_log(self, level: str, message: str) -> None:
+        """Append a log entry and push it to connected clients."""
+
+        entry = self._append_log(level, message)
+        await self._broadcast({'type': 'log_entry', 'entry': entry})
+
+    async def _publish_task_progress(
+        self,
+        *,
+        task_key: str,
+        event_type: str,
+        status: str,
+        items_requested: int,
+        items_processed: int,
+        current_item: str | None = None,
+        message: str | None = None,
+        attempts: int | None = None,
+        errors: int | None = None,
+        remaining: int | None = None,
+        returncode: int | None = None,
+        log_level: str = 'info',
+    ) -> None:
+        """Store task progress and notify dashboard clients."""
+
+        if task_key == 'fill':
+            progress = self._fill_progress
+        elif task_key == 'backtest':
+            progress = self._backtest_progress
+        else:
+            raise ValueError(f'Unknown task_key: {task_key}')
+
+        async with self._lock:
+            current_items_requested = max(int(items_requested), 0)
+            current_items_processed = max(int(items_processed), 0)
+            current_pct = (
+                round((current_items_processed / current_items_requested) * 100)
+                if current_items_requested > 0 else 0
+            )
+            previous_status = progress.get('status')
+            previous_pct = int(progress.get('last_pct_reported', -1))
+            should_log_progress = False
+
+            if status == 'running' and current_items_requested > 0 and (
+                current_pct > previous_pct or current_items_processed == current_items_requested
+            ):
+                should_log_progress = True
+                progress['last_pct_reported'] = current_pct
+
+            if status != 'running' and status != previous_status:
+                should_log_progress = True
+
+            task_message = message or progress.get('message', '')
+            progress.update({
+                'status': status,
+                'items_requested': items_requested,
+                'items_processed': items_processed,
+                'current_item': current_item,
+                'message': task_message,
+            })
+            if attempts is not None:
+                progress['attempts'] = attempts
+            if errors is not None:
+                progress['errors'] = errors
+            if remaining is not None:
+                progress['remaining'] = remaining
+            if task_key == 'backtest':
+                progress['returncode'] = returncode
+            elif returncode is not None:
+                progress['returncode'] = returncode
+
+            self.summary = self._build_summary(status=self.summary.get('status', 'starting'))
+            summary = dict(self.summary)
+
+        if should_log_progress and task_message:
+            await self._broadcast_log(log_level, task_message)
+
+        await self._broadcast({'type': event_type, 'summary': summary})
+
+    async def _publish_fill_progress(
+        self,
+        *,
+        status: str,
+        items_requested: int,
+        items_processed: int,
+        attempts: int,
+        errors: int,
+        remaining: int,
+        current_item: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Store fill progress and notify dashboard clients."""
+
+        await self._publish_task_progress(
+            task_key='fill',
+            event_type='fill_progress',
+            status=status,
+            items_requested=items_requested,
+            items_processed=items_processed,
+            attempts=attempts,
+            errors=errors,
+            remaining=remaining,
+            current_item=current_item,
+            message=message,
+        )
+
+    async def _publish_backtest_progress(
+        self,
+        *,
+        status: str,
+        items_requested: int,
+        items_processed: int,
+        current_item: str | None = None,
+        returncode: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Store backtest progress and notify dashboard clients."""
+
+        await self._publish_task_progress(
+            task_key='backtest',
+            event_type='backtest_progress',
+            status=status,
+            items_requested=items_requested,
+            items_processed=items_processed,
+            current_item=current_item,
+            returncode=returncode,
+            message=message,
+            log_level='error' if status == 'error' else 'info',
+        )
+
+    def _backtest_client_id_base(self) -> int:
+        """Return a client-id base dedicated to full backtest reruns."""
+
+        base_client_id = int(self.client_id if self.client_id is not None else ibkr.TWS_CLIENT_ID)
+        if base_client_id == 60:
+            base_client_id += 1000
+        return base_client_id + 3000
+
+    def _build_backtest_cli_args(self) -> list[str]:
+        """Build `python run.py backtest ...` arguments that mirror dashboard params."""
+
+        args: list[str] = []
+
+        args.extend(['--ibkr-client-id', str(self._backtest_client_id_base())])
+
+        if self.zone_history_days:
+            args.extend(['--zone-history', str(self.zone_history_days)])
+
+        if self.balance is not None:
+            args.extend(['--balance', str(self.balance)])
+        if self.risk_pct is not None:
+            args.extend(['--risk-pct', str(self.risk_pct * 100.0)])
+
+        if self.params:
+            args.extend(['--rr-ratio', str(self.params.rr_ratio)])
+            args.extend(['--sl-buffer', str(self.params.sl_buffer_pct)])
+            args.extend(['--early-exit', str(self.params.early_exit_r)])
+            args.extend(['--cooldown-bars', str(self.params.cooldown_bars)])
+            args.extend(['--min-entry-body', str(self.params.min_entry_candle_body_pct)])
+            args.extend(['--momentum-lookback', str(self.params.momentum_lookback)])
+            args.extend(['--max-correlated-trades', str(self.params.max_correlated_trades)])
+            args.extend(['--spread-pips', str(self.params.spread_pips)])
+            args.extend(['--stop-slippage-pips', str(self.params.stop_slippage_pips)])
+            if not self.params.use_time_filters:
+                args.append('--no-time-filters')
+            if not self.params.use_pair_direction_filter:
+                args.append('--no-pair-direction-filter')
+            args.append('--blocked-hours')
+            args.extend([str(int(h)) for h in sorted(self.params.blocked_hours)])
+            args.append('--blocked-days')
+            args.extend([str(int(d)) for d in sorted(self.params.blocked_days)])
+
+        pair_ids = sorted(self.pairs.keys())
+        if len(pair_ids) == 1:
+            args.extend(['--pair', pair_ids[0]])
+
+        return args
+
+    def _parse_backtest_line(self, line: str) -> tuple[int, int, str] | None:
+        """Extract [done/total] and current pair from a progress line."""
+
+        match = _BACKTEST_PROGRESS_RE.match(line or '')
+        if not match:
+            return None
+        current = int(match.group(1))
+        total = int(match.group(2))
+        pair = match.group(3)
+        return current, total, pair
+
+    async def _run_backtest_task(self) -> dict[str, object]:
+        """Run the full backtest pipeline as an async subprocess task."""
+
+        command = [sys.executable, str(RUN_PY_PATH), 'backtest', *self._build_backtest_cli_args()]
+        await self._publish_backtest_progress(
+            status='starting',
+            items_requested=0,
+            items_processed=0,
+            message='Starting backtest rerun via CLI.',
+        )
+
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(RUN_PY_PATH.parent),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception as exc:
+            return {
+                'status': 'error',
+                'items_requested': 0,
+                'items_processed': 0,
+                'returncode': 1,
+                'message': f'Unable to launch backtest: {exc}',
+            }
+
+        items_requested = 0
+        items_processed = 0
+        current_item = None
+
+        try:
+            await self._publish_backtest_progress(
+                status='running',
+                items_requested=items_requested,
+                items_processed=items_processed,
+                current_item=current_item,
+                message='Backtest running; waiting for progress...',
+            )
+            assert process.stdout is not None
+            while True:
+                raw_line = await process.stdout.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode('utf-8', errors='replace').strip()
+                if not line:
+                    continue
+                parsed = self._parse_backtest_line(line)
+                if parsed is not None:
+                    done, total, pair = parsed
+                    items_requested = total
+                    items_processed = done
+                    current_item = pair
+                    await self._publish_backtest_progress(
+                        status='running',
+                        items_requested=items_requested,
+                        items_processed=items_processed,
+                        current_item=current_item,
+                        message=line,
+                    )
+                else:
+                    for fallback in (
+                        'Completed in',
+                        'Unable to fetch',
+                    ):
+                        if line.startswith(fallback):
+                            await self._publish_backtest_progress(
+                                status='running',
+                                items_requested=items_requested,
+                                items_processed=items_processed,
+                                current_item=current_item,
+                                message=line,
+                            )
+                            break
+
+            returncode = await process.wait()
+            if returncode == 0:
+                status = 'complete'
+                message = f'Backtest rerun complete. Processed {items_processed}/{items_requested} pair(s).'
+                level = 'success'
+            else:
+                status = 'error'
+                message = f'Backtest rerun failed with return code {returncode}.'
+                level = 'error'
+            await self._publish_backtest_progress(
+                status=status,
+                items_requested=items_requested,
+                items_processed=items_processed,
+                current_item=current_item,
+                returncode=returncode,
+                message=message,
+            )
+            return {
+                'status': status,
+                'items_requested': items_requested,
+                'items_processed': items_processed,
+                'returncode': returncode,
                 'message': message,
             }
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            await self._publish_backtest_progress(
+                status='canceled',
+                items_requested=items_requested,
+                items_processed=items_processed,
+                current_item=current_item,
+                message='Backtest rerun canceled.',
+            )
+            return {
+                'status': 'canceled',
+                'items_requested': items_requested,
+                'items_processed': items_processed,
+                'returncode': process.returncode if process else None,
+                'message': 'Backtest rerun canceled.',
+            }
+        except Exception as exc:
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
+            error_message = f'Backtest rerun failed: {exc}'
+            await self._publish_backtest_progress(
+                status='error',
+                items_requested=items_requested,
+                items_processed=items_processed,
+                current_item=current_item,
+                message=error_message,
+                returncode=process.returncode if process else 1,
+            )
+            return {
+                'status': 'error',
+                'items_requested': items_requested,
+                'items_processed': items_processed,
+                'returncode': process.returncode if process else 1,
+                'message': error_message,
+            }
+
+    async def _on_backtest_done(self, task: asyncio.Task) -> None:
+        """Finalize backtest-task state and emit summary logs."""
+
+        self._pending_tasks.discard(task)
+        async with self._backtest_lock:
+            if self._backtest_task is task:
+                self._backtest_task = None
+
+        try:
+            result = task.result()
+        except asyncio.CancelledError:
+            await self._publish_backtest_progress(
+                status='canceled',
+                items_requested=self._backtest_progress.get('items_requested', 0),
+                items_processed=self._backtest_progress.get('items_processed', 0),
+                message='Backtest rerun canceled.',
+            )
+            await self._broadcast_log('warning', 'Backtest rerun canceled.')
+            return
+        except Exception as exc:
+            await self._publish_backtest_progress(
+                status='error',
+                items_requested=self._backtest_progress.get('items_requested', 0),
+                items_processed=self._backtest_progress.get('items_processed', 0),
+                message=f'Backtest rerun failed: {exc}',
+            )
+            await self._broadcast_log('error', f'Backtest rerun failed: {exc}')
+            return
+
+        status = result.get('status', 'incomplete')
+        message = result.get('message', 'Backtest rerun finished.')
+        if status == 'complete':
+            await self._broadcast_log('success', message)
+        elif status == 'running':
+            await self._broadcast_log('warning', message)
+        else:
+            await self._broadcast_log('warning', message)
+
+    async def run_backtest(self) -> dict[str, object]:
+        """Kick off a full backtest rerun in a background worker."""
+
+        async with self._backtest_lock:
+            if self._backtest_task is not None and not self._backtest_task.done():
+                return {
+                    'status': 'running',
+                    'message': 'Backtest rerun already in progress.',
+                    'items_requested': 0,
+                    'items_processed': 0,
+                    'returncode': None,
+                }
+
+            self._backtest_task = asyncio.create_task(self._run_backtest_task())
+            backtest_task = self._backtest_task
+            self._pending_tasks.add(backtest_task)
+            backtest_task.add_done_callback(
+                lambda task: asyncio.create_task(self._on_backtest_done(task))
+            )
+
+        await self._broadcast_log('info', 'Backtest rerun requested.')
+        return {
+            'status': 'started',
+            'message': 'Backtest rerun started in background.',
+            'items_requested': 0,
+            'items_processed': 0,
+            'returncode': None,
+        }
+
+    def _fill_client_id_base(self) -> int:
+        """Return a client-id base dedicated to cache fills."""
+
+        base_client_id = int(self.client_id if self.client_id is not None else ibkr.TWS_CLIENT_ID)
+        if base_client_id == 60:
+            base_client_id += 1000
+        return base_client_id + 2000
+
+    def _find_fill_gaps(self, target_days: int) -> list[tuple[str, dict, str]]:
+        """Find cache gaps for supported intervals."""
+
+        if target_days <= 0:
+            return []
+
+        min_rows = {
+            '1d': int(target_days * 0.7),
+            '1h': int(target_days * 16),
+            '1m': int(target_days * 1000),
+        }
+        now = pd.Timestamp.now(tz='UTC')
+        gaps: list[tuple[str, dict, str]] = []
+
+        for pair_id, pair_info in self.pairs.items():
+            ticker = pair_info['ticker']
+            for interval in ('1d', '1h', '1m'):
+                cached_range = get_cached_range(ticker, interval)
+                if cached_range is None:
+                    gaps.append((pair_id, pair_info, interval))
+                    continue
+
+                first_ts, last_ts, rows = cached_range
+                if int(rows) < min_rows.get(interval, 0):
+                    gaps.append((pair_id, pair_info, interval))
+                    continue
+
+                fetch_days = _remaining_days_to_fetch(
+                    interval=interval,
+                    requested_days=target_days,
+                    cached_range=(
+                        first_ts,
+                        last_ts,
+                        int(rows),
+                    ),
+                    now=now,
+                )
+                if fetch_days > 0:
+                    gaps.append((pair_id, pair_info, interval))
+
+        return gaps
+
+    async def _run_fill_task(self, target_days: int) -> dict[str, object]:
+        """Run cache fill work and return a compact status payload."""
+
+        init_db()
+        gaps = self._find_fill_gaps(target_days)
+        if not gaps:
+            await self._publish_fill_progress(
+                status='complete',
+                items_requested=0,
+                items_processed=0,
+                attempts=0,
+                errors=0,
+                remaining=0,
+                message='No cache gaps detected.',
+            )
+            return {
+                'status': 'complete',
+                'items_processed': 0,
+                'items_requested': 0,
+                'attempts': 0,
+                'errors': 0,
+                'message': 'No cache gaps detected.',
+            }
+
+        work_items = [(pair_id, pair_info, interval) for pair_id, pair_info, interval in gaps]
+        max_workers = min(3, len(work_items))
+        base_fill_client_id = self._fill_client_id_base()
+        max_retries = 3
+        slot_lock = threading.Lock()
+        client_slots = [0]
+
+        def _thread_client_id() -> int:
+            thread = threading.current_thread()
+            slot = getattr(thread, '_fill_client_id_slot', None)
+            if slot is None:
+                with slot_lock:
+                    slot = client_slots[0]
+                    client_slots[0] += 1
+                thread._fill_client_id_slot = slot
+            return base_fill_client_id + int(slot)
+
+        def _run_work_item(pair_id: str, pair_info: dict, interval: str) -> int:
+            client_id = _thread_client_id()
+            return download_single_interval(pair_id, pair_info, interval, target_days, client_id=client_id)
+
+        pending = list(work_items)
+        total_errors = 0
+        attempt = 0
+        total_items_processed = 0
+        total_attempted = len(work_items)
+
+        await self._publish_fill_progress(
+            status='running',
+            items_requested=total_attempted,
+            items_processed=0,
+            attempts=0,
+            errors=0,
+            remaining=total_attempted,
+            message=f'Fill started ({total_attempted} items).',
         )
+
+        while pending and attempt < max_retries:
+            attempt += 1
+            if attempt > 1:
+                await asyncio.sleep(5)
+
+            failed: list[tuple[str, dict, str]] = []
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_run_work_item, pair_id, pair_info, interval): (pair_id, pair_info, interval)
+                    for pair_id, pair_info, interval in pending
+                }
+
+                for future in as_completed(futures):
+                    pair_id, pair_info, interval = futures[future]
+                    try:
+                        _ = future.result()
+                        total_items_processed += 1
+                    except Exception:
+                        failed.append((pair_id, pair_info, interval))
+                        total_errors += 1
+                    await self._publish_fill_progress(
+                        status='running',
+                        items_requested=total_attempted,
+                        items_processed=total_items_processed,
+                        attempts=attempt,
+                        errors=total_errors,
+                        remaining=max(total_attempted - total_items_processed, 0),
+                        current_item=f'{pair_id}:{interval}',
+                        message=f'Fill attempt {attempt}/{max_retries}: {total_items_processed}/{total_attempted} complete.',
+                    )
+
+            pending = failed
+            await self._publish_fill_progress(
+                status='running',
+                items_requested=total_attempted,
+                items_processed=total_items_processed,
+                attempts=attempt,
+                errors=total_errors,
+                remaining=len(pending),
+                current_item=None,
+                message=f'Fill attempt {attempt}/{max_retries} complete. Remaining: {len(pending)}.',
+            )
+
+        status = 'incomplete' if pending else 'complete'
+        final_message = (
+            f'Fill {status} in {attempt} attempt(s). '
+            f'Processed {total_items_processed}/{total_attempted} item(s), '
+            f'errors: {total_errors}, remaining: {len(pending)}.'
+        )
+        await self._publish_fill_progress(
+            status=status,
+            items_requested=total_attempted,
+            items_processed=total_items_processed,
+            attempts=attempt,
+            errors=total_errors,
+            remaining=len(pending),
+            message=final_message,
+        )
+        return {
+            'status': status,
+            'items_processed': total_items_processed,
+            'items_requested': total_attempted,
+            'attempts': attempt,
+            'errors': total_errors,
+            'remaining': len(pending),
+            'message': final_message,
+        }
+
+    async def _on_fill_done(self, task: asyncio.Task) -> None:
+        """Finalize fill-task state and emit summary logs."""
+
+        self._pending_tasks.discard(task)
+        async with self._fill_lock:
+            if self._fill_task is task:
+                self._fill_task = None
+
+        try:
+            result = task.result()
+        except asyncio.CancelledError:
+            await self._publish_fill_progress(
+                status='canceled',
+                items_requested=self._fill_progress.get('items_requested', 0),
+                items_processed=self._fill_progress.get('items_processed', 0),
+                attempts=self._fill_progress.get('attempts', 0),
+                errors=self._fill_progress.get('errors', 0),
+                remaining=self._fill_progress.get('remaining', 0),
+                message='Cache fill canceled.',
+            )
+            await self._broadcast_log('warning', 'Cache fill canceled.')
+            return
+        except Exception as exc:
+            await self._publish_fill_progress(
+                status='error',
+                items_requested=self._fill_progress.get('items_requested', 0),
+                items_processed=self._fill_progress.get('items_processed', 0),
+                attempts=self._fill_progress.get('attempts', 0),
+                errors=self._fill_progress.get('errors', 0),
+                remaining=self._fill_progress.get('remaining', 0),
+                message=f'Cache fill failed: {exc}',
+            )
+            await self._broadcast_log('error', f'Cache fill failed: {exc}')
+            return
+
+        status = result.get('status', 'incomplete')
+        remaining = int(result.get('remaining', 0))
+        if status == 'complete' and remaining == 0:
+            level = 'success'
+            message = result.get('message', 'Cache fill complete.')
+        elif status == 'running':
+            level = 'warning'
+            message = result.get('message', 'Cache fill already running.')
+        else:
+            level = 'warning'
+            message = result.get(
+                'message',
+                'Cache fill ended with remaining gaps. Consider re-running.',
+            )
+        await self._broadcast_log(level, message)
+
+    async def fill_cache(self, *, target_days: int) -> dict[str, object]:
+        """Kick off a cache-fill run in a background worker and return status."""
+
+        if target_days <= 0:
+            return {
+                'status': 'invalid',
+                'message': 'target_days must be greater than 0',
+                'items_requested': 0,
+                'items_processed': 0,
+                'attempts': 0,
+                'errors': 0,
+                'remaining': 0,
+            }
+
+        async with self._fill_lock:
+            if self._fill_task is not None and not self._fill_task.done():
+                return {
+                    'status': 'running',
+                    'message': 'Cache fill already in progress.',
+                    'items_requested': 0,
+                    'items_processed': 0,
+                    'attempts': 0,
+                    'errors': 0,
+                    'remaining': 0,
+                }
+
+            self._fill_task = asyncio.create_task(self._run_fill_task(target_days))
+            fill_task = self._fill_task
+            self._pending_tasks.add(fill_task)
+            fill_task.add_done_callback(
+                lambda task: asyncio.create_task(self._on_fill_done(task))
+            )
+
+        await self._broadcast_log('info', f'Cache fill requested for {target_days} day(s).')
+        return {
+            'status': 'started',
+            'message': 'Cache fill started in background.',
+            'items_requested': 0,
+            'items_processed': 0,
+            'attempts': 0,
+            'errors': 0,
+            'remaining': 0,
+        }
 
     def _serialize_signal(self, signal, size_plan) -> dict:
         """Serialize a signal for the browser."""
@@ -286,10 +987,121 @@ class LiveDashboardHub:
                 'units': result.units,
                 'status': result.status,
                 'order_id': result.order_id,
+                'submitted_entry_price': result.submitted_entry_price,
+                'submitted_tp_price': result.submitted_tp_price,
+                'submitted_sl_price': result.submitted_sl_price,
+                'time': (
+                    pd.Timestamp(result.quote_time).isoformat()
+                    if result.quote_time is not None
+                    else None
+                ),
                 'note': result.note,
             }
             for result in self._execution_results
         ]
+
+    def _hydrate_execution_activity(self) -> None:
+        """Restore recent execution activity from the detected-signal history table."""
+
+        rows = load_execution_activity(limit=EXECUTION_LIMIT)
+        self._execution_results.clear()
+        pending_pairs: set[str] = set()
+        active_statuses = {'SUBMITTED', 'PRESUBMITTED', 'FILLED', 'PARTIAL', 'OPEN', 'EXIT_SIGNAL'}
+
+        for row in reversed(rows):
+            units_value = row.get('planned_units')
+            if units_value in (None, ''):
+                units_value = row.get('open_units')
+            units = int(abs(float(units_value or 0)))
+            order_id = row.get('order_id')
+            status = str(row.get('status') or '').upper() or 'UNKNOWN'
+            if row.get('pair') and order_id is not None and not row.get('closed_at') and status in active_statuses:
+                pending_pairs.add(str(row['pair']))
+            self._execution_results.append(
+                ExecutionResult(
+                    pair=str(row.get('pair') or ''),
+                    direction=str(row.get('direction') or ''),
+                    units=units,
+                    status=status,
+                    order_id=int(order_id) if order_id is not None else None,
+                    take_profit_order_id=(
+                        int(row['take_profit_order_id'])
+                        if row.get('take_profit_order_id') is not None
+                        else None
+                    ),
+                    stop_loss_order_id=(
+                        int(row['stop_loss_order_id'])
+                        if row.get('stop_loss_order_id') is not None
+                        else None
+                    ),
+                    avg_fill_price=(
+                        float(row['opened_price'])
+                        if row.get('opened_price') is not None
+                        else None
+                    ),
+                    filled_units=(
+                        int(abs(float(row['open_units'])))
+                        if row.get('open_units') is not None
+                        else None
+                    ),
+                    remaining_units=(
+                        int(abs(float(row['remaining_units'])))
+                        if row.get('remaining_units') is not None
+                        else None
+                    ),
+                    broker_status=(
+                        str(row.get('broker_order_status'))
+                        if row.get('broker_order_status') is not None
+                        else None
+                    ),
+                    submitted_entry_price=(
+                        float(row['submitted_entry_price'])
+                        if row.get('submitted_entry_price') is not None
+                        else None
+                    ),
+                    submitted_tp_price=(
+                        float(row['submitted_tp_price'])
+                        if row.get('submitted_tp_price') is not None
+                        else None
+                    ),
+                    submitted_sl_price=(
+                        float(row['submitted_sl_price'])
+                        if row.get('submitted_sl_price') is not None
+                        else None
+                    ),
+                    submit_bid=(
+                        float(row['submit_bid'])
+                        if row.get('submit_bid') is not None
+                        else None
+                    ),
+                    submit_ask=(
+                        float(row['submit_ask'])
+                        if row.get('submit_ask') is not None
+                        else None
+                    ),
+                    submit_spread=(
+                        float(row['submit_spread'])
+                        if row.get('submit_spread') is not None
+                        else None
+                    ),
+                    quote_source=(
+                        str(row.get('quote_source'))
+                        if row.get('quote_source') is not None
+                        else None
+                    ),
+                    quote_time=(
+                        pd.Timestamp(row['quote_time'])
+                        if row.get('quote_time') is not None
+                        else (
+                            pd.Timestamp(row['executed_at'])
+                            if row.get('executed_at') is not None
+                            else None
+                        )
+                    ),
+                    note=str(row.get('note') or ''),
+                )
+            )
+        self._tick_pending_pairs = pending_pairs
 
     def _export_state(self) -> dict:
         """Serialize the entire dashboard state."""
@@ -1002,6 +1814,12 @@ class LiveDashboardHub:
 
         # Phase 1: backfill historical data with progress
         await self._run_backfill()
+        await self._loop.run_in_executor(
+            self._scan_executor,
+            self._hydrate_execution_activity,
+        )
+        async with self._lock:
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
 
         # Phase 2: start real-time bar streaming
         self._quote_thread = threading.Thread(
@@ -1113,14 +1931,8 @@ def _dashboard_url(port: int) -> str:
     return f'http://127.0.0.1:{port}/'
 
 
-def _is_localhost_host(host: str) -> bool:
-    """Return True for hostnames that should be treated as equivalent locally."""
-
-    return host in {'localhost', '127.0.0.1', '::1', '[::1]'}
-
-
 def _origin_allowed(origin: str, request: web.Request) -> bool:
-    """Relax origin validation for equivalent localhost hostnames."""
+    """Check whether a request origin exactly matches the expected host."""
 
     expected_origin = f'{request.scheme}://{request.host}'
 
@@ -1145,10 +1957,7 @@ def _origin_allowed(origin: str, request: web.Request) -> bool:
     origin_host = parsed_origin.hostname.lower()
     expected_host = parsed_expected.hostname.lower()
 
-    if origin_host == expected_host:
-        return True
-
-    return _is_localhost_host(origin_host) and _is_localhost_host(expected_host)
+    return origin_host == expected_host
 
 
 def _validate_dashboard_request(request: web.Request) -> None:
@@ -1187,6 +1996,56 @@ async def _set_execution_mode(request: web.Request) -> web.Response:
     except RuntimeError as exc:
         return web.json_response({'error': str(exc)}, status=409)
     return web.json_response({'state': state})
+
+
+async def _fill_cache(request: web.Request) -> web.Response:
+    """Fill any cache gaps for configured pairs and intervals."""
+
+    _validate_dashboard_request(request)
+
+    raw_days = request.query.get('days', '365')
+    try:
+        target_days = int(raw_days)
+    except ValueError:
+        return web.json_response({'error': 'Invalid "days" value; must be an integer'}, status=400)
+
+    hub: LiveDashboardHub = request.app["hub"]
+    result = await hub.fill_cache(target_days=target_days)
+    if result.get('status') == 'running':
+        return web.json_response(result, status=409)
+    if result.get('status') == 'invalid':
+        return web.json_response(result, status=400)
+    return web.json_response(result)
+
+
+async def _rerun_backtest(request: web.Request) -> web.Response:
+    """Re-run a full backtest using dashboard configuration."""
+
+    _validate_dashboard_request(request)
+
+    hub: LiveDashboardHub = request.app["hub"]
+    result = await hub.run_backtest()
+    if result.get('status') == 'running':
+        return web.json_response(result, status=409)
+    if result.get('status') == 'invalid':
+        return web.json_response(result, status=400)
+    return web.json_response(result)
+
+
+def _register_fill_route(app: web.Application, handler: object) -> None:
+    """Register all known dashboard fill routes for compatibility."""
+
+    fill_routes = [
+        '/api/fill',
+        '/api/fill/',
+        '/api/fill-cache',
+        '/fill',
+        '/fill/',
+        '/fill-cache',
+        '/fill_cache',
+    ]
+    for route in fill_routes:
+        app.router.add_route('POST', route, handler)
 
 
 async def _shutdown(request: web.Request) -> web.Response:
@@ -1278,6 +2137,8 @@ def run_live_web_app(
         handle_backtest_trades_page,
         handle_backtest_diary_api,
         handle_backtest_diary_page,
+        handle_trade_log_page,
+        handle_trade_log_api,
     )
 
     app.router.add_get('/', _index)
@@ -1285,12 +2146,19 @@ def run_live_web_app(
     app.router.add_get('/chart', _chart_page)
     app.router.add_get('/api/chart-data', _chart_data)
     app.router.add_post('/api/execution-mode', _set_execution_mode)
+    _register_fill_route(app, _fill_cache)
     app.router.add_post('/api/shutdown', _shutdown)
+    app.router.add_post('/api/backtest-rerun', _rerun_backtest)
+    app.router.add_post('/backtest-rerun', _rerun_backtest)
+    app.router.add_post('/api/backtest-rerun/', _rerun_backtest)
+    app.router.add_post('/backtest-rerun/', _rerun_backtest)
     app.router.add_get('/replay', handle_replay_page)
     app.router.add_get('/backtest-trades', handle_backtest_trades_page)
     app.router.add_get('/api/backtest/trades', handle_backtest_trades_api)
     app.router.add_get('/backtest-diary', handle_backtest_diary_page)
     app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)
+    app.router.add_get('/trade-log', handle_trade_log_page)
+    app.router.add_get('/api/trade-log', handle_trade_log_api)
     app.router.add_get('/api/replay', handle_replay)
     app.router.add_get('/api/replay/bars', handle_replay_bars)
     app.router.add_get('/api/replay/dates', handle_replay_dates)

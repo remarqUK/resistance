@@ -1,5 +1,6 @@
 import asyncio
 import json
+import contextlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -172,6 +173,71 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hub._alerts[0]['exit_reason'], '5')
         self.assertEqual(self.hub._execution_results[0].status, 'status-7')
 
+    async def test_hydrate_execution_activity_restores_recent_db_rows(self):
+        rows = [
+            {
+                'pair': 'GBPUSD',
+                'direction': 'SHORT',
+                'planned_units': 9000,
+                'open_units': None,
+                'status': 'FAILED',
+                'order_id': None,
+                'take_profit_order_id': None,
+                'stop_loss_order_id': None,
+                'opened_price': None,
+                'remaining_units': None,
+                'broker_order_status': None,
+                'submitted_entry_price': None,
+                'submitted_tp_price': None,
+                'submitted_sl_price': None,
+                'submit_bid': None,
+                'submit_ask': None,
+                'submit_spread': None,
+                'quote_source': None,
+                'quote_time': None,
+                'note': 'broker rejected',
+                'closed_at': None,
+            },
+            {
+                'pair': 'EURUSD',
+                'direction': 'LONG',
+                'planned_units': 12000,
+                'open_units': 4000,
+                'status': 'PARTIAL',
+                'order_id': 101,
+                'take_profit_order_id': 102,
+                'stop_loss_order_id': 103,
+                'opened_price': 1.1002,
+                'remaining_units': 8000,
+                'broker_order_status': 'Submitted',
+                'submitted_entry_price': 1.1,
+                'submitted_tp_price': 1.11,
+                'submitted_sl_price': 1.095,
+                'submit_bid': 1.0998,
+                'submit_ask': 1.1,
+                'submit_spread': 0.0002,
+                'quote_source': 'l2',
+                'quote_time': '2026-03-18T15:00:00+00:00',
+                'note': 'partial fill 4,000/12,000',
+                'closed_at': None,
+            },
+        ]
+
+        with patch('fx_sr.live_web.load_execution_activity', return_value=rows):
+            self.hub._hydrate_execution_activity()
+
+        self.assertEqual(len(self.hub._execution_results), 2)
+        self.assertEqual(self.hub._execution_results[0].pair, 'EURUSD')
+        self.assertEqual(self.hub._execution_results[0].status, 'PARTIAL')
+        self.assertEqual(self.hub._execution_results[0].order_id, 101)
+        self.assertEqual(
+            self.hub._serialize_executions()[0]['time'],
+            '2026-03-18T15:00:00+00:00',
+        )
+        self.assertEqual(self.hub._execution_results[1].pair, 'GBPUSD')
+        self.assertEqual(self.hub._execution_results[1].status, 'FAILED')
+        self.assertEqual(self.hub._tick_pending_pairs, {'EURUSD'})
+
     async def test_serialize_positions_marks_partial_signal_status(self):
         self.hub._tracked['EURUSD:LONG']['signal_status'] = 'PARTIAL'
 
@@ -216,6 +282,12 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state['summary']['execution_paused'])
         self.assertEqual(state['log'][-1]['message'], 'New trade execution paused from dashboard')
         tradable_hub._broadcast.assert_awaited_once()
+
+    def test_build_summary_includes_fill_progress(self):
+        summary = self.hub._build_summary(status='live')
+        self.assertIn('fill', summary)
+        self.assertEqual(summary['fill']['status'], 'idle')
+        self.assertEqual(summary['fill']['items_requested'], 0)
 
     async def test_set_execution_paused_rejects_scan_only_mode(self):
         with self.assertRaisesRegex(RuntimeError, 'scan-only mode'):
@@ -342,6 +414,111 @@ class ExecutionModeEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertTrue(payload['state']['summary']['execution_paused'])
         self.assertFalse(payload['state']['summary']['execution_enabled'])
+
+
+class BacktestRerunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backtest_client_id_base_offsets_live_60(self):
+        hub = LiveDashboardHub(
+            pairs={
+                'EURUSD': {
+                    'name': 'EUR/USD',
+                    'ticker': 'EURUSD=X',
+                    'decimals': 5,
+                },
+            },
+            params=StrategyParams(),
+            interval=60,
+            zone_history_days=30,
+            track_positions=True,
+            balance=10000.0,
+            risk_pct=0.01,
+            account_currency='USD',
+            execute_orders=False,
+            strategy_label=None,
+            client_id=60,
+            port=8080,
+        )
+        try:
+            self.assertEqual(hub._backtest_client_id_base(), 4060)
+        finally:
+            hub._scan_executor.shutdown(wait=True)
+
+    async def test_build_backtest_cli_args_include_dashboard_settings(self):
+        hub = LiveDashboardHub(
+            pairs={
+                'EURUSD': {
+                    'name': 'EUR/USD',
+                    'ticker': 'EURUSD=X',
+                    'decimals': 5,
+                },
+            },
+            params=StrategyParams(),
+            interval=60,
+            zone_history_days=45,
+            track_positions=True,
+            balance=1000.0,
+            risk_pct=0.02,
+            account_currency='USD',
+            execute_orders=False,
+            strategy_label=None,
+            client_id=12,
+            port=8080,
+        )
+        try:
+            args = hub._build_backtest_cli_args()
+            self.assertIn('--ibkr-client-id', args)
+            client_idx = args.index('--ibkr-client-id')
+            self.assertEqual(args[client_idx + 1], '3012')
+            self.assertIn('--zone-history', args)
+            zone_idx = args.index('--zone-history')
+            self.assertEqual(args[zone_idx + 1], '45')
+            self.assertIn('--pair', args)
+            pair_idx = args.index('--pair')
+            self.assertEqual(args[pair_idx + 1], 'EURUSD')
+            self.assertIn('--risk-pct', args)
+            risk_idx = args.index('--risk-pct')
+            self.assertEqual(args[risk_idx + 1], '2.0')
+            self.assertIn('--balance', args)
+            balance_idx = args.index('--balance')
+            self.assertEqual(args[balance_idx + 1], '1000.0')
+            self.assertIn('--blocked-hours', args)
+            blocked_hours_idx = args.index('--blocked-hours')
+            self.assertIn('2', args[blocked_hours_idx + 1 : blocked_hours_idx + 3])
+        finally:
+            hub._scan_executor.shutdown(wait=True)
+
+    async def test_run_backtest_rejects_concurrent_invocations(self):
+        hub = LiveDashboardHub(
+            pairs={
+                'EURUSD': {
+                    'name': 'EUR/USD',
+                    'ticker': 'EURUSD=X',
+                    'decimals': 5,
+                },
+            },
+            params=StrategyParams(),
+            interval=60,
+            zone_history_days=30,
+            track_positions=True,
+            balance=10000.0,
+            risk_pct=0.01,
+            account_currency='USD',
+            execute_orders=False,
+            strategy_label=None,
+            client_id=12,
+            port=8080,
+        )
+        running = asyncio.create_task(asyncio.sleep(30))
+        hub._backtest_task = running
+        try:
+            result = await hub.run_backtest()
+            self.assertEqual(result['status'], 'running')
+            self.assertIn('already', result['message'])
+        finally:
+            running.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
+            hub._scan_executor.shutdown(wait=True)
 
 
 class WindowsEventLoopPolicyTests(unittest.TestCase):

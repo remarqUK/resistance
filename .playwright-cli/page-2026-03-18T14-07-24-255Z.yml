@@ -1,0 +1,406 @@
+- generic [ref=e2]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: FX support / resistance
+      - heading "Strategy Replay" [level=1] [ref=e7]
+    - link "Back to Live Board" [ref=e8] [cursor=pointer]:
+      - /url: /
+  - generic [ref=e9]:
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]: Pair
+        - combobox "Pair" [ref=e13]:
+          - option "AUDCAD"
+          - option "AUDJPY"
+          - option "AUDNZD"
+          - option "AUDUSD"
+          - option "CADJPY"
+          - option "CHFJPY"
+          - option "EURAUD"
+          - option "EURCAD"
+          - option "EURCHF"
+          - option "EURGBP"
+          - option "EURJPY"
+          - option "EURUSD"
+          - option "GBPAUD"
+          - option "GBPCAD"
+          - option "GBPCHF" [selected]
+          - option "GBPJPY"
+          - option "GBPUSD"
+          - option "NZDJPY"
+          - option "NZDUSD"
+          - option "USDCAD"
+          - option "USDCHF"
+          - option "USDJPY"
+      - generic [ref=e14]:
+        - generic [ref=e15]: Date
+        - textbox "Date" [ref=e16]: 2026-03-18
+      - generic [ref=e17]:
+        - generic [ref=e18]: Profile
+        - combobox "Profile" [ref=e19]:
+          - option "optimized"
+          - option "source"
+          - option "balanced"
+          - option "high_volume" [selected]
+          - option "aggressive"
+      - generic [ref=e20]:
+        - generic [ref=e21]: Timeframe
+        - combobox "Timeframe" [ref=e22]:
+          - option "1 min"
+          - option "1 hour" [selected]
+      - button "Loading..." [disabled] [ref=e405]
+      - button "Update Data" [ref=e24] [cursor=pointer]
+    - generic [ref=e26]: Trading day in progress — data is incomplete and will update on next load.
+    - table [ref=e407]:
+      - row [ref=e408]:
+        - cell
+        - cell [ref=e409]
+        - cell [ref=e413]
+      - row [ref=e417]:
+        - cell
+        - cell [ref=e418]
+        - cell [ref=e422]
+    - generic [ref=e46]:
+      - button "Previous trade" [ref=e47] [cursor=pointer]: ←
+      - generic [ref=e48]: Trade 41 / 41 · 18 Mar, 01:00 · LONG
+      - button "Next trade" [disabled] [ref=e49] [cursor=pointer]: →
+  - generic [ref=e50]:
+    - generic [ref=e51]:
+      - heading "Simulated Trades" [level=3] [ref=e52]
+      - generic [ref=e53]:
+        - generic [ref=e425]: Selected day (2026-03-18)
+        - generic [ref=e426] [cursor=pointer]:
+          - generic [ref=e427]:
+            - generic [ref=e428]: LONG
+            - text: "@ 1.04909 → 1.05019"
+          - generic [ref=e429]: END +11p (+0.45R)
+          - generic [ref=e430]: 📄 Cached backtest · 18 Mar, 01:00 → 18 Mar, 09:00
+        - separator [ref=e431]
+        - generic [ref=e432]: Other days (40)
+        - generic [ref=e433]:
+          - generic [ref=e434] [cursor=pointer]:
+            - generic [ref=e435]:
+              - generic [ref=e436]: LONG
+              - text: "@ 1.04880 → 1.04811"
+            - generic [ref=e437]: EARLY_EXIT -7p (-0.32R)
+            - generic [ref=e438]: 📄 Cached backtest · 16 Mar, 17:00 → 17 Mar, 07:00
+          - generic [ref=e439] [cursor=pointer]:
+            - generic [ref=e440]:
+              - generic [ref=e441]: SHORT
+              - text: "@ 1.04892 → 1.04629"
+            - generic [ref=e442]: TP +26.3p (+1.1R)
+            - generic [ref=e443]: 📄 Cached backtest · 13 Mar, 04:00 → 13 Mar, 08:00
+          - generic [ref=e444] [cursor=pointer]:
+            - generic [ref=e445]:
+              - generic [ref=e446]: SHORT
+              - text: "@ 1.04884 → 1.04991"
+            - generic [ref=e447]: EARLY_EXIT -10.7p (-0.43R)
+            - generic [ref=e448]: 📄 Cached backtest · 12 Mar, 20:00 → 13 Mar, 02:00
+          - generic [ref=e449] [cursor=pointer]:
+            - generic [ref=e450]:
+              - generic [ref=e451]: SHORT
+              - text: "@ 1.06261 → 1.06277"
+            - generic [ref=e452]: SIDEWAYS -1.6p (-0.05R)
+            - generic [ref=e453]: 📄 Cached backtest · 3 Feb, 13:00 → 4 Feb, 04:00
+          - generic [ref=e454] [cursor=pointer]:
+            - generic [ref=e455]:
+              - generic [ref=e456]: LONG
+              - text: "@ 1.06300 → 1.06260"
+            - generic [ref=e457]: SIDEWAYS -4p (-0.12R)
+            - generic [ref=e458]: 📄 Cached backtest · 2 Feb, 10:00 → 3 Feb, 11:00
+          - generic [ref=e459] [cursor=pointer]:
+            - generic [ref=e460]:
+              - generic [ref=e461]: SHORT
+              - text: "@ 1.06265 → 1.05889"
+            - generic [ref=e462]: TP +37.6p (+1.1R)
+            - generic [ref=e463]: 📄 Cached backtest · 27 Jan, 00:00 → 27 Jan, 12:00
+          - generic [ref=e464] [cursor=pointer]:
+            - generic [ref=e465]:
+              - generic [ref=e466]: LONG
+              - text: "@ 1.06312 → 1.06149"
+            - generic [ref=e467]: EARLY_EXIT -16.3p (-0.49R)
+            - generic [ref=e468]: 📄 Cached backtest · 25 Jan, 23:00 → 26 Jan, 03:00
+          - generic [ref=e469] [cursor=pointer]:
+            - generic [ref=e470]:
+              - generic [ref=e471]: SHORT
+              - text: "@ 1.06289 → 1.06382"
+            - generic [ref=e472]: SIDEWAYS -9.3p (-0.29R)
+            - generic [ref=e473]: 📄 Cached backtest · 20 Jan, 16:00 → 21 Jan, 07:00
+          - generic [ref=e474] [cursor=pointer]:
+            - generic [ref=e475]:
+              - generic [ref=e476]: SHORT
+              - text: "@ 1.06286 → 1.06553"
+            - generic [ref=e477]: EARLY_EXIT -26.6p (-0.83R)
+            - generic [ref=e478]: 📄 Cached backtest · 20 Jan, 12:00 → 20 Jan, 14:00
+          - generic [ref=e479] [cursor=pointer]:
+            - generic [ref=e480]:
+              - generic [ref=e481]: SHORT
+              - text: "@ 1.07537 → 1.07668"
+            - generic [ref=e482]: EARLY_EXIT -13p (-0.54R)
+            - generic [ref=e483]: 📄 Cached backtest · 13 Jan, 12:00 → 14 Jan, 02:00
+          - generic [ref=e484] [cursor=pointer]:
+            - generic [ref=e485]:
+              - generic [ref=e486]: SHORT
+              - text: "@ 1.07422 → 1.07490"
+            - generic [ref=e487]: EARLY_EXIT -6.7p (-0.37R)
+            - generic [ref=e488]: 📄 Cached backtest · 9 Jan, 14:00 → 9 Jan, 15:00
+          - generic [ref=e489] [cursor=pointer]:
+            - generic [ref=e490]:
+              - generic [ref=e491]: LONG
+              - text: "@ 1.06717 → 1.06699"
+            - generic [ref=e492]: SIDEWAYS -1.8p (-0.08R)
+            - generic [ref=e493]: 📄 Cached backtest · 31 Dec, 16:00 → 2 Jan, 10:00
+          - generic [ref=e494] [cursor=pointer]:
+            - generic [ref=e495]:
+              - generic [ref=e496]: LONG
+              - text: "@ 1.06710 → 1.06625"
+            - generic [ref=e497]: EARLY_EXIT -8.6p (-0.38R)
+            - generic [ref=e498]: 📄 Cached backtest · 31 Dec, 05:00 → 31 Dec, 08:00
+          - generic [ref=e499] [cursor=pointer]:
+            - generic [ref=e500]:
+              - generic [ref=e501]: SHORT
+              - text: "@ 1.06693 → 1.06433"
+            - generic [ref=e502]: TP +26p (+1.1R)
+            - generic [ref=e503]: 📄 Cached backtest · 17 Dec, 00:00 → 17 Dec, 07:00
+          - generic [ref=e504] [cursor=pointer]:
+            - generic [ref=e505]:
+              - generic [ref=e506]: LONG
+              - text: "@ 1.06710 → 1.06615"
+            - generic [ref=e507]: EARLY_EXIT -9.4p (-0.41R)
+            - generic [ref=e508]: 📄 Cached backtest · 16 Dec, 13:00 → 16 Dec, 17:00
+          - generic [ref=e509] [cursor=pointer]:
+            - generic [ref=e510]:
+              - generic [ref=e511]: SHORT
+              - text: "@ 1.07056 → 1.06707"
+            - generic [ref=e512]: TP +35p (+1.1R)
+            - generic [ref=e513]: 📄 Cached backtest · 10 Dec, 12:00 → 11 Dec, 09:00
+          - generic [ref=e514] [cursor=pointer]:
+            - generic [ref=e515]:
+              - generic [ref=e516]: SHORT
+              - text: "@ 1.07425 → 1.07224"
+            - generic [ref=e517]: TP +20.1p (+1.1R)
+            - generic [ref=e518]: 📄 Cached backtest · 9 Dec, 12:00 → 9 Dec, 18:00
+          - generic [ref=e519] [cursor=pointer]:
+            - generic [ref=e520]:
+              - generic [ref=e521]: LONG
+              - text: "@ 1.07085 → 1.07306"
+            - generic [ref=e522]: FRIDAY +22.1p (+0.67R)
+            - generic [ref=e523]: 📄 Cached backtest · 4 Dec, 23:00 → 5 Dec, 18:00
+          - generic [ref=e524] [cursor=pointer]:
+            - generic [ref=e525]:
+              - generic [ref=e526]: LONG
+              - text: "@ 1.06712 → 1.06966"
+            - generic [ref=e527]: TP +25.4p (+1.1R)
+            - generic [ref=e528]: 📄 Cached backtest · 3 Dec, 18:00 → 4 Dec, 14:00
+          - generic [ref=e529] [cursor=pointer]:
+            - generic [ref=e530]:
+              - generic [ref=e531]: LONG
+              - text: "@ 1.06231 → 1.06209"
+            - generic [ref=e532]: SIDEWAYS -2.2p (-0.11R)
+            - generic [ref=e533]: 📄 Cached backtest · 1 Dec, 13:00 → 2 Dec, 10:00
+          - generic [ref=e534] [cursor=pointer]:
+            - generic [ref=e535]:
+              - generic [ref=e536]: LONG
+              - text: "@ 1.05198 → 1.05578"
+            - generic [ref=e537]: TP +38p (+1.1R)
+            - generic [ref=e538]: 📄 Cached backtest · 19 Nov, 21:00 → 20 Nov, 13:00
+          - generic [ref=e539] [cursor=pointer]:
+            - generic [ref=e540]:
+              - generic [ref=e541]: LONG
+              - text: "@ 1.05119 → 1.05412"
+            - generic [ref=e542]: TP +29.3p (+1.1R)
+            - generic [ref=e543]: 📄 Cached backtest · 19 Nov, 01:00 → 19 Nov, 15:00
+          - generic [ref=e544] [cursor=pointer]:
+            - generic [ref=e545]:
+              - generic [ref=e546]: SHORT
+              - text: "@ 1.05162 → 1.04795"
+            - generic [ref=e547]: TP +36.7p (+1.1R)
+            - generic [ref=e548]: 📄 Cached backtest · 12 Nov, 04:00 → 12 Nov, 12:00
+          - generic [ref=e549] [cursor=pointer]:
+            - generic [ref=e550]:
+              - generic [ref=e551]: LONG
+              - text: "@ 1.06696 → 1.06931"
+            - generic [ref=e552]: TP +23.5p (+1.1R)
+            - generic [ref=e553]: 📄 Cached backtest · 14 Oct, 16:00 → 15 Oct, 11:00
+          - generic [ref=e554] [cursor=pointer]:
+            - generic [ref=e555]:
+              - generic [ref=e556]: LONG
+              - text: "@ 1.06712 → 1.06625"
+            - generic [ref=e557]: EARLY_EXIT -8.8p (-0.38R)
+            - generic [ref=e558]: 📄 Cached backtest · 14 Oct, 09:00 → 14 Oct, 15:00
+          - generic [ref=e559] [cursor=pointer]:
+            - generic [ref=e560]:
+              - generic [ref=e561]: LONG
+              - text: "@ 1.07101 → 1.07038"
+            - generic [ref=e562]: SIDEWAYS -6.3p (-0.18R)
+            - generic [ref=e563]: 📄 Cached backtest · 3 Oct, 13:00 → 6 Oct, 04:00
+          - generic [ref=e564] [cursor=pointer]:
+            - generic [ref=e565]:
+              - generic [ref=e566]: SHORT
+              - text: "@ 1.07052 → 1.07259"
+            - generic [ref=e567]: EARLY_EXIT -20.7p (-0.64R)
+            - generic [ref=e568]: 📄 Cached backtest · 30 Sept, 20:00 → 1 Oct, 10:00
+          - generic [ref=e569] [cursor=pointer]:
+            - generic [ref=e570]:
+              - generic [ref=e571]: LONG
+              - text: "@ 1.07073 → 1.07032"
+            - generic [ref=e572]: SIDEWAYS -4.2p (-0.13R)
+            - generic [ref=e573]: 📄 Cached backtest · 29 Sept, 07:00 → 30 Sept, 07:00
+          - generic [ref=e574] [cursor=pointer]:
+            - generic [ref=e575]:
+              - generic [ref=e576]: SHORT
+              - text: "@ 1.07052 → 1.06698"
+            - generic [ref=e577]: TP +35.4p (+1.1R)
+            - generic [ref=e578]: 📄 Cached backtest · 25 Sept, 08:00 → 25 Sept, 19:00
+          - generic [ref=e579] [cursor=pointer]:
+            - generic [ref=e580]:
+              - generic [ref=e581]: SHORT
+              - text: "@ 1.07037 → 1.07092"
+            - generic [ref=e582]: SIDEWAYS -5.5p (-0.16R)
+            - generic [ref=e583]: 📄 Cached backtest · 24 Sept, 10:00 → 25 Sept, 07:00
+          - generic [ref=e584] [cursor=pointer]:
+            - generic [ref=e585]:
+              - generic [ref=e586]: LONG
+              - text: "@ 1.07096 → 1.06934"
+            - generic [ref=e587]: EARLY_EXIT -16.2p (-0.47R)
+            - generic [ref=e588]: 📄 Cached backtest · 23 Sept, 00:00 → 23 Sept, 09:00
+          - generic [ref=e589] [cursor=pointer]:
+            - generic [ref=e590]:
+              - generic [ref=e591]: SHORT
+              - text: "@ 1.07934 → 1.07663"
+            - generic [ref=e592]: TP +27.2p (+1.1R)
+            - generic [ref=e593]: 📄 Cached backtest · 16 Sept, 10:00 → 16 Sept, 15:00
+          - generic [ref=e594] [cursor=pointer]:
+            - generic [ref=e595]:
+              - generic [ref=e596]: SHORT
+              - text: "@ 1.08126 → 1.08231"
+            - generic [ref=e597]: EARLY_EXIT -10.4p (-0.46R)
+            - generic [ref=e598]: 📄 Cached backtest · 15 Sept, 09:00 → 15 Sept, 12:00
+          - generic [ref=e599] [cursor=pointer]:
+            - generic [ref=e600]:
+              - generic [ref=e601]: LONG
+              - text: "@ 1.07949 → 1.07935"
+            - generic [ref=e602]: SIDEWAYS -1.4p (-0.06R)
+            - generic [ref=e603]: 📄 Cached backtest · 10 Sept, 08:00 → 11 Sept, 10:00
+          - generic [ref=e604] [cursor=pointer]:
+            - generic [ref=e605]:
+              - generic [ref=e606]: SHORT
+              - text: "@ 1.08136 → 1.07896"
+            - generic [ref=e607]: TP +24p (+1.1R)
+            - generic [ref=e608]: 📄 Cached backtest · 5 Sept, 13:00 → 5 Sept, 15:00
+          - generic [ref=e609] [cursor=pointer]:
+            - generic [ref=e610]:
+              - generic [ref=e611]: LONG
+              - text: "@ 1.07956 → 1.08140"
+            - generic [ref=e612]: FRIDAY +18.4p (+0.73R)
+            - generic [ref=e613]: 📄 Cached backtest · 29 Aug, 15:00 → 29 Aug, 20:00
+          - generic [ref=e614] [cursor=pointer]:
+            - generic [ref=e615]:
+              - generic [ref=e616]: LONG
+              - text: "@ 1.06957 → 1.07180"
+            - generic [ref=e617]: TP +22.3p (+1.1R)
+            - generic [ref=e618]: 📄 Cached backtest · 4 Aug, 01:00 → 4 Aug, 07:00
+          - generic [ref=e619] [cursor=pointer]:
+            - generic [ref=e620]:
+              - generic [ref=e621]: LONG
+              - text: "@ 1.10630 → 1.11069"
+            - generic [ref=e622]: TP +43.9p (+1.1R)
+            - generic [ref=e623]: 📄 Cached backtest · 2 Jun, 18:00 → 3 Jun, 13:00
+          - generic [ref=e624] [cursor=pointer]:
+            - generic [ref=e625]:
+              - generic [ref=e626]: LONG
+              - text: "@ 1.14603 → 1.14296"
+            - generic [ref=e627]: SL -30.7p (-1.01R)
+            - generic [ref=e628]: 📄 Cached backtest · 2 Apr, 17:00 → 2 Apr, 23:00
+          - generic [ref=e629] [cursor=pointer]:
+            - generic [ref=e630]:
+              - generic [ref=e631]: SHORT
+              - text: "@ 1.14107 → 1.13766"
+            - generic [ref=e632]: TP +34.1p (+1.1R)
+            - generic [ref=e633]: 📄 Cached backtest · 19 Mar, 15:00 → 20 Mar, 07:00
+    - generic [ref=e328]:
+      - heading "Trade State" [level=3] [ref=e329]
+      - generic [ref=e330]:
+        - generic [ref=e634]:
+          - generic [ref=e635]: LONG
+          - generic [ref=e636]: Open @ 1.04909 since 18 Mar, 02:00
+        - generic [ref=e637]:
+          - generic [ref=e638]: SL
+          - generic [ref=e639]: "1.04662"
+        - generic [ref=e640]:
+          - generic [ref=e641]: TP
+          - generic [ref=e642]: "1.05181"
+        - generic [ref=e643]:
+          - generic [ref=e644]: Bars held
+          - generic [ref=e645]: "7"
+    - generic [ref=e332]:
+      - heading "Day Summary" [level=3] [ref=e333]
+      - generic [ref=e334]:
+        - generic [ref=e646]:
+          - generic [ref=e647]: Pair
+          - generic [ref=e648]: GBPCHF
+        - generic [ref=e649]:
+          - generic [ref=e650]: Date
+          - generic [ref=e651]:
+            - text: 2026-03-18
+            - generic [ref=e652]: Incomplete
+        - generic [ref=e653]:
+          - generic [ref=e654]: Bars
+          - generic [ref=e655]: 14 (in progress)
+        - generic [ref=e656]: Trades touching selected day
+        - generic [ref=e657]:
+          - generic [ref=e658]: Trades
+          - generic [ref=e659]: 0 (0W / 0L)
+        - generic [ref=e660]:
+          - generic [ref=e661]: Outcome
+          - generic [ref=e662]: 0p (0R)
+        - generic [ref=e663]:
+          - generic [ref=e664]: Selected trade risk
+          - generic [ref=e665]: GBP 346,376,226.57
+        - generic [ref=e666]:
+          - generic [ref=e667]: Selected trade P&L
+          - generic [ref=e668]: +GBP 154,814,566.43
+        - generic [ref=e669]:
+          - generic [ref=e670]: Balance after selected close
+          - generic [ref=e671]: GBP 4,484,517,398.58
+        - generic [ref=e672]: Account
+        - generic [ref=e673]:
+          - generic [ref=e674]: Realized day P&L (2 closes)
+          - generic [ref=e675]: +GBP 235,066,648.54
+        - generic [ref=e676]:
+          - generic [ref=e677]: Balance at day end
+          - generic [ref=e678]: GBP 4,484,517,398.58
+        - generic [ref=e679]:
+          - generic [ref=e680]: Sizing
+          - generic [ref=e681]: starts at GBP 1,000.00 @ 8.00% risk (high_volume)
+        - generic [ref=e682]: 30-day
+        - generic [ref=e683]:
+          - generic [ref=e684]: Trades
+          - generic [ref=e685]: "1"
+        - generic [ref=e686]:
+          - generic [ref=e687]: P&L
+          - generic [ref=e688]: "-7p (-0.32R)"
+    - generic [ref=e381]:
+      - heading "Current Bar" [level=3] [ref=e382]
+      - generic [ref=e383]:
+        - generic [ref=e689]:
+          - generic [ref=e690]: Time
+          - generic [ref=e691]: 18 Mar, 09:00
+        - generic [ref=e692]:
+          - generic [ref=e693]: Open
+          - generic [ref=e694]: "1.04960"
+        - generic [ref=e695]:
+          - generic [ref=e696]: High
+          - generic [ref=e697]: "1.05064"
+        - generic [ref=e698]:
+          - generic [ref=e699]: Low
+          - generic [ref=e700]: "1.04951"
+        - generic [ref=e701]:
+          - generic [ref=e702]: Close
+          - generic [ref=e703]: "1.05024"
+        - generic [ref=e704]:
+          - generic [ref=e705]: Support
+          - generic [ref=e706]: 1.04819 – 1.04974 (17t)
+        - generic [ref=e707]:
+          - generic [ref=e708]: Resistance
+          - generic [ref=e709]: 1.06139 – 1.06446 (71t)

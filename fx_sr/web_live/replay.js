@@ -229,25 +229,13 @@ async function loadReplay() {
 
     renderSummary();
     if (replay.frames.length > 0) {
+      stepTo(replay.frames.length - 1);
       if (requestedTradeEntry) {
-        if (!focusTradeOnChart(activeTrade, requestedTradeEntry)) {
-          stepTo(replay.frames.length - 1);
-        }
-      } else {
-        stepTo(replay.frames.length - 1);
+        focusTradeOnChart(activeTrade, requestedTradeEntry);
       }
     } else {
       // No target-day bars — still render context bars and trades
-      _updateStreamBounds();
-      const candles = replay.contextBars
-        .map((b) => {
-          const time = parseTime(b.time);
-          if (time == null) return null;
-          return { time, open: b.open, high: b.high, low: b.low, close: b.close };
-        })
-        .filter(Boolean);
-      replay.candleSeries.setData(candles);
-      replay.zoneSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
+      _renderAllBars();
       // Render trades panel with empty frame
       renderInfo(-1);
     }
@@ -361,22 +349,39 @@ function getActiveReplayTrade() {
   return trades[replay.activeTradeIndex];
 }
 
-function getTradeFocusTimestamp(trade, fallbackEntry = '') {
-  const entryDate = String(trade?.entry_time || fallbackEntry || '').slice(0, 10);
-  const exitDate = String(trade?.exit_time || '').slice(0, 10);
-  if (entryDate && exitDate && exitDate !== entryDate) {
-    return parseTimestamp(`${exitDate}T23:59:59Z`);
-  }
-  const exitTimestamp = parseTimestamp(trade?.exit_time);
-  if (exitTimestamp) return exitTimestamp;
-  return parseTimestamp(trade?.entry_time || fallbackEntry);
+function getTradeFocusRange(trade, fallbackEntry = '') {
+  const entryTime = parseTimestamp(trade?.entry_time || fallbackEntry);
+  const exitTime = parseTimestamp(trade?.exit_time);
+  if (!entryTime && !exitTime) return null;
+
+  const start = entryTime || exitTime;
+  const end = exitTime || entryTime || start;
+  if (!start || !end) return null;
+
+  const startMs = Math.min(start.getTime(), end.getTime());
+  const endMs = Math.max(start.getTime(), end.getTime());
+  const tradeDurationMs = Math.max(endMs - startMs, 60 * 60 * 1000);
+  const paddingMs = Math.max(2 * 60 * 60 * 1000, Math.round(tradeDurationMs * 0.35));
+
+  return {
+    from: Math.floor((startMs - paddingMs) / 1000),
+    to: Math.floor((endMs + paddingMs) / 1000),
+  };
+}
+
+function focusTradeViewport(range) {
+  if (!range || range.from == null || range.to == null) return false;
+  if (!replay.chart) return false;
+
+  replay.chart.timeScale().setVisibleRange({
+    from: range.from,
+    to: range.to,
+  });
+  return true;
 }
 
 function focusTradeOnChart(trade, fallbackEntry = '') {
-  const focusTime = getTradeFocusTimestamp(trade, fallbackEntry);
-  if (!focusTime) return false;
-  _scrubToTime(focusTime);
-  return true;
+  return focusTradeViewport(getTradeFocusRange(trade, fallbackEntry));
 }
 
 function updateReplayUrl(pair, date, preset, tf, entry = '', backtest = '') {
@@ -949,110 +954,9 @@ function tradeTouchesSelectedDate(trade, selectedDate) {
 function renderToFrame(targetIndex) {
   if (targetIndex < 0 || targetIndex >= replay.frames.length) return;
 
-  // When streamed bars exist, use the unified renderer
-  if (replay.streamedBars.length > 0) {
-    _renderAllBars();
-    // Still handle SL/TP lines
-    removeTradeLevels();
-    const currentFrame = replay.frames[targetIndex];
-    if (currentFrame.open_trade) {
-      const t = currentFrame.open_trade;
-      replay._slLine = replay.candleSeries.createPriceLine({
-        price: t.sl_price, color: '#b23b29', lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Solid,
-        axisLabelVisible: true, title: 'SL',
-      });
-      replay._tpLine = replay.candleSeries.createPriceLine({
-        price: t.tp_price, color: '#1f7a49', lineWidth: 2,
-        lineStyle: LightweightCharts.LineStyle.Solid,
-        axisLabelVisible: true, title: 'TP',
-      });
-      replay._entryLine = replay.candleSeries.createPriceLine({
-        price: t.entry_price, color: '#b88917', lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true, title: 'Entry',
-      });
-    }
-    return;
-  }
-
-  // Start with context bars (prior days, always fully visible)
-  const candles = replay.contextBars
-    .map((b) => {
-      const time = parseTime(b.time);
-      if (time == null) return null;
-      return { time, open: b.open, high: b.high, low: b.low, close: b.close };
-    })
-    .filter(Boolean);
-  const markers = [];
-
-  // Add entry/exit markers onto context bars for trades involving the selected day
-  const selectedDate = replay.summary?.date || '';
-  const contextTimes = new Set(candles.map(c => c.time));
-  const relevantTrades = (replay.allTrades || []).filter(t => tradeTouchesSelectedDate(t, selectedDate));
-  for (const t of relevantTrades) {
-    const entryTs = parseTime(t.entry_time);
-    if (entryTs != null && contextTimes.has(entryTs)) {
-      markers.push({
-        time: entryTs,
-        position: t.direction === 'LONG' ? 'belowBar' : 'aboveBar',
-        color: t.direction === 'LONG' ? '#1f7a49' : '#b23b29',
-        shape: t.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
-        text: t.direction,
-      });
-    }
-    if (t.exit_time) {
-      const exitTs = parseTime(t.exit_time);
-      if (exitTs != null && contextTimes.has(exitTs)) {
-        const win = (t.pnl_pips || 0) > 0;
-        markers.push({
-          time: exitTs,
-          position: 'inBar',
-          color: win ? '#1f7a49' : '#b23b29',
-          shape: 'circle',
-          text: `${t.exit_reason} ${win ? '+' : ''}${t.pnl_pips}p`,
-        });
-      }
-    }
-  }
-
-  // Append target-day bars up to current index
-  for (let i = 0; i <= targetIndex; i++) {
-    const f = replay.frames[i];
-    const t = parseTime(f.time);
-    if (t == null) continue;
-    candles.push({ time: t, open: f.open, high: f.high, low: f.low, close: f.close });
-
-    // Entry signal marker
-    if (f.signal) {
-      markers.push({
-        time: t,
-        position: f.signal.direction === 'LONG' ? 'belowBar' : 'aboveBar',
-        color: f.signal.direction === 'LONG' ? '#1f7a49' : '#b23b29',
-        shape: f.signal.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
-        text: f.signal.direction,
-      });
-    }
-
-    // Exit marker
-    if (f.exit) {
-      const win = f.exit.pnl_pips > 0;
-      markers.push({
-        time: t,
-        position: 'inBar',
-        color: win ? '#1f7a49' : '#b23b29',
-        shape: 'circle',
-        text: `${f.exit.reason} ${f.exit.pnl_pips > 0 ? '+' : ''}${f.exit.pnl_pips}p`,
-      });
-    }
-  }
-
-  replay.candleSeries.setData(candles);
-  // Feed zone series same time range so its price lines render (behind candles)
-  replay.zoneSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
-  // Markers must be sorted by time for Lightweight Charts
-  markers.sort((a, b) => a.time - b.time);
-  replay.candleSeries.setMarkers(markers);
+  // Always render through the unified sorted path so any tail bars after a
+  // carried trade closes remain visible in chronological order.
+  _renderAllBars();
 
   // Open trade SL/TP lines
   removeTradeLevels();
@@ -1183,6 +1087,8 @@ function renderInfo(index) {
 
   // Trade state
   let tradeHtml = '';
+  // Look up full trade record (with amounts) from allTrades by entry_time
+  const _matchEntry = (entryTime) => (replay.allTrades || []).find(t => t.entry_time === entryTime);
   if (f.exit) {
     const cls = f.exit.pnl_pips > 0 ? 'up' : 'down';
     tradeHtml += _infoRow('Exit', `${f.exit.reason} @ ${f.exit.price.toFixed(dec)}`);
@@ -1195,10 +1101,18 @@ function renderInfo(index) {
     tradeHtml += _infoRow('SL', f.open_trade.sl_price.toFixed(dec));
     tradeHtml += _infoRow('TP', f.open_trade.tp_price.toFixed(dec));
     tradeHtml += _infoRow('Bars held', f.open_trade.bars_held);
+    const matchedTrade = _matchEntry(f.open_trade.entry_time);
+    if (matchedTrade?.risk_amount != null) tradeHtml += _infoRow('Risk', `${BACKTEST_CURRENCY} ${matchedTrade.risk_amount.toFixed(2)}`);
+    if (matchedTrade?.pnl_amount != null) {
+      const cls2 = matchedTrade.pnl_amount > 0 ? 'up' : 'down';
+      tradeHtml += `<div class="info-row"><span class="info-label">P&L amt</span><span class="${cls2}">${matchedTrade.pnl_amount > 0 ? '+' : ''}${BACKTEST_CURRENCY} ${matchedTrade.pnl_amount.toFixed(2)}</span></div>`;
+    }
   } else if (f.signal) {
     tradeHtml += `<div class="info-row"><span class="pill pill-${f.signal.direction.toLowerCase()}" style="font-size:0.68rem;padding:2px 6px;min-width:auto">${f.signal.direction}</span><span>Entry @ ${f.signal.entry_price.toFixed(dec)}</span></div>`;
     tradeHtml += _infoRow('SL', f.signal.sl_price.toFixed(dec));
     tradeHtml += _infoRow('TP', f.signal.tp_price.toFixed(dec));
+    const matchedSignal = _matchEntry(f.signal.entry_time);
+    if (matchedSignal?.risk_amount != null) tradeHtml += _infoRow('Risk', `${BACKTEST_CURRENCY} ${matchedSignal.risk_amount.toFixed(2)}`);
   }
   if (!f.signal && !f.exit && !f.open_trade) {
     tradeHtml = '<div class="info-row" style="color:var(--muted)">Flat \u2014 no position</div>';
@@ -1219,9 +1133,19 @@ function _renderTradeList(dec) {
     const cls = (t.pnl_pips || 0) > 0 ? 'up' : 'down';
     const entryDt = formatTimestamp(t.entry_time, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false});
     const exitDt = t.exit_time ? formatTimestamp(t.exit_time, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:false}) : '';
+    const amountParts = [];
+    if (t.risk_amount != null) amountParts.push(`Risk ${BACKTEST_CURRENCY} ${t.risk_amount.toFixed(2)}`);
+    if (t.pnl_amount != null) {
+      const pnlSign = t.pnl_amount > 0 ? '+' : '';
+      amountParts.push(`<span class="${cls}">P&L ${pnlSign}${BACKTEST_CURRENCY} ${t.pnl_amount.toFixed(2)}</span>`);
+    }
+    const amountLine = amountParts.length > 0
+      ? `<span style="width:100%;font-size:0.76rem">${amountParts.join(' · ')}</span>`
+      : '';
     return `<div class="trade-row" style="flex-wrap:wrap;gap:2px;cursor:pointer" onclick="jumpToTradeEntry('${escapeAttr(t.entry_time)}')">
       <span><span class="pill pill-${t.direction.toLowerCase()}" style="font-size:0.68rem;padding:2px 6px;min-width:auto">${t.direction}</span> @ ${t.entry_price.toFixed(dec)}${t.exit_price ? ' \u2192 ' + t.exit_price.toFixed(dec) : ''}</span>
       <span class="${cls}">${t.exit_reason} ${(t.pnl_pips || 0) > 0 ? '+' : ''}${t.pnl_pips}p (${(t.pnl_r || 0) > 0 ? '+' : ''}${t.pnl_r}R)</span>
+      ${amountLine}
       <span style="width:100%;font-size:0.76rem;color:var(--muted)">\u{1F4C4} Cached backtest \u00b7 ${entryDt}${exitDt ? ' \u2192 ' + exitDt : ''}</span>
     </div>`;
   };

@@ -119,10 +119,12 @@ function formatBacktestDate(isoTime) {
   if (Number.isNaN(parsed.getTime())) {
     return String(isoTime).slice(0, 10);
   }
-  return parsed.toLocaleDateString([], {
+  return parsed.toLocaleString([], {
     year: "numeric",
     month: "short",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 
@@ -182,24 +184,7 @@ function populateBacktests(backtests, selectedKey = "") {
   selectedBacktest = backtests.find((backtest) => backtest.key === backtestFilter.value) || backtests[0] || null;
 }
 
-function tradeActiveDates(trade) {
-  if (Array.isArray(trade?.active_dates) && trade.active_dates.length) {
-    return trade.active_dates
-      .map((value) => String(value))
-      .filter((value) => isIsoDate(value));
-  }
-
-  const dates = new Set();
-  const entryDate = trade?.entry_time ? String(trade.entry_time).slice(0, 10) : "";
-  const exitDate = trade?.exit_time ? String(trade.exit_time).slice(0, 10) : "";
-  if (isIsoDate(entryDate)) dates.add(entryDate);
-  if (isIsoDate(exitDate)) dates.add(exitDate);
-  return Array.from(dates);
-}
-
-function tradeRealizedDate(trade) {
-  const exitDate = trade?.exit_time ? String(trade.exit_time).slice(0, 10) : "";
-  if (isIsoDate(exitDate)) return exitDate;
+function tradeEntryDate(trade) {
   const entryDate = trade?.entry_time ? String(trade.entry_time).slice(0, 10) : "";
   return isIsoDate(entryDate) ? entryDate : "";
 }
@@ -268,34 +253,28 @@ function buildRows(trades, dateFilter = "") {
 function buildCalendarState(trades) {
   const dateMap = new Map();
   for (const trade of trades) {
-    const affectedDates = tradeActiveDates(trade);
-    if (!affectedDates.length) continue;
-    const realizedDate = tradeRealizedDate(trade);
-
-    for (const date of affectedDates) {
-      if (!dateMap.has(date)) {
-        dateMap.set(date, {
-          date,
-          trades: [],
-          count: 0,
-          wins: 0,
-          losses: 0,
-          total_pnl_pips: 0,
-          total_pnl_r: 0,
-        });
-      }
-      const row = dateMap.get(date);
-      row.trades.push(trade);
-      row.count += 1;
-      if (date === realizedDate) {
-        const pnlPips = Number(trade.pnl_pips) || 0;
-        const pnlR = Number(trade.pnl_r) || 0;
-        row.total_pnl_pips += pnlPips;
-        row.total_pnl_r += pnlR;
-        if (pnlPips > 0) row.wins += 1;
-        if (pnlPips < 0) row.losses += 1;
-      }
+    const entryDate = tradeEntryDate(trade);
+    if (!entryDate) continue;
+    if (!dateMap.has(entryDate)) {
+      dateMap.set(entryDate, {
+        date: entryDate,
+        trades: [],
+        count: 0,
+        wins: 0,
+        losses: 0,
+        total_pnl_pips: 0,
+        total_pnl_r: 0,
+      });
     }
+    const row = dateMap.get(entryDate);
+    row.trades.push(trade);
+    row.count += 1;
+    const pnlPips = Number(trade.pnl_pips) || 0;
+    const pnlR = Number(trade.pnl_r) || 0;
+    row.total_pnl_pips += pnlPips;
+    row.total_pnl_r += pnlR;
+    if (pnlPips > 0) row.wins += 1;
+    if (pnlPips < 0) row.losses += 1;
   }
 
   for (const row of dateMap.values()) {
@@ -367,7 +346,7 @@ function renderCalendar() {
   }
 
   calendarEl.innerHTML = monthRows.join("");
-  monthRangeEl.textContent = `${formatMonthLabel(range.end)} — ${formatMonthLabel(range.start)} (${dateMap.size} active days)`;
+  monthRangeEl.textContent = `${formatMonthLabel(range.end)} — ${formatMonthLabel(range.start)} (${dateMap.size} entry days)`;
   wireDayClicks();
 }
 

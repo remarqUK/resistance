@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Trade Log</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+    h1 { font-size: 1.3rem; margin-bottom: 12px; }
+    .filters { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
+    .filters select, .filters button { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+    .filters button { cursor: pointer; }
+    .filters button:hover { background: #21262d; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th { text-align: left; padding: 6px 8px; background: #161b22; border-bottom: 1px solid #30363d; position: sticky; top: 0; }
+    td { padding: 5px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; }
+    tr:hover td { background: #161b22; }
+    .status-SUBMITTED, .status-OPEN { color: #58a6ff; }
+    .status-FILLED, .status-CLOSED { color: #3fb950; }
+    .status-CANCELLED, .status-FAILED { color: #f85149; }
+    .status-SKIPPED { color: #8b949e; }
+    .status-DETECTED { color: #d2a8ff; }
+    .dir-LONG { color: #3fb950; }
+    .dir-SHORT { color: #f85149; }
+    .note { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
+    .empty { text-align: center; padding: 40px; color: #8b949e; }
+    a.back { color: #58a6ff; text-decoration: none; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/">&larr; Dashboard</a>
+  <h1>Trade Log</h1>
+  <div class="filters">
+    <select id="pair-filter"><option value="">All pairs</option></select>
+    <select id="status-filter">
+      <option value="">All statuses</option>
+      <option value="SUBMITTED">Submitted</option>
+      <option value="OPEN">Open</option>
+      <option value="FILLED">Filled</option>
+      <option value="CLOSED">Closed</option>
+      <option value="CANCELLED">Cancelled</option>
+      <option value="FAILED">Failed</option>
+      <option value="SKIPPED">Skipped</option>
+      <option value="DETECTED">Detected</option>
+    </select>
+    <button onclick="load()">Refresh</button>
+  </div>
+  <div id="content"><div class="empty">Loading...</div></div>
+
+<script>
+async function load() {
+  const pair = document.getElementById('pair-filter').value;
+  const status = document.getElementById('status-filter').value;
+  let url = '/api/trade-log?limit=200';
+  if (pair) url += '&pair=' + pair;
+  if (status) url += '&status=' + status;
+  const res = await fetch(url);
+  const data = await res.json();
+  render(data);
+}
+
+function render(data) {
+  const pairs = data.pairs || [];
+  const sel = document.getElementById('pair-filter');
+  const curVal = sel.value;
+  while (sel.options.length > 1) sel.remove(1);
+  pairs.forEach(p => { const o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
+  if (curVal) sel.value = curVal;
+
+  const signals = data.signals || [];
+  if (!signals.length) {
+    document.getElementById('content').innerHTML = '<div class="empty">No signals recorded yet</div>';
+    return;
+  }
+  let html = `<table><thead><tr>
+    <th>Signal Time</th><th>Pair</th><th>Dir</th><th>Status</th><th>Broker</th>
+    <th>Entry</th><th>SL</th><th>TP</th><th>Bid/Ask</th><th>Spread</th>
+    <th>Quote</th><th>P&L</th><th>Note</th>
+  </tr></thead><tbody>`;
+  for (const s of signals) {
+    const st = s.status || '';
+    const dir = s.direction || '';
+    const spread = s.submit_spread != null ? (s.submit_spread * 10000).toFixed(1) : '';
+    const pnl = s.pnl_pips != null ? (s.pnl_pips > 0 ? '+' : '') + s.pnl_pips.toFixed(1) : '';
+    const utcStr = (s.signal_time || '').replace('T', ' ').slice(0, 19);
+    const localStr = s.signal_time ? new Date(s.signal_time).toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+    const bid = s.submit_bid != null ? s.submit_bid.toFixed(5) : '';
+    const ask = s.submit_ask != null ? s.submit_ask.toFixed(5) : '';
+    const bidask = bid && ask ? bid + '/' + ask : '';
+    html += `<tr>
+      <td>${utcStr}<br><span style="color:#484f58;font-size:0.75rem">${localStr}</span></td>
+      <td>${s.pair}</td>
+      <td class="dir-${dir}">${dir}</td>
+      <td class="status-${st}">${st}</td>
+      <td>${s.broker_order_status || ''}</td>
+      <td>${s.submitted_entry_price != null ? s.submitted_entry_price.toFixed(5) : (s.entry_price != null ? s.entry_price.toFixed(5) : '')}</td>
+      <td>${s.sl_price != null ? s.sl_price.toFixed(5) : ''}</td>
+      <td>${s.tp_price != null ? s.tp_price.toFixed(5) : ''}</td>
+      <td>${bidask}</td>
+      <td>${spread}</td>
+      <td>${s.quote_source || ''}</td>
+      <td>${pnl}</td>
+      <td class="note" title="${(s.note || '').replace(/"/g, '&quot;')}">${s.note || ''}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('content').innerHTML = html;
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

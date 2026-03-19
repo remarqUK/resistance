@@ -9,6 +9,7 @@ from fx_sr.levels import SRZone
 from fx_sr.profiles import get_profile
 from fx_sr.replay import (
     _build_account_day_summary,
+    _extend_hourly_with_minute_tail,
     _load_cached_backtest_trades,
     _select_cached_backtest_rows,
     _trade_active_dates,
@@ -117,6 +118,37 @@ def _result(pair: str, trades: list[Trade]) -> BacktestResult:
 
 
 class ReplayTests(unittest.TestCase):
+    def test_extend_hourly_with_minute_tail_builds_missing_trailing_hours(self):
+        hourly_df = _build_hourly_df(
+            [
+                ('2026-03-18 08:00:00', 1.1000, 1.1010, 1.0990, 1.1005),
+                ('2026-03-18 09:00:00', 1.1005, 1.1015, 1.1000, 1.1010),
+            ]
+        )
+        minute_df = _build_minute_df(
+            [
+                ('2026-03-18 10:05:00', 1.1012),
+                ('2026-03-18 10:35:00', 1.1018),
+                ('2026-03-18 10:50:00', 1.1014),
+                ('2026-03-18 11:10:00', 1.1016),
+                ('2026-03-18 11:40:00', 1.1022),
+                ('2026-03-18 11:55:00', 1.1019),
+            ]
+        )
+
+        extended = _extend_hourly_with_minute_tail(hourly_df, minute_df)
+
+        self.assertEqual(str(extended.index[-2]), '2026-03-18 10:00:00+00:00')
+        self.assertEqual(str(extended.index[-1]), '2026-03-18 11:00:00+00:00')
+        self.assertAlmostEqual(float(extended.iloc[-2]['Open']), 1.1012)
+        self.assertAlmostEqual(float(extended.iloc[-2]['High']), 1.1018)
+        self.assertAlmostEqual(float(extended.iloc[-2]['Low']), 1.1012)
+        self.assertAlmostEqual(float(extended.iloc[-2]['Close']), 1.1014)
+        self.assertAlmostEqual(float(extended.iloc[-1]['Open']), 1.1016)
+        self.assertAlmostEqual(float(extended.iloc[-1]['High']), 1.1022)
+        self.assertAlmostEqual(float(extended.iloc[-1]['Low']), 1.1016)
+        self.assertAlmostEqual(float(extended.iloc[-1]['Close']), 1.1019)
+
     def test_trade_active_dates_span_every_day_until_exit(self):
         active_dates = _trade_active_dates(
             pd.Timestamp('2026-02-03 22:00:00', tz='UTC'),

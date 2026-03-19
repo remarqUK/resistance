@@ -296,7 +296,7 @@ PROFILES = {
     },
 
     'high_volume': {
-        'description': '937 trades, +5460142% return, 20.0% DD, max streak 8, 46% WR',
+        'description': 'Nick hybrid: quality sizing + early cut + corr cap, 785 trades, +73.9B, 16.7% DD, -3.86R worst streak',
 
         # Zone detection
         'pivot_window': 5,
@@ -305,28 +305,33 @@ PROFILES = {
         'max_zone_width_pct': 0.35,
         'zone_history_days': 180,
 
-        # Entry rules — relaxed for higher trade volume
+        # Entry rules — high_volume base with Nick's quality filters
         'min_zone_touches': 3,
-        'zone_penetration_pct': 0.38,           # was 0.42 — more zone entries
-        'min_entry_candle_body_pct': 0.05,       # accepts weaker reversal candles
+        'zone_penetration_pct': 0.36,
+        'min_entry_candle_body_pct': 0.0,
         'momentum_lookback': 2,
-        'momentum_threshold': 0.6,              # fewer momentum rejections
+        'momentum_threshold': 0.75,
         'blocked_hours': [2, 3],
         'blocked_days': [],
+        'max_linger_bars': 0,
+        'linger_lookback': 8,
+        'zone_exhaustion_threshold': 0,
+        'zone_exhaustion_lookback': 50,
 
-        # Exit rules — Nick-aligned: 1.1R target, cut losers at 0.4R
-        'rr_ratio': 1.1,                       # closer to Nick's 1:1 approach
+        # Exit rules — Nick-informed
+        'rr_ratio': 1.1,
         'sl_buffer_pct': 0.15,
-        'early_exit_r': 0.40,                  # let trades breathe (Nick cuts at 1/3-1/2)
+        'early_exit_r': 0.35,
         'max_hold_bars': 72,
-        'sideways_bars': 15,                    # was 20 — exit sooner on sideways
+        'sideways_bars': 15,
         'sideways_threshold': 0.3,
-        'friday_tp_pct': 0.60,
+        'friday_tp_pct': 0.70,
 
         # Position management
         'cooldown_bars': 1,
-        'max_correlated_trades': 5,
+        'max_correlated_trades': 4,
         'use_correlation_filter': True,
+        'correlation_prefer_quality': True,
 
         # Execution model
         'spread_pips': 0.6,
@@ -336,16 +341,21 @@ PROFILES = {
         'use_time_filters': True,
         'use_pair_direction_filter': True,
 
+        # Quality-based sizing — Nick sizes by conviction
+        'quality_sizing': True,
+        'quality_risk_min': 0.5,
+        'quality_risk_max': 1.6,
+
         # Backtest settings
         'hourly_days': 365,
         'starting_balance': 1000.0,
-        'risk_pct': 8.0,
+        'risk_pct': 6.0,
 
         # Dynamic risk sizing: scale risk down during drawdowns
         'dynamic_risk': True,
-        'dd_risk_start': 5.0,            # start reducing risk at 5% DD
-        'dd_risk_full': 18.0,            # risk hits floor at 18% DD
-        'dd_risk_floor': 0.5,            # minimum 0.5% risk during deep drawdown
+        'dd_risk_start': 5.0,
+        'dd_risk_full': 18.0,
+        'dd_risk_floor': 0.5,
     },
 
     'aggressive': {

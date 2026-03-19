@@ -266,8 +266,8 @@ class SharedEntryLogicTests(unittest.TestCase):
         daily_df = _build_daily_df()
         hourly_df = _build_hourly_df(
             [
-                ('2026-02-03 00:00:00', 1.1040, 1.1045, 1.1035, 1.1040),
-                ('2026-02-03 01:00:00', 1.0950, 1.0955, 1.0945, 1.0950),
+                ('2026-02-03 00:00:00', 1.0920, 1.0925, 1.0915, 1.0920),
+                ('2026-02-03 01:00:00', 1.0910, 1.0915, 1.0905, 1.0910),
                 ('2026-02-03 04:00:00', 1.0900, 1.0904, 1.0899, 1.0903),
                 ('2026-02-03 05:00:00', 1.0903, 1.0905, 1.0900, 1.0903),
             ]
@@ -281,7 +281,6 @@ class SharedEntryLogicTests(unittest.TestCase):
         )
         minute_df = _build_minute_df([('2026-02-03 05:00:00', 1.0903)])
         zones = [
-            _support_zone(1.1000, 1.1010),
             _support_zone(1.0900, 1.0910),
         ]
         zone_cache = {('EURUSD', '2026-02-03'): zones}
@@ -381,6 +380,41 @@ class SharedEntryLogicTests(unittest.TestCase):
             )
 
         self.assertEqual(result.total_trades, 0)
+
+    def test_backtest_materializes_pending_end_of_sample_entry_from_minute_data(self):
+        daily_df = _build_daily_df()
+        hourly_df = _build_hourly_df(
+            [
+                ('2026-02-06 00:00:00', 1.1030, 1.1034, 1.1028, 1.1030),
+                ('2026-02-06 01:00:00', 1.1000, 1.1005, 1.0999, 1.1003),
+            ]
+        )
+        minute_df = _build_minute_df([('2026-02-06 02:00:00', 1.1004)])
+        params = StrategyParams(
+            min_entry_candle_body_pct=0.0,
+            momentum_lookback=1,
+            momentum_threshold=0.99,
+            use_time_filters=False,
+            use_pair_direction_filter=False,
+            strict_backtest_execution=True,
+            allow_h1_execution_fallback=False,
+        )
+        zone = _support_zone(1.1000, 1.1010)
+
+        with patch('fx_sr.backtest.detect_zones', return_value=[zone]):
+            result = run_backtest(
+                daily_df,
+                hourly_df,
+                'EURUSD',
+                params=params,
+                zone_history_days=20,
+                minute_df=minute_df,
+            )
+
+        self.assertEqual(result.total_trades, 0)
+        self.assertEqual(len(result.pending_trades), 1)
+        self.assertEqual(result.pending_trades[0].entry_time, pd.Timestamp('2026-02-06 02:00:00', tz='UTC'))
+        self.assertEqual(result.pending_trades[0].direction, 'LONG')
 
     def test_pair_fully_blocked_predicate(self):
         blocked_pair = _fully_blocked_pair()

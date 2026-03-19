@@ -109,10 +109,12 @@ function formatBacktestDate(isoTime) {
   if (Number.isNaN(parsed.getTime())) {
     return String(isoTime).slice(0, 10);
   }
-  return parsed.toLocaleDateString([], {
+  return parsed.toLocaleString([], {
     year: "numeric",
     month: "short",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 

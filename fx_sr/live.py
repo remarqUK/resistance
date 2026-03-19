@@ -50,6 +50,82 @@ from .sizing import (
 from . import ibkr
 
 
+# ---------------------------------------------------------------------------
+# Account balance / margin cache — refreshes from IBKR every N seconds,
+# keeps a running estimate between fetches so we don't hit the API every
+# scan cycle.
+# ---------------------------------------------------------------------------
+
+_ACCOUNT_REFRESH_INTERVAL = 300  # 5 minutes
+
+
+class _AccountCache:
+    """Time-gated cache for IBKR account balance and excess liquidity."""
+
+    def __init__(self) -> None:
+        self._balance: Optional[float] = None
+        self._currency: Optional[str] = None
+        self._excess_liquidity: Optional[float] = None
+        self._last_fetch: float = 0.0
+        self._margin_consumed_since_fetch: float = 0.0
+
+    def _needs_refresh(self) -> bool:
+        return time.time() - self._last_fetch >= _ACCOUNT_REFRESH_INTERVAL
+
+    def get_balance(
+        self,
+        cli_balance: Optional[float],
+        cli_currency: Optional[str],
+    ) -> tuple[Optional[float], Optional[str]]:
+        """Return (balance, currency), refreshing from IBKR at most every 5 min."""
+        if cli_balance is not None:
+            # CLI override — always use it, but still refresh currency
+            if cli_currency:
+                return cli_balance, cli_currency.upper()
+            if self._currency:
+                return cli_balance, self._currency
+            # Fetch once just to learn the currency
+            if self._needs_refresh():
+                self._fetch()
+            return cli_balance, self._currency
+
+        if self._needs_refresh():
+            self._fetch()
+        return self._balance, self._currency
+
+    def get_excess_liquidity(self) -> Optional[float]:
+        """Return cached excess liquidity, adjusted for margin consumed since last fetch."""
+        if self._needs_refresh():
+            self._fetch()
+        if self._excess_liquidity is None:
+            return None
+        return max(0.0, self._excess_liquidity - self._margin_consumed_since_fetch)
+
+    def record_margin_consumed(self, margin: float) -> None:
+        """Adjust the running total when an order is submitted."""
+        self._margin_consumed_since_fetch += margin
+
+    def _fetch(self) -> None:
+        """Hit IBKR for fresh balance and excess liquidity."""
+        bal, cur = ibkr.fetch_account_net_liquidation()
+        if bal is not None:
+            self._balance = bal
+        env_cur = os.getenv('IBKR_ACCOUNT_CURRENCY')
+        if cur not in (None, 'BASE'):
+            self._currency = cur
+        elif env_cur:
+            self._currency = env_cur.upper()
+
+        excess, _ = ibkr.fetch_excess_liquidity()
+        if excess is not None:
+            self._excess_liquidity = excess
+        self._margin_consumed_since_fetch = 0.0
+        self._last_fetch = time.time()
+
+
+_account_cache = _AccountCache()
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     """Outcome for a single live order submission attempt."""
@@ -908,8 +984,22 @@ def build_live_size_plans(
         price_cache=price_cache,
         hourly_data_cache=hourly_data_cache,
     )
-    return [
-        build_position_size_plan(
+
+    # Use cached excess liquidity (refreshed every 5 min, not per cycle)
+    available_margin: Optional[float] = None
+    if params.enforce_margin:
+        excess_liq = _account_cache.get_excess_liquidity()
+        available_margin = excess_liq if excess_liq is not None else balance
+
+    batch_margin_used = 0.0
+    plans: List[Optional[PositionSizePlan]] = []
+    for signal in signals:
+        current_margin = (
+            max(0.0, available_margin - batch_margin_used)
+            if available_margin is not None
+            else None
+        )
+        plan = build_position_size_plan(
             pair=signal.pair,
             direction=signal.direction,
             entry_price=signal.entry_price,
@@ -922,9 +1012,15 @@ def build_live_size_plans(
             ),
             account_currency=account_currency,
             price_lookup=price_lookup,
+            available_margin=current_margin,
+            margin_cushion_pct=params.margin_cushion_pct,
+            enforce_margin=params.enforce_margin,
+            min_order_units=params.min_order_units,
         )
-        for signal in signals
-    ]
+        if plan is not None and plan.margin_required is not None:
+            batch_margin_used += plan.margin_required
+        plans.append(plan)
+    return plans
 
 
 def _estimate_reserved_portfolio_risk(
@@ -1302,6 +1398,24 @@ def execute_signal_plans(
         signal = prepared.signal
         plan = prepared.size_plan
         quote = prepared.quote
+
+        # Pre-submit whatIf margin check (fail-open: only block on definitive liquidation)
+        if params.enforce_margin:
+            whatif = ibkr.whatif_margin_check(
+                pair=signal.pair,
+                direction=signal.direction,
+                quantity=plan.units,
+            )
+            if whatif is not None and whatif.get('would_liquidate'):
+                results[idx] = ExecutionResult(
+                    signal.pair,
+                    signal.direction,
+                    plan.units,
+                    'SKIPPED',
+                    note='whatIf: would risk liquidation',
+                )
+                continue
+
         order_ref = f"fxsr:{signal.pair}:{signal.direction}:{signal.time.strftime('%Y%m%d%H%M%S')}"
         order = ibkr.submit_fx_market_bracket_order(
             pair=signal.pair,
@@ -1311,6 +1425,9 @@ def execute_signal_plans(
             stop_loss_price=prepared.stop_price,
             order_ref=order_ref,
         )
+        # Adjust running margin total so subsequent signals in this cycle see reduced availability
+        if order is not None and plan.margin_required:
+            _account_cache.record_margin_consumed(plan.margin_required)
         if order is None:
             results[idx] = ExecutionResult(
                 signal.pair,
@@ -1335,6 +1452,8 @@ def execute_signal_plans(
             remaining_units = int(max(abs(float(remaining_units)), 0.0))
         broker_status = order.get('broker_status') or order.get('status')
         result_status = order.get('status') or 'SUBMITTED'
+        submitted_tp_price = float(order.get('take_profit_price', prepared.take_profit_price))
+        submitted_sl_price = float(order.get('stop_loss_price', prepared.stop_price))
         note = f"risk {plan.account_currency} {plan.risk_amount:,.2f}; {quote.source} quote @ {prepared.entry_price:.5f}; order submitted"
         if filled_units > 0:
             if remaining_units is None:
@@ -1360,8 +1479,8 @@ def execute_signal_plans(
             remaining_units=remaining_units,
             broker_status=broker_status,
             submitted_entry_price=prepared.entry_price,
-            submitted_tp_price=prepared.take_profit_price,
-            submitted_sl_price=prepared.stop_price,
+            submitted_tp_price=submitted_tp_price,
+            submitted_sl_price=submitted_sl_price,
             submit_bid=quote.bid,
             submit_ask=quote.ask,
             submit_spread=quote.spread,
@@ -1441,13 +1560,21 @@ def run_monitor_cycle(
         daily_data_cache: Dict[tuple[str, int], object] = {}
         zone_cache: Dict[tuple[str, int], List[SRZone]] = {}
         hourly_data_cache: Dict[str, object] = {}
-        active_balance = balance
-        env_currency = os.getenv('IBKR_ACCOUNT_CURRENCY')
-        active_currency = account_currency.upper() if account_currency else (env_currency.upper() if env_currency else None)
-        if active_balance is None:
-            active_balance, fetched_currency = ibkr.fetch_account_net_liquidation()
-            if active_currency is None and fetched_currency not in (None, 'BASE'):
-                active_currency = fetched_currency
+        active_balance, active_currency = _account_cache.get_balance(
+            balance, account_currency,
+        )
+
+        # Account health monitoring (uses cached excess liquidity)
+        if params.enforce_margin and active_balance is not None and active_balance > 0:
+            excess_liq = _account_cache.get_excess_liquidity()
+            if excess_liq is not None:
+                margin_cushion_pct = (excess_liq / active_balance) * 100.0
+                if margin_cushion_pct < 30.0:
+                    print(
+                        f"    WARNING: Margin cushion low: {margin_cushion_pct:.1f}% "
+                        f"(excess liquidity: {excess_liq:.2f})"
+                    )
+
         portfolio_state = load_portfolio_state(params, current_balance=active_balance)
 
         signals, pair_rows = collect_scan_rows(

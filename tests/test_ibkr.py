@@ -159,5 +159,71 @@ class IbkrHistoricalFetchTests(unittest.TestCase):
         self.assertEqual(rows_by_id[201]['remaining_units'], 0.0)
 
 
+class IbkrOrderRoundingTests(unittest.TestCase):
+    def test_submit_fx_market_bracket_order_rounds_jpy_exit_prices_to_min_tick(self):
+        fake_ib_async = _fake_ib_async_module()
+
+        class _BaseOrder:
+            def __init__(self, action, totalQuantity, **kwargs):
+                self.action = action
+                self.totalQuantity = totalQuantity
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        class MarketOrder(_BaseOrder):
+            pass
+
+        class LimitOrder(_BaseOrder):
+            def __init__(self, action, totalQuantity, lmtPrice, **kwargs):
+                super().__init__(action, totalQuantity, lmtPrice=lmtPrice, **kwargs)
+
+        class StopOrder(_BaseOrder):
+            def __init__(self, action, totalQuantity, stopPrice, **kwargs):
+                super().__init__(action, totalQuantity, auxPrice=stopPrice, **kwargs)
+
+        fake_ib_async.MarketOrder = MarketOrder
+        fake_ib_async.LimitOrder = LimitOrder
+        fake_ib_async.StopOrder = StopOrder
+
+        contract = object()
+        placed_orders = []
+        ib = MagicMock()
+        ib.client.getReqId.side_effect = [15, 16, 17]
+        ib.reqContractDetails.return_value = [types.SimpleNamespace(minTick=0.005)]
+
+        def _place_order(_contract, order):
+            placed_orders.append(order)
+            return types.SimpleNamespace(
+                order=order,
+                orderStatus=types.SimpleNamespace(
+                    status='Submitted',
+                    avgFillPrice=0.0,
+                    filled=0.0,
+                    remaining=float(order.totalQuantity),
+                ),
+            )
+
+        ib.placeOrder.side_effect = _place_order
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}), \
+                patch('fx_sr.ibkr._get_connection', return_value=(ib, True)), \
+                patch('fx_sr.ibkr._make_contract', return_value=contract):
+            result = ibkr.submit_fx_market_bracket_order(
+                pair='USDJPY',
+                direction='SHORT',
+                quantity=62252,
+                take_profit_price=159.10159925,
+                stop_loss_price=159.6941825,
+                order_ref='fxsr:USDJPY:SHORT:20260318140000',
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(placed_orders), 3)
+        self.assertAlmostEqual(placed_orders[1].lmtPrice, 159.105)
+        self.assertAlmostEqual(placed_orders[2].auxPrice, 159.69)
+        self.assertAlmostEqual(result['take_profit_price'], 159.105)
+        self.assertAlmostEqual(result['stop_loss_price'], 159.69)
+
+
 if __name__ == '__main__':
     unittest.main()

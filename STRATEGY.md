@@ -25,9 +25,9 @@ Checked on every 1-hour candle:
 2. Price must be at or beyond the zone midpoint.
 3. At support, the candle must close bullish for a long.
 4. At resistance, the candle must close bearish for a short.
-5. Entry candle body must be at least `15%` of candle range by default.
+5. Entry candle body must be at least `0%` of candle range by default.
 6. Momentum filter checks the previous `2` candles for strong movement into the zone.
-7. Cooldown requires `2` hourly bars between entries on the same pair.
+7. Cooldown requires `1` hourly bar between entries on the same pair.
 8. Pair-direction and time filters block historically weak setups by default.
 
 ## Exit Rules
@@ -68,12 +68,14 @@ The headline benchmark now uses execution-aware portfolio filtering. Raw per-pai
 | `sl_buffer_pct` | `0.15` |
 | `early_exit_r` | `0.4` |
 | `cooldown_bars` | `1` |
-| `min_entry_candle_body_pct` | `0.05` |
+| `min_entry_candle_body_pct` | `0.0` |
+| `zone_penetration_pct` | `0.36` |
+| `momentum_threshold` | `0.75` |
 | `momentum_lookback` | `2` |
 | `max_correlated_trades` | `5` |
 | `blocked_hours` | `{2, 3}` |
 | `blocked_days` | `{}` |
-| `risk_pct` | `8.0` |
+| `risk_pct` | `6.0` |
 | `dynamic_risk` | `enabled` |
 | `dd_risk_start` | `5.0` |
 | `dd_risk_full` | `18.0` |
@@ -81,14 +83,14 @@ The headline benchmark now uses execution-aware portfolio filtering. Raw per-pai
 
 Latest direct CLI 365-day result with that profile:
 
-- Raw signals: `944`
-- Compounded trades: `944`
-- Win rate: `46.0%`
-- Compounded return: `+4,731,530.9%`
-- Final balance: `GBP 47,316,309.06`
-- Max drawdown: `19.9%`
-- Max losing streak: `8`
-- Assumptions: `GBP 1,000` starting balance, `8%` base risk with drawdown scaling to `0.5%`, `zone_history_days=180`, `0.6` pip spread, and `0.2` pip stop slippage
+- Raw signals: `882`
+- Compounded trades: `868`
+- Win rate: `51.04%`
+- Compounded return: `+249,831,772.37%`
+- Final balance: `GBP 2,498,318,723.73`
+- Max drawdown: `16.38%`
+- Max losing streak: `7`
+- Assumptions: `GBP 1,000` starting balance, `6%` base risk with drawdown scaling to `0.5%`, `zone_history_days=180`, `0.6` pip spread, and `0.2` pip stop slippage
 
 ## Other Profiles
 
@@ -115,7 +117,7 @@ The sweep now uses the same corrected rolling `zone_history_days` window as the 
 
 The strategy stack uses only:
 
-1. SQLite cache for stored OHLC history
+1. PostgreSQL cache for stored OHLC history
 2. IBKR for fresh historical and latest-price data
 
 There is no Yahoo Finance path left in the strategy, backtest, live scanner, or optimizer.
@@ -128,7 +130,7 @@ There is no Yahoo Finance path left in the strategy, backtest, live scanner, or 
 - Matches each position to the nearest S/R zone
 - Computes SL/TP levels from the same strategy parameters
 - Runs exit rule checks and prints alerts
-- Persists tracked state in SQLite for restart resilience
+- Persists tracked state in PostgreSQL for restart resilience
 
 ## Live Execution
 
@@ -152,7 +154,7 @@ Zones refresh once per day. Hourly bars refresh once per hour. The periodic scan
 
 ## Signal History
 
-Every detected signal is persisted in the `detected_signal` SQLite table (`live_history.py`). The table tracks the full signal lifecycle:
+Every detected signal is persisted in the `detected_signal` PostgreSQL table (`live_history.py`). The table tracks the full signal lifecycle:
 
 | Phase | Fields |
 |-------|--------|

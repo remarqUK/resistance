@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from fx_sr.data import _remaining_days_to_fetch
+from fx_sr.data import _is_cache_fresh, _remaining_days_to_fetch
 
 
 class RemainingDaysToFetchTests(unittest.TestCase):
@@ -72,6 +72,70 @@ class RemainingDaysToFetchTests(unittest.TestCase):
                 now=now,
             ),
             4,
+        )
+
+    def test_minute_cache_gapped_since_last_bar_fetches_tail_day(self):
+        now = pd.Timestamp('2026-03-16T12:00:00Z')
+        start = now - pd.Timedelta(days=365)
+        end = now - pd.Timedelta(hours=8)
+        self.assertEqual(
+            _remaining_days_to_fetch(
+                interval='1m',
+                requested_days=365,
+                cached_range=(start, end, 400000),
+                now=now,
+            ),
+            1,
+        )
+
+
+class CacheFreshnessTests(unittest.TestCase):
+    def test_minute_cache_same_day_gap_is_not_fresh(self):
+        now = pd.Timestamp('2026-03-18T16:00:00Z')
+        index = pd.date_range('2026-03-17T16:01:00Z', '2026-03-18T09:21:00Z', freq='1min')
+        cached = pd.DataFrame(
+            {
+                'Open': [1.0] * len(index),
+                'High': [1.0] * len(index),
+                'Low': [1.0] * len(index),
+                'Close': [1.0] * len(index),
+                'Volume': [0.0] * len(index),
+            },
+            index=index,
+        )
+
+        self.assertFalse(
+            _is_cache_fresh(
+                cached,
+                interval='1m',
+                requested_days=365,
+                min_rows=500,
+                now=now,
+            )
+        )
+
+    def test_hourly_cache_one_bar_behind_is_not_fresh(self):
+        now = pd.Timestamp('2026-03-18T16:07:00Z')
+        index = pd.date_range('2026-03-01T00:00:00Z', '2026-03-18T14:00:00Z', freq='1h')
+        cached = pd.DataFrame(
+            {
+                'Open': [1.0] * len(index),
+                'High': [1.0] * len(index),
+                'Low': [1.0] * len(index),
+                'Close': [1.0] * len(index),
+                'Volume': [0.0] * len(index),
+            },
+            index=index,
+        )
+
+        self.assertFalse(
+            _is_cache_fresh(
+                cached,
+                interval='1h',
+                requested_days=365,
+                min_rows=24,
+                now=now,
+            )
         )
 
 

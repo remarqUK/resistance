@@ -5,6 +5,8 @@ Primary data source for historical and live FX data used by the strategy.
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from contextlib import contextmanager
 import os
 import threading
 import time
@@ -104,6 +106,56 @@ TWS_CLIENT_ID = _get_env_int('IBKR_CLIENT_ID', DEFAULT_TWS_CLIENT_ID)
 # IBKR client ID without clobbering peers in other threads.
 _THREAD_STATE = threading.local()
 _IBKR_LOCK = threading.RLock()
+_HISTORICAL_FETCH_CONCURRENCY = max(1, _get_env_int('IBKR_HISTORICAL_FETCH_CONCURRENCY', 2))
+_HISTORICAL_FETCH_SEMAPHORE = threading.BoundedSemaphore(_HISTORICAL_FETCH_CONCURRENCY)
+_HISTORICAL_REQUEST_GAP_SECONDS = max(0.0, _get_env_int('IBKR_HISTORICAL_REQUEST_GAP_MS', 200)) / 1000.0
+_HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS = max(5.0, _get_env_int('IBKR_HISTORICAL_FETCH_SLOT_TIMEOUT_MS', 15000) / 1000.0)
+
+
+@contextmanager
+def _historical_fetch_slot(timeout_s: float | None = None):
+    """Throttle concurrent historical requests across worker threads."""
+    timeout = _HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS if timeout_s is None else timeout_s
+    acquired = _HISTORICAL_FETCH_SEMAPHORE.acquire(timeout=timeout)
+    if not acquired:
+        raise TimeoutError(f'timed out waiting {timeout:.1f}s for historical fetch slot')
+    try:
+        yield
+    finally:
+        try:
+            _HISTORICAL_FETCH_SEMAPHORE.release()
+        except ValueError:
+            pass
+
+
+def set_historical_fetch_concurrency(max_concurrent: int | None = None) -> int:
+    """Update or return the historical request concurrency limit."""
+    global _HISTORICAL_FETCH_CONCURRENCY, _HISTORICAL_FETCH_SEMAPHORE
+    if max_concurrent is None:
+        return _HISTORICAL_FETCH_CONCURRENCY
+
+    limit = max(1, int(max_concurrent))
+    _HISTORICAL_FETCH_CONCURRENCY = limit
+    _HISTORICAL_FETCH_SEMAPHORE = threading.BoundedSemaphore(limit)
+    return limit
+
+
+def _respect_historical_request_gap() -> None:
+    """Delay between consecutive historical requests to reduce TWS pacing pressure."""
+    if _HISTORICAL_REQUEST_GAP_SECONDS > 0:
+        time.sleep(_HISTORICAL_REQUEST_GAP_SECONDS)
+
+
+def _is_retriable_historical_error(error: Exception) -> bool:
+    """Return True when historical fetch errors are likely transient and worth retrying."""
+    message = str(error).lower()
+    return (
+        'timeout' in message
+        or 'timed out' in message
+        or '366' in message
+        or 'no historical data query found' in message
+        or 'pacing violation' in message
+    )
 
 
 def _resolve_client_id(client_id: Optional[int] = None) -> int:
@@ -315,6 +367,74 @@ def _make_contract(pair: str):
     return Forex(pair)
 
 
+def _pair_min_tick(pair: str) -> float:
+    """Return a conservative fallback tick size for a pair."""
+
+    from .config import PAIRS
+
+    config = PAIRS.get((pair or '').upper())
+    pip = float((config or {}).get('pip', 0.0001) or 0.0001)
+    return pip / 2.0 if pip > 0 else 0.00005
+
+
+def _contract_min_tick(ib, contract, pair: str) -> float:
+    """Resolve the minimum price increment for an IBKR contract."""
+
+    try:
+        details = ib.reqContractDetails(contract) or []
+    except Exception:
+        details = []
+
+    for detail in details:
+        min_tick = float(getattr(detail, 'minTick', 0.0) or 0.0)
+        if min_tick > 0:
+            return min_tick
+    return _pair_min_tick(pair)
+
+
+def _round_price_to_tick(price: float, tick_size: float, mode: str = 'nearest') -> float:
+    """Snap a price to the contract tick size using deterministic decimal math."""
+
+    tick = Decimal(str(float(tick_size)))
+    if tick <= 0:
+        return float(price)
+
+    value = Decimal(str(float(price))) / tick
+    if mode == 'up':
+        snapped = value.to_integral_value(rounding=ROUND_CEILING) * tick
+    elif mode == 'down':
+        snapped = value.to_integral_value(rounding=ROUND_FLOOR) * tick
+    else:
+        snapped = value.to_integral_value() * tick
+    return float(snapped)
+
+
+def _round_bracket_exit_prices(
+    pair: str,
+    direction: str,
+    take_profit_price: float,
+    stop_loss_price: float,
+    *,
+    ib=None,
+    contract=None,
+) -> tuple[float, float]:
+    """Round TP/SL to valid IBKR ticks without making the trade less conservative."""
+
+    tick_size = _contract_min_tick(ib, contract, pair) if ib is not None and contract is not None else _pair_min_tick(pair)
+    normalized_direction = (direction or '').upper()
+    if normalized_direction == 'LONG':
+        tp_mode = 'down'
+        sl_mode = 'up'
+    else:
+        tp_mode = 'up'
+        sl_mode = 'down'
+
+    return (
+        _round_price_to_tick(take_profit_price, tick_size, tp_mode),
+        _round_price_to_tick(stop_loss_price, tick_size, sl_mode),
+    )
+
+
 def _contract_to_pair(contract) -> Optional[str]:
     """Convert an IB contract object to our pair ID."""
 
@@ -356,55 +476,75 @@ def fetch_historical(
     if not connected:
         return None
 
+    from ib_async import util
+
+    contract = _make_contract(pair)
     try:
-        from ib_async import util
-
-        contract = _make_contract(pair)
         ib.qualifyContracts(contract)
-
-        # Map interval to IB bar size
-        interval_map = {'1d': '1 day', '1h': '1 hour', '1m': '1 min'}
-        bar_size = interval_map.get(interval, '1 hour')
-
-            # IB duration string — minute data capped at 7 days (IB limit for 1-min bars)
-        # IB duration string - minute data capped at 7 days (IB limit for 1-min bars)
-        effective_days = min(days, 7) if interval == '1m' else days
-        if effective_days <= 365:
-            duration = f'{effective_days} D'
-        else:
-            years = effective_days // 365
-            remaining = effective_days % 365
-            if remaining > 0:
-                duration = f'{effective_days} D'
-            else:
-                duration = f'{years} Y'
-
-        # For hourly data > 365 days, fetch in chunks to respect IB limits
-        if interval == '1h' and days > 365:
-            return _fetch_hourly_chunked(ib, contract, days)
-
-        request_end = _format_historical_end_datetime(end_datetime)
-
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime=request_end,
-            durationStr=duration,
-            barSizeSetting=bar_size,
-            whatToShow='MIDPOINT',
-            useRTH=False,
-            formatDate=2,
-        )
-
-        if not bars:
-            return None
-
-        df = util.df(bars)
-        return _normalize_df(df)
-
     except Exception as e:
-        print(f"    IBKR fetch failed for {pair} ({interval}): {e}")
+        print(f'    IBKR fetch failed for {pair} ({interval}): {e}')
         return None
 
+    # Map interval to IB bar size
+    interval_map = {'1d': '1 day', '1h': '1 hour', '1m': '1 min'}
+    bar_size = interval_map.get(interval, '1 hour')
+
+    # IB duration string - minute data capped at 7 days (IB limit for 1-min bars)
+    effective_days = min(days, 7) if interval == '1m' else days
+    if effective_days <= 365:
+        duration = f'{effective_days} D'
+    else:
+        years = effective_days // 365
+        remaining = effective_days % 365
+        if remaining > 0:
+            duration = f'{effective_days} D'
+        else:
+            duration = f'{years} Y'
+
+    # For hourly data > 365 days, fetch in chunks to respect IB limits
+    if interval == '1h' and days > 365:
+        return _fetch_hourly_chunked(ib, contract, days)
+
+    request_end = _format_historical_end_datetime(end_datetime)
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with _historical_fetch_slot():
+                bars = ib.reqHistoricalData(
+                    contract,
+                    endDateTime=request_end,
+                    durationStr=duration,
+                    barSizeSetting=bar_size,
+                    whatToShow='MIDPOINT',
+                    useRTH=False,
+                    formatDate=2,
+                )
+            _respect_historical_request_gap()
+
+            if not bars:
+                return None
+
+            df = util.df(bars)
+            return _normalize_df(df)
+        except Exception as e:
+            if attempt < max_attempts and _is_retriable_historical_error(e):
+                print(f'    IBKR fetch retry {attempt}/{max_attempts} for {pair} ({interval}): {e}')
+                try:
+                    ib.disconnect()
+                except Exception:
+                    pass
+                _set_thread_connection_state(None, False, _resolve_client_id(client_id))
+                ib, connected = _get_connection(client_id=client_id)
+                if not connected:
+                    break
+                time.sleep(1.0 * attempt)
+                continue
+
+            print(f"    IBKR fetch failed for {pair} ({interval}): {e}")
+            return None
+
+    return None
 
 def _format_historical_end_datetime(
     end_datetime: datetime | pd.Timestamp | str | None,
@@ -427,7 +567,6 @@ def _format_historical_end_datetime(
 def _fetch_hourly_chunked(ib, contract, total_days: int) -> Optional[pd.DataFrame]:
     """Fetch hourly data in chunks to avoid IB pacing limits."""
     from ib_async import util
-    import time
 
     all_frames = []
     chunk_days = 300  # safe chunk size for hourly
@@ -438,15 +577,17 @@ def _fetch_hourly_chunked(ib, contract, total_days: int) -> Optional[pd.DataFram
         fetch_days = min(chunk_days, remaining)
         duration = f'{fetch_days} D'
 
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime=end_dt,
-            durationStr=duration,
-            barSizeSetting='1 hour',
-            whatToShow='MIDPOINT',
-            useRTH=False,
-            formatDate=2,
-        )
+        with _historical_fetch_slot():
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime=end_dt,
+                durationStr=duration,
+                barSizeSetting='1 hour',
+                whatToShow='MIDPOINT',
+                useRTH=False,
+                formatDate=2,
+            )
+        _respect_historical_request_gap()
 
         if not bars:
             break
@@ -458,9 +599,7 @@ def _fetch_hourly_chunked(ib, contract, total_days: int) -> Optional[pd.DataFram
         end_dt = bars[0].date
         remaining -= fetch_days
 
-        # Respect IB pacing: 15s between identical requests
-        if remaining > 0:
-            time.sleep(1)
+        # Request spacing handled by _HISTORICAL_REQUEST_GAP_SECONDS.
 
     if not all_frames:
         return None
@@ -1077,6 +1216,117 @@ def fetch_account_net_liquidation() -> tuple[Optional[float], Optional[str]]:
             return None, None
 
 
+def fetch_excess_liquidity() -> tuple[Optional[float], Optional[str]]:
+    """Read ExcessLiquidity from the TWS account summary.
+
+    Excess liquidity = equity - maintenance margin.
+    When this hits zero, IBKR liquidates positions.
+    """
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None, None
+
+        try:
+            summary = ib.accountSummary()
+            base_value = None
+            fallback_value = None
+            fallback_currency = None
+
+            for item in summary:
+                if getattr(item, 'tag', None) != 'ExcessLiquidity':
+                    continue
+                try:
+                    value = float(item.value)
+                except (TypeError, ValueError):
+                    continue
+
+                currency = getattr(item, 'currency', None) or None
+                if currency == 'BASE':
+                    base_value = value
+                elif fallback_value is None and currency:
+                    fallback_value = value
+                    fallback_currency = currency
+
+            if base_value is not None:
+                return base_value, 'BASE'
+            if fallback_value is not None:
+                return fallback_value, fallback_currency
+            return None, None
+        except Exception as e:
+            print(f"    Warning: failed to read IBKR excess liquidity: {e}")
+            return None, None
+
+
+def _safe_float(value) -> Optional[float]:
+    """Convert a whatIf field to float, handling IBKR sentinel values."""
+    if value in (None, ''):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    # IBKR uses Double.MAX_VALUE as a sentinel for unavailable fields
+    if f > 1e300:
+        return None
+    return f
+
+
+def whatif_margin_check(
+    pair: str,
+    direction: str,
+    quantity: int,
+) -> Optional[dict]:
+    """Pre-flight margin check using IBKR's whatIf API.
+
+    Returns margin impact without submitting an order.
+    Returns None if the check fails or IBKR is unavailable.
+    """
+    if quantity <= 0:
+        return None
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None
+
+        try:
+            from ib_async import MarketOrder
+
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
+
+            action = 'BUY' if direction == 'LONG' else 'SELL'
+            order = MarketOrder(action, int(quantity))
+            order.whatIf = True
+
+            state = ib.whatIfOrder(contract, order)
+            if state is None:
+                return None
+
+            init_margin = _safe_float(getattr(state, 'initMarginChange', None))
+            maint_margin = _safe_float(getattr(state, 'maintMarginChange', None))
+            equity_after = _safe_float(getattr(state, 'equityWithLoanAfter', None))
+            maint_after = _safe_float(getattr(state, 'maintMarginAfter', None))
+
+            would_liquidate = False
+            if equity_after is not None and maint_after is not None:
+                would_liquidate = equity_after <= maint_after
+
+            return {
+                'pair': pair,
+                'direction': direction,
+                'quantity': quantity,
+                'init_margin_change': init_margin,
+                'maint_margin_change': maint_margin,
+                'equity_with_loan_after': equity_after,
+                'would_liquidate': would_liquidate,
+            }
+        except Exception as e:
+            print(f"    Warning: whatIf margin check failed for {pair}: {e}")
+            return None
+
+
 def fetch_open_order_pairs() -> set[str]:
     """Return pairs with active FX orders that are not terminal."""
     terminal_statuses = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
@@ -1400,6 +1650,14 @@ def submit_fx_market_bracket_order(
 
             contract = _make_contract(pair)
             ib.qualifyContracts(contract)
+            rounded_take_profit_price, rounded_stop_loss_price = _round_bracket_exit_prices(
+                pair,
+                direction,
+                take_profit_price,
+                stop_loss_price,
+                ib=ib,
+                contract=contract,
+            )
 
             action = 'BUY' if direction == 'LONG' else 'SELL'
             reverse_action = 'SELL' if action == 'BUY' else 'BUY'
@@ -1415,7 +1673,7 @@ def submit_fx_market_bracket_order(
             take_profit = LimitOrder(
                 reverse_action,
                 int(quantity),
-                float(take_profit_price),
+                float(rounded_take_profit_price),
                 orderId=ib.client.getReqId(),
                 parentId=parent_order_id,
                 orderRef=f'{order_ref}:tp' if order_ref else '',
@@ -1424,7 +1682,7 @@ def submit_fx_market_bracket_order(
             stop_loss = StopOrder(
                 reverse_action,
                 int(quantity),
-                float(stop_loss_price),
+                float(rounded_stop_loss_price),
                 orderId=ib.client.getReqId(),
                 parentId=parent_order_id,
                 orderRef=f'{order_ref}:sl' if order_ref else '',
@@ -1461,7 +1719,11 @@ def submit_fx_market_bracket_order(
                 'total_units': total_units,
                 'take_profit_order_id': getattr(tp_live_order, 'orderId', None),
                 'stop_loss_order_id': getattr(sl_live_order, 'orderId', None),
+                'take_profit_price': float(rounded_take_profit_price),
+                'stop_loss_price': float(rounded_stop_loss_price),
             }
         except Exception as e:
             print(f"    Warning: failed to submit FX bracket order for {pair}: {e}")
             return None
+
+

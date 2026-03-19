@@ -459,6 +459,34 @@ def load_detected_signal_stats(
         conn.close()
 
 
+def load_execution_activity(
+    *,
+    limit: int | None = None,
+    db_path: str | None = None,
+) -> list[dict]:
+    """Load recent execution activity rows for dashboard hydration."""
+
+    db_path = _ensure_table(db_path)
+    conn = _connect(db_path)
+    try:
+        query = """
+            SELECT *
+            FROM detected_signal
+            WHERE executed_at IS NOT NULL
+            ORDER BY COALESCE(executed_at, last_updated_at, detected_at) DESC
+        """
+        params: list[object] = []
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(int(limit))
+
+        cursor = conn.execute(query, params)
+        rows = cursor.fetchall()
+        return [_row_to_dict(cursor, row) for row in rows]
+    finally:
+        conn.close()
+
+
 def _merge_row(existing: dict | None, **updates) -> dict:
     """Merge DB updates into an existing row payload."""
 

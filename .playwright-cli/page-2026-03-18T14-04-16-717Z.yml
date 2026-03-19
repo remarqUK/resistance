@@ -1,0 +1,51 @@
+- generic [ref=e2]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: FX support / resistance
+      - heading "Strategy Replay" [level=1] [ref=e7]
+    - link "Back to Live Board" [ref=e8] [cursor=pointer]:
+      - /url: /
+  - generic [ref=e10]:
+    - generic [ref=e11]:
+      - generic [ref=e12]: Pair
+      - combobox "Pair" [ref=e13]:
+        - option "AUDCAD"
+        - option "AUDJPY"
+        - option "AUDNZD"
+        - option "AUDUSD"
+        - option "CADJPY"
+        - option "CHFJPY"
+        - option "EURAUD"
+        - option "EURCAD"
+        - option "EURCHF"
+        - option "EURGBP"
+        - option "EURJPY"
+        - option "EURUSD"
+        - option "GBPAUD"
+        - option "GBPCAD"
+        - option "GBPCHF" [selected]
+        - option "GBPJPY"
+        - option "GBPUSD"
+        - option "NZDJPY"
+        - option "NZDUSD"
+        - option "USDCAD"
+        - option "USDCHF"
+        - option "USDJPY"
+    - generic [ref=e14]:
+      - generic [ref=e15]: Date
+      - textbox "Date" [ref=e16]
+    - generic [ref=e17]:
+      - generic [ref=e18]: Profile
+      - combobox "Profile" [ref=e19]:
+        - option "optimized"
+        - option "source"
+        - option "balanced"
+        - option "high_volume" [selected]
+        - option "aggressive"
+    - generic [ref=e20]:
+      - generic [ref=e21]: Timeframe
+      - combobox "Timeframe" [ref=e22]:
+        - option "1 min"
+        - option "1 hour" [selected]
+    - button "Load" [ref=e23] [cursor=pointer]
+    - button "Update Data" [ref=e24] [cursor=pointer]

@@ -38,13 +38,6 @@ def _source_label() -> str:
     return 'IBKR'
 
 
-def _cache_age_days(cached: pd.DataFrame) -> int:
-    """Return the age in days of the latest cached bar."""
-    last_cached = pd.to_datetime(cached.index[-1])
-    now = pd.Timestamp.now(tz=last_cached.tzinfo) if last_cached.tzinfo else pd.Timestamp.now()
-    return (now - last_cached).days
-
-
 def _as_utc(ts: pd.Timestamp | datetime | str) -> pd.Timestamp:
     """Normalize a timestamp to tz-aware UTC."""
     value = pd.Timestamp(ts)
@@ -61,7 +54,7 @@ def _remaining_days_to_fetch(
     """Compute the minimum trailing days needed to catch up from cache to now.
 
     Args:
-        interval: One of '1d' or '1h'
+        interval: One of '1d', '1h', or '1m'
         requested_days: User-requested historical horizon.
         cached_range: Optional tuple of (first_ts, last_ts, row_count)
         now: Optional fixed current time (primarily for tests)
@@ -71,7 +64,7 @@ def _remaining_days_to_fetch(
     if cached_range is None:
         return requested_days
 
-    if interval not in {'1d', '1h'}:
+    if interval not in {'1d', '1h', '1m'}:
         raise ValueError(f'Unsupported interval for resume logic: {interval}')
 
     cached_first = _as_utc(cached_range[0])
@@ -82,15 +75,43 @@ def _remaining_days_to_fetch(
     if cached_last < requested_start or cached_first > requested_start:
         return requested_days
 
-    interval_delta = pd.Timedelta(days=1) if interval == '1d' else pd.Timedelta(hours=1)
+    if interval == '1d':
+        interval_delta = pd.Timedelta(days=1)
+        gap_seconds = (now_ts - cached_last).total_seconds()
+        if gap_seconds <= interval_delta.total_seconds():
+            return 0
+
+        bars_per_day = 1
+        missing_bars = math.ceil(gap_seconds / interval_delta.total_seconds())
+        missing_days = int(math.ceil(missing_bars / bars_per_day))
+        return min(requested_days, max(1, missing_days))
+
+    # For 1h/1m we need to be weekend-aware because FX is closed on weekends.
+    interval_delta = {
+        '1h': pd.Timedelta(hours=1),
+        '1m': pd.Timedelta(minutes=1),
+    }[interval]
     gap_seconds = (now_ts - cached_last).total_seconds()
     if gap_seconds <= interval_delta.total_seconds():
         return 0
 
-    bars_per_day = 1 if interval == '1d' else 24
-    missing_bars = math.ceil(gap_seconds / interval_delta.total_seconds())
-    missing_days = int(math.ceil(missing_bars / bars_per_day))
-    return min(requested_days, max(1, missing_days))
+    trading_days = _trading_days_between(cached_last, now_ts)
+    if cached_last.normalize() < now_ts.normalize():
+        trading_days += 1
+    return min(requested_days, max(1, trading_days))
+
+
+def _trading_days_between(start_ts, end_ts) -> int:
+    """Count business (weekday) days between two timestamps, inclusive of endpoints."""
+
+    if start_ts is None or end_ts is None:
+        return 0
+
+    start = pd.Timestamp(start_ts).normalize()
+    end = pd.Timestamp(end_ts).normalize()
+    if end < start:
+        return 0
+    return len(pd.bdate_range(start, end, freq='B'))
 
 
 def _download_pair_data(
@@ -193,6 +214,7 @@ def download_single_interval(
     days: int,
     *,
     client_id: int | None = None,
+    verbose: bool = False,
 ) -> int:
     """Download one (pair, interval) combo. Returns rows saved."""
 
@@ -200,6 +222,9 @@ def download_single_interval(
 
     if interval in ('1d', '1h'):
         cached_range = get_cached_range(ticker, interval)
+        cached_rows = int(cached_range[2]) if cached_range is not None else 0
+        cached_last = cached_range[1] if cached_range is not None else None
+        cached_first = cached_range[0] if cached_range is not None else None
         fetch_days = _remaining_days_to_fetch(
             interval=interval,
             requested_days=days,
@@ -207,18 +232,48 @@ def download_single_interval(
             now=pd.Timestamp.now(tz='UTC'),
         )
         if fetch_days <= 0:
-            print(f'    {pair_id}: {interval} cache already up to date')
+            if verbose:
+                print(f'    {pair_id}: {interval} cache already up to date '
+                      f'(rows={cached_rows}, {cached_first} -> {cached_last})')
             return 0
-        print(f'    {pair_id}: downloading {interval} data ({fetch_days}d target)')
+        if verbose:
+            cached_last_display = (
+                f', last={cached_last}' if cached_last is not None else ', last=none'
+            )
+            cached_first_display = (
+                f', first={cached_first}' if cached_first is not None else ', first=none'
+            )
+            print(
+                f'    {pair_id}: downloading {interval} data ({fetch_days}d target; '
+                f'cached_rows={cached_rows}{cached_first_display}{cached_last_display})'
+            )
         df = _fetch_live(ticker, interval, fetch_days, client_id=client_id)
         if df.empty:
             return 0
         save_ohlc(ticker, interval, df)
-        print(f'    {pair_id}: {interval} -> {len(df)} rows saved')
+        if verbose:
+            print(f'    {pair_id}: {interval} -> {len(df)} rows saved')
         return len(df)
 
     if interval == '1m':
-        print(f'    {pair_id}: downloading 1m data ({days}d target)')
+        cached_range = get_cached_range(ticker, interval)
+        cached_rows = int(cached_range[2]) if cached_range is not None else 0
+        min_expected_rows = int(days * 1000)
+        fetch_days = _remaining_days_to_fetch(
+            interval=interval,
+            requested_days=days,
+            cached_range=cached_range,
+            now=pd.Timestamp.now(tz='UTC'),
+        )
+        if cached_rows < min_expected_rows:
+            fetch_days = days
+        if fetch_days <= 0:
+            if verbose:
+                cached_last = cached_range[1] if cached_range is not None else None
+                print(f'    {pair_id}: 1m cache already up to date (last={cached_last})')
+            return 0
+        if verbose:
+            print(f'    {pair_id}: downloading 1m data ({fetch_days}d target)')
 
         def _progress(chunk_idx, chunk_total, first_ts, last_ts, row_count):
             print(
@@ -227,20 +282,38 @@ def download_single_interval(
             )
 
         df = backfill_minute_data_cached(
-            ticker, days=days, client_id=client_id, progress_cb=_progress,
+            ticker, days=fetch_days, client_id=client_id,
+            progress_cb=_progress if verbose else None,
         )
         count = len(df)
-        print(f'    {pair_id}: 1m -> {count} rows total')
+        if verbose:
+            print(f'    {pair_id}: 1m -> {count} rows total')
         return count
 
     return 0
 
 
-def _is_cache_fresh(cached: pd.DataFrame, min_rows: int, max_age_days: int = 3) -> bool:
-    """Check whether cached data is fresh enough to use directly."""
+def _is_cache_fresh(
+    cached: pd.DataFrame,
+    *,
+    interval: str,
+    requested_days: int,
+    min_rows: int,
+    now: pd.Timestamp | None = None,
+) -> bool:
+    """Check whether cached data covers the requested trailing window."""
+
     if cached.empty:
         return False
-    return _cache_age_days(cached) <= max_age_days and len(cached) >= min_rows
+    if len(cached) < min_rows:
+        return False
+
+    return _remaining_days_to_fetch(
+        interval=interval,
+        requested_days=requested_days,
+        cached_range=(cached.index[0], cached.index[-1], len(cached)),
+        now=now,
+    ) <= 0
 
 
 def fetch_daily_data(
@@ -258,7 +331,12 @@ def fetch_daily_data(
     if not force_refresh:
         cached = load_ohlc(ticker_symbol, '1d', start, end)
         min_rows = max(20, int(days * 0.5))
-        if _is_cache_fresh(cached, min_rows=min_rows):
+        if _is_cache_fresh(
+            cached,
+            interval='1d',
+            requested_days=days,
+            min_rows=min_rows,
+        ):
             return cached
         if allow_stale_cache and len(cached) >= min_rows:
             return cached
@@ -288,7 +366,12 @@ def fetch_hourly_data(
         # Small windows like 1 day only contain ~24 hourly bars, so requiring
         # 48 rows forces unnecessary live refreshes and parallel IBKR collisions.
         min_rows = max(24, int(days * 10))
-        if _is_cache_fresh(cached, min_rows=min_rows):
+        if _is_cache_fresh(
+            cached,
+            interval='1h',
+            requested_days=days,
+            min_rows=min_rows,
+        ):
             return cached
         if allow_stale_cache and len(cached) >= min_rows:
             return cached
@@ -404,7 +487,12 @@ def fetch_minute_data_cached(
     start = end - timedelta(days=days)
 
     cached = load_ohlc(ticker_symbol, '1m', start, end)
-    if _is_cache_fresh(cached, min_rows=max(60, days * 500), max_age_days=1):
+    if _is_cache_fresh(
+        cached,
+        interval='1m',
+        requested_days=days,
+        min_rows=max(60, days * 500),
+    ):
         return cached
     if allow_stale_cache and not cached.empty:
         return cached

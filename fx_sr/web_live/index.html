@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FX S/R Live Dashboard</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <div class="shell">
@@ -16,8 +17,11 @@
         </div>
         <div><span id="connection-pill" class="pill pill-muted">Connecting</span></div>
         <div><button id="trade-toggle-btn" type="button" class="toolbar-btn hero-toggle-btn" hidden>Pause Entries</button></div>
+        <div><button id="fill-cache-btn" type="button" class="toolbar-btn" style="background:#257aab;border-color:#257aab">Fill</button></div>
+        <div><button id="rerun-backtest-btn" type="button" class="toolbar-btn" style="background:#3a6a8c;border-color:#3a6a8c">Re-run Backtest</button></div>
         <div><button id="stop-server-btn" type="button" class="toolbar-btn" style="color:#fff;background:#b23b29;border-color:#b23b29">Stop Server</button></div>
         <div class="hero-actions hero-actions-vertical hero-links-column">
+          <a href="/trade-log" target="_blank" class="hero-action">Trade Log</a>
           <a href="/replay" target="_blank" class="hero-action">Strategy Replay</a>
           <a href="/backtest-trades" target="_blank" class="hero-action">All Backtest Trades</a>
           <a href="/backtest-diary" target="_blank" class="hero-action">Trade Diary</a>
@@ -48,7 +52,7 @@
       </article>
     </section>
 
-    <main class="board">
+    <main class="board live-marketboard">
       <section class="panel panel-watchlist">
         <p class="panel-note" style="max-width:none;text-align:left">Signals and tracked pairs float to the top while updates stream in per pair.</p>
         <div class="table-wrap">
@@ -87,12 +91,14 @@
 
       <section class="panel">
         <div class="split-panel">
-          <div>
+          <div class="split-panel-section">
+            <div class="panel-subhead">Exit alerts</div>
             <div id="alerts-list" class="stack-list compact-list">
               <div class="empty-card">No exit alerts.</div>
             </div>
           </div>
-          <div>
+          <div class="split-panel-section">
+            <div class="panel-subhead">Transactions</div>
             <div id="executions-list" class="stack-list compact-list">
               <div class="empty-card">No execution activity.</div>
             </div>

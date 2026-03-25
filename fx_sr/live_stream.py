@@ -217,6 +217,10 @@ class StreamingScanner:
     ) -> Optional[Signal]:
         """Evaluate one finalized hourly bar without tick gating or cooldown."""
 
+        # Clear dedup state so the authoritative hourly evaluation always
+        # gets through even if backfill already emitted this signal.
+        self._last_signal_id.pop(pair, None)
+
         signal = self._evaluate_signal(
             pair,
             price,

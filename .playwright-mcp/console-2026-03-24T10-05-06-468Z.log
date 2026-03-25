@@ -1,0 +1,23 @@
+[     249ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8765/favicon.ico:0
+[  154777ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  158328ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  161871ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  165402ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  168931ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  172458ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  175981ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  179507ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  183059ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  186586ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  190130ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  193675ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  197241ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  200803ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  204353ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  207899ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  211457ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  215015ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  218607ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  222150ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  225778ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  229344ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040

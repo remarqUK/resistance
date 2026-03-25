@@ -351,6 +351,9 @@ PROFILES = {
         'starting_balance': 1000.0,
         'risk_pct': 6.0,
 
+        # Margin safety
+        'margin_cushion_pct': 15.0,
+
         # Dynamic risk sizing: scale risk down during drawdowns
         'dynamic_risk': True,
         'dd_risk_start': 5.0,

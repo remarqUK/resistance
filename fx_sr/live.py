@@ -1132,6 +1132,7 @@ def _prepare_execution_plan(
     size_plan: PositionSizePlan,
     params: StrategyParams,
     price_lookup: Callable[[str], Optional[float]],
+    available_margin: Optional[float] = None,
 ) -> tuple[Optional[PreparedExecutionPlan], str]:
     """Reprice a signal from a fresh live quote and rebuild size for submit time."""
 
@@ -1164,6 +1165,10 @@ def _prepare_execution_plan(
         risk_amount=float(size_plan.risk_amount),
         account_currency=size_plan.account_currency,
         price_lookup=quote_price_lookup,
+        available_margin=available_margin,
+        margin_cushion_pct=params.margin_cushion_pct,
+        enforce_margin=params.enforce_margin,
+        min_order_units=params.min_order_units,
     )
     if repriced_plan is None:
         return None, 'size unavailable'
@@ -1226,6 +1231,12 @@ def execute_signal_plans(
         if slot_risk_amount is not None and params.use_correlation_filter
         else None
     )
+    # Fetch available margin for repricing margin checks
+    exec_available_margin: Optional[float] = None
+    if params.enforce_margin:
+        excess_liq = _account_cache.get_excess_liquidity()
+        exec_available_margin = excess_liq if excess_liq is not None else balance
+
     results: list[Optional[ExecutionResult]] = [None] * len(signals)
     planned: dict[int, PreparedExecutionPlan] = {}
     planned_reserved_risk = 0.0
@@ -1335,6 +1346,7 @@ def execute_signal_plans(
             plan,
             params,
             price_lookup,
+            available_margin=exec_available_margin,
         )
         if prepared_plan is None:
             results[idx] = ExecutionResult(
@@ -1385,6 +1397,8 @@ def execute_signal_plans(
 
         planned[idx] = prepared_plan
         planned_reserved_risk += float(prepared_plan.size_plan.risk_amount)
+        if exec_available_margin is not None and prepared_plan.size_plan.margin_required is not None:
+            exec_available_margin = max(0.0, exec_available_margin - prepared_plan.size_plan.margin_required)
         exposures.append(
             CorrelationExposure(
                 pair=signal.pair,
@@ -1399,7 +1413,7 @@ def execute_signal_plans(
         plan = prepared.size_plan
         quote = prepared.quote
 
-        # Pre-submit whatIf margin check (fail-open: only block on definitive liquidation)
+        # Pre-submit whatIf margin check — block on liquidation or insufficient margin
         if params.enforce_margin:
             whatif = ibkr.whatif_margin_check(
                 pair=signal.pair,
@@ -1413,6 +1427,21 @@ def execute_signal_plans(
                     plan.units,
                     'SKIPPED',
                     note='whatIf: would risk liquidation',
+                )
+                continue
+            if whatif is not None and whatif.get('margin_exceeded'):
+                init_margin = whatif.get('init_margin_after') or whatif.get('init_margin_change')
+                equity = whatif.get('equity_with_loan_after')
+                print(
+                    f"    Warning: {signal.pair} {plan.units} units rejected by whatIf — "
+                    f"equity {equity} < init margin {init_margin}"
+                )
+                results[idx] = ExecutionResult(
+                    signal.pair,
+                    signal.direction,
+                    plan.units,
+                    'SKIPPED',
+                    note=f'whatIf: margin exceeded (need {init_margin}, have {equity})',
                 )
                 continue
 

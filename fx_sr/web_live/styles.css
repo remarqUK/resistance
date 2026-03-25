@@ -1,8 +1,8 @@
 :root {
   --bg: #f4efe7;
   --bg-alt: #efe4d5;
-  --ink: #1f1a17;
-  --muted: #6b6156;
+  --ink: #333;
+  --muted: #595148;
   --line: rgba(53, 43, 34, 0.12);
   --panel: rgba(255, 251, 245, 0.92);
   --panel-strong: rgba(255, 248, 238, 0.98);
@@ -102,6 +102,7 @@ body::before {
   font-family: "Iowan Old Style", "Georgia", serif;
   font-weight: 600;
   letter-spacing: -0.02em;
+  color: #333;
 }
 
 .hero h1 {
@@ -187,6 +188,7 @@ body::before {
 
 .metric-card strong {
   font-size: 1.35rem;
+  color: #333;
 }
 
 .metric-detail {
@@ -225,9 +227,10 @@ body::before {
 
 .panel-watchlist .data-table th,
 .panel-watchlist .data-table td {
-  padding: 8px 7px;
+  padding: 9px 8px;
   font-size: 0.8rem;
   vertical-align: middle;
+  line-height: 1.4;
 }
 
 .panel-watchlist .data-table th {
@@ -279,7 +282,8 @@ body::before {
   padding: 12px 10px;
   border-bottom: 1px solid var(--line);
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
+  line-height: 1.45;
 }
 
 .data-table th {
@@ -588,6 +592,22 @@ body::before {
   font-size: 1rem;
 }
 
+.mini-head-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.mini-head > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.mini-head-copy .pair-sub {
+  font-size: 0.8rem;
+}
+
 .signal-meta,
 .position-meta,
 .mini-meta {
@@ -595,6 +615,17 @@ body::before {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 16px;
   margin-top: 12px;
+}
+
+.mini-meta-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mini-note {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--muted);
 }
 
 .signal-meta div,

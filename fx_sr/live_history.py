@@ -719,11 +719,17 @@ def _derive_signal_execution_status(
     *,
     open_units: int,
     broker_order_status: str | None,
+    order_found: bool = True,
 ) -> str:
     """Derive the internal signal lifecycle from fills plus raw broker status."""
 
     planned_units = _normalize_units(existing.get('planned_units'))
     normalized_broker = _normalize_status(broker_order_status or existing.get('status') or 'SUBMITTED')
+
+    # Order vanished from IBKR with no fills — it was rejected/cancelled
+    if not order_found and open_units <= 0:
+        return 'CANCELLED'
+
     if open_units <= 0:
         return normalized_broker
     if planned_units > 0 and open_units < planned_units:
@@ -822,20 +828,29 @@ def reconcile_detected_signal_orders(
             opened_at = fill_summary['opened_at'] or existing.get('opened_at')
             last_fill_at = fill_summary['last_fill_at'] or existing.get('last_fill_at')
             fill_count = max(int(fill_summary['fill_count'] or 0), int(existing.get('fill_count') or 0))
+            order_found = int(order_id) in statuses_by_order
             status = _derive_signal_execution_status(
                 existing,
                 open_units=open_units,
                 broker_order_status=broker_order_status,
+                order_found=order_found,
             )
 
             if open_units > 0 and planned_units > 0 and open_units < planned_units:
                 note = f"partial fill {open_units:,}/{planned_units:,}"
             elif open_units > 0 and planned_units > 0:
                 note = f"filled {open_units:,}/{planned_units:,}"
+            elif not order_found and open_units <= 0:
+                note = 'order not found in broker (rejected/cancelled)'
             elif broker_order_status:
                 note = f"broker status {broker_order_status}"
             else:
                 note = existing.get('note')
+
+            # Close out signals that reached a terminal state
+            closed_at = existing.get('closed_at')
+            if status in ('CANCELLED', 'REJECTED') and closed_at is None:
+                closed_at = now
 
             merged = _merge_row(
                 existing,
@@ -849,6 +864,7 @@ def reconcile_detected_signal_orders(
                 last_fill_at=last_fill_at,
                 broker_order_status=broker_order_status,
                 note=note,
+                closed_at=closed_at,
                 last_updated_at=now,
             )
             _replace_row_conn(conn, merged)

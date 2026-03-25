@@ -857,6 +857,8 @@ function renderSignals() {
           <div><span class="value-label">Units</span><span class="value">${plan.units ? Number(plan.units).toLocaleString() : "–"}</span></div>
           <div><span class="value-label">Risk</span><span class="value">${plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${escapeHtml(plan.account_currency || "")}` : "–"}</span></div>
           <div><span class="value-label">Notional</span><span class="value">${plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${escapeHtml(plan.account_currency || "")}` : "–"}</span></div>
+          <div><span class="value-label">Arrived</span><span class="value">${formatTimestamp(signal.arrived_at)}</span></div>
+          <div><span class="value-label">Last valid</span><span class="value">${formatTimestamp(signal.last_valid_at)}</span></div>
         </div>
       </article>
     `;

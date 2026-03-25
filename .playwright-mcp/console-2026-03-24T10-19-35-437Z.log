@@ -1,0 +1,6 @@
+[      53ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:8765/api/chart-data?pair=GBPCAD:0
+[      53ms] [ERROR] Failed to load chart data: SyntaxError: Unexpected non-whitespace character after JSON at position 4 (line 1 column 5) @ http://127.0.0.1:8765/chart?pair=GBPCAD:195
+[   42116ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[   46204ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  151660ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8765/favicon.ico:0
+[  751858ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8765/favicon.ico:0

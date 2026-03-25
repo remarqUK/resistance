@@ -5,16 +5,16 @@
   <title>Trade Log</title>
   <link rel="stylesheet" href="/static/styles.css">
   <style>
-    body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: transparent; color: #333; margin: 0; padding: 20px; }
     h1 { font-size: 1.3rem; margin-bottom: 12px; }
     .filters { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
-    .filters select, .filters button { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+    .filters select, .filters button { background: rgba(255, 248, 238, 0.98); color: #333; border: 1px solid rgba(53, 43, 34, 0.12); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
     .filters button { cursor: pointer; }
-    .filters button:hover { background: #21262d; }
+    .filters button:hover { background: rgba(185, 87, 40, 0.05); }
     table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-    th { text-align: left; padding: 6px 8px; background: #161b22; border-bottom: 1px solid #30363d; position: sticky; top: 0; }
-    td { padding: 5px 8px; border-bottom: 1px solid #21262d; white-space: nowrap; }
-    tr:hover td { background: #161b22; }
+    th { text-align: left; padding: 6px 8px; background: rgba(255, 248, 238, 0.98); border-bottom: 1px solid rgba(53, 43, 34, 0.12); position: sticky; top: 0; vertical-align: middle; }
+    td { padding: 5px 8px; border-bottom: 1px solid rgba(53, 43, 34, 0.12); white-space: nowrap; vertical-align: middle; }
+    tr:hover td { background: rgba(185, 87, 40, 0.05); }
     .status-SUBMITTED, .status-OPEN { color: #58a6ff; }
     .status-FILLED, .status-CLOSED { color: #3fb950; }
     .status-CANCELLED, .status-FAILED { color: #f85149; }

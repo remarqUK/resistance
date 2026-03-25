@@ -1,0 +1,19 @@
+- generic [ref=e3]:
+  - link "← Dashboard" [ref=e4] [cursor=pointer]:
+    - /url: /
+  - heading "Trade Log" [level=1] [ref=e5]
+  - generic [ref=e6]:
+    - combobox [ref=e7]:
+      - option "All pairs" [selected]
+    - combobox [ref=e8]:
+      - option "All statuses" [selected]
+      - option "Submitted"
+      - option "Open"
+      - option "Filled"
+      - option "Closed"
+      - option "Cancelled"
+      - option "Failed"
+      - option "Skipped"
+      - option "Detected"
+    - button "Refresh" [ref=e9] [cursor=pointer]
+  - generic [ref=e10]: No signals recorded yet

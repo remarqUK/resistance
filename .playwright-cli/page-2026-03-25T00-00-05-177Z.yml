@@ -1,0 +1,398 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - heading "FX support / resistance scanner Live Market Board" [level=1] [ref=e7]:
+          - generic [ref=e8]: FX support / resistance scanner
+          - text: Live Market Board
+        - paragraph [ref=e9]: "5,033.59 GBP · Risk 6.00% · high_volume (Nick hybrid: quality sizing + early cut + corr cap, 785 trades, +73.9B, 16.7% DD, -3.86R worst streak)"
+      - generic [ref=e11]: Live
+      - button "Pause Entries" [ref=e78] [cursor=pointer]
+      - button "Fill" [ref=e13] [cursor=pointer]
+      - button "Re-run Backtest" [ref=e15] [cursor=pointer]
+      - button "Stop Server" [ref=e17] [cursor=pointer]
+      - generic [ref=e18]:
+        - link "Trade Log" [ref=e19] [cursor=pointer]:
+          - /url: /trade-log
+        - link "Strategy Replay" [ref=e20] [cursor=pointer]:
+          - /url: /replay
+        - link "All Backtest Trades" [ref=e21] [cursor=pointer]:
+          - /url: /backtest-trades
+        - link "Trade Diary" [ref=e22] [cursor=pointer]:
+          - /url: /backtest-diary
+  - generic [ref=e23]:
+    - article [ref=e24]:
+      - text: Scan state
+      - strong [ref=e25]: live
+      - generic [ref=e26]: 18 / 22 pairs
+    - article [ref=e27]:
+      - text: Signals
+      - strong [ref=e28]: "0"
+      - generic [ref=e29]: 0 pending blockers
+    - article [ref=e30]:
+      - text: Tracked positions
+      - strong [ref=e31]: "0"
+      - generic [ref=e32]: Live execution enabled
+    - article [ref=e33]:
+      - text: Next transaction
+      - strong [ref=e34]: 59:55
+      - generic [ref=e35]: 25 Mar 2026, 01:00:00
+  - main [ref=e36]:
+    - generic [ref=e37]:
+      - paragraph [ref=e38]: Signals and tracked pairs float to the top while updates stream in per pair.
+      - table [ref=e40]:
+        - rowgroup [ref=e41]:
+          - row "Pair State Price Support Resistance Setup Signal" [ref=e42]:
+            - columnheader "Pair" [ref=e43]
+            - columnheader "State" [ref=e44]
+            - columnheader "Price" [ref=e45]
+            - columnheader "Support" [ref=e46]
+            - columnheader "Resistance" [ref=e47]
+            - columnheader "Setup" [ref=e48]
+            - columnheader "Signal" [ref=e49]
+        - rowgroup [ref=e50]:
+          - row "USDCHF INSIDE 0.78809 0.78616-0.78814 IN 0.79109-0.79248 0.38% Inside support zone (major) –" [ref=e79]:
+            - cell "USDCHF" [ref=e80]:
+              - link "USDCHF" [ref=e81] [cursor=pointer]:
+                - /url: /chart?pair=USDCHF
+            - cell "INSIDE" [ref=e82]:
+              - generic [ref=e83]: INSIDE
+            - cell "0.78809" [ref=e84]
+            - cell "0.78616-0.78814 IN" [ref=e85]
+            - cell "0.79109-0.79248 0.38%" [ref=e86]
+            - cell "Inside support zone (major)" [ref=e87]
+            - cell "–" [ref=e88]
+          - row "GBPCAD NEAR 1.84563 1.84049-1.84527 0.02% 1.85014-1.85610 0.24% 0.02% from support (major) –" [ref=e89]:
+            - cell "GBPCAD" [ref=e90]:
+              - link "GBPCAD" [ref=e91] [cursor=pointer]:
+                - /url: /chart?pair=GBPCAD
+            - cell "NEAR" [ref=e92]:
+              - generic [ref=e93]: NEAR
+            - cell "1.84563" [ref=e94]
+            - cell "1.84049-1.84527 0.02%" [ref=e95]
+            - cell "1.85014-1.85610 0.24%" [ref=e96]
+            - cell "0.02% from support (major)" [ref=e97]
+            - cell "–" [ref=e98]
+          - row "GBPUSD NEAR 1.34153 1.33905-1.34124 0.02% 1.34316-1.34715 0.12% 0.02% from support (major) –" [ref=e99]:
+            - cell "GBPUSD" [ref=e100]:
+              - link "GBPUSD" [ref=e101] [cursor=pointer]:
+                - /url: /chart?pair=GBPUSD
+            - cell "NEAR" [ref=e102]:
+              - generic [ref=e103]: NEAR
+            - cell "1.34153" [ref=e104]
+            - cell "1.33905-1.34124 0.02%" [ref=e105]
+            - cell "1.34316-1.34715 0.12%" [ref=e106]
+            - cell "0.02% from support (major)" [ref=e107]
+            - cell "–" [ref=e108]
+          - row "CADJPY NEAR 115.354 114.971-115.326 0.02% - 0.02% from support (major) –" [ref=e109]:
+            - cell "CADJPY" [ref=e110]:
+              - link "CADJPY" [ref=e111] [cursor=pointer]:
+                - /url: /chart?pair=CADJPY
+            - cell "NEAR" [ref=e112]:
+              - generic [ref=e113]: NEAR
+            - cell "115.354" [ref=e114]
+            - cell "114.971-115.326 0.02%" [ref=e115]
+            - cell "-" [ref=e116]
+            - cell "0.02% from support (major)" [ref=e117]
+            - cell "–" [ref=e118]
+          - row "EURAUD NEAR 1.66048 - 1.66236-1.66653 0.11% 0.11% from resistance (major) –" [ref=e119]:
+            - cell "EURAUD" [ref=e120]:
+              - link "EURAUD" [ref=e121] [cursor=pointer]:
+                - /url: /chart?pair=EURAUD
+            - cell "NEAR" [ref=e122]:
+              - generic [ref=e123]: NEAR
+            - cell "1.66048" [ref=e124]
+            - cell "-" [ref=e125]
+            - cell "1.66236-1.66653 0.11%" [ref=e126]
+            - cell "0.11% from resistance (major)" [ref=e127]
+            - cell "–" [ref=e128]
+          - row "USDCAD NEAR 1.37582 1.37046-1.37417 0.12% 1.37969-1.38061 0.28% 0.12% from support (major) –" [ref=e129]:
+            - cell "USDCAD" [ref=e130]:
+              - link "USDCAD" [ref=e131] [cursor=pointer]:
+                - /url: /chart?pair=USDCAD
+            - cell "NEAR" [ref=e132]:
+              - generic [ref=e133]: NEAR
+            - cell "1.37582" [ref=e134]
+            - cell "1.37046-1.37417 0.12%" [ref=e135]
+            - cell "1.37969-1.38061 0.28%" [ref=e136]
+            - cell "0.12% from support (major)" [ref=e137]
+            - cell "–" [ref=e138]
+          - row "EURJPY NEAR 184.314 183.857-184.084 0.12% 184.665-184.924 0.19% 0.12% from support (major) –" [ref=e139]:
+            - cell "EURJPY" [ref=e140]:
+              - link "EURJPY" [ref=e141] [cursor=pointer]:
+                - /url: /chart?pair=EURJPY
+            - cell "NEAR" [ref=e142]:
+              - generic [ref=e143]: NEAR
+            - cell "184.314" [ref=e144]
+            - cell "183.857-184.084 0.12%" [ref=e145]
+            - cell "184.665-184.924 0.19%" [ref=e146]
+            - cell "0.12% from support (major)" [ref=e147]
+            - cell "–" [ref=e148]
+          - row "EURUSD NEAR 1.16139 1.15421-1.15641 0.43% 1.16336-1.16689 0.17% 0.17% from resistance (major) –" [ref=e149]:
+            - cell "EURUSD" [ref=e150]:
+              - link "EURUSD" [ref=e151] [cursor=pointer]:
+                - /url: /chart?pair=EURUSD
+            - cell "NEAR" [ref=e152]:
+              - generic [ref=e153]: NEAR
+            - cell "1.16139" [ref=e154]
+            - cell "1.15421-1.15641 0.43%" [ref=e155]
+            - cell "1.16336-1.16689 0.17%" [ref=e156]
+            - cell "0.17% from resistance (major)" [ref=e157]
+            - cell "–" [ref=e158]
+          - row "EURCAD NEAR 1.59779 1.57676-1.57713 1.29% 1.60138-1.60411 0.22% 0.22% from resistance (major) –" [ref=e159]:
+            - cell "EURCAD" [ref=e160]:
+              - link "EURCAD" [ref=e161] [cursor=pointer]:
+                - /url: /chart?pair=EURCAD
+            - cell "NEAR" [ref=e162]:
+              - generic [ref=e163]: NEAR
+            - cell "1.59779" [ref=e164]
+            - cell "1.57676-1.57713 1.29%" [ref=e165]
+            - cell "1.60138-1.60411 0.22%" [ref=e166]
+            - cell "0.22% from resistance (major)" [ref=e167]
+            - cell "–" [ref=e168]
+          - row "USDJPY WATCH 158.701 157.481-157.897 0.51% 159.177-159.455 0.30% 0.30% below resistance –" [ref=e169]:
+            - cell "USDJPY" [ref=e170]:
+              - link "USDJPY" [ref=e171] [cursor=pointer]:
+                - /url: /chart?pair=USDJPY
+            - cell "WATCH" [ref=e172]:
+              - generic [ref=e173]: WATCH
+            - cell "158.701" [ref=e174]
+            - cell "157.481-157.897 0.51%" [ref=e175]
+            - cell "159.177-159.455 0.30%" [ref=e176]
+            - cell "0.30% below resistance" [ref=e177]
+            - cell "–" [ref=e178]
+          - row "EURGBP WATCH 0.86573 0.86104-0.86308 0.31% 0.86924-0.87129 0.41% 0.31% above support –" [ref=e179]:
+            - cell "EURGBP" [ref=e180]:
+              - link "EURGBP" [ref=e181] [cursor=pointer]:
+                - /url: /chart?pair=EURGBP
+            - cell "WATCH" [ref=e182]:
+              - generic [ref=e183]: WATCH
+            - cell "0.86573" [ref=e184]
+            - cell "0.86104-0.86308 0.31%" [ref=e185]
+            - cell "0.86924-0.87129 0.41%" [ref=e186]
+            - cell "0.31% above support" [ref=e187]
+            - cell "–" [ref=e188]
+          - row "GBPAUD WATCH 1.91803 1.91087-1.91179 0.33% 2.01223-2.01449 4.91% 0.33% above support –" [ref=e189]:
+            - cell "GBPAUD" [ref=e190]:
+              - link "GBPAUD" [ref=e191] [cursor=pointer]:
+                - /url: /chart?pair=GBPAUD
+            - cell "WATCH" [ref=e192]:
+              - generic [ref=e193]: WATCH
+            - cell "1.91803" [ref=e194]
+            - cell "1.91087-1.91179 0.33%" [ref=e195]
+            - cell "2.01223-2.01449 4.91%" [ref=e196]
+            - cell "0.33% above support" [ref=e197]
+            - cell "–" [ref=e198]
+          - row "GBPCHF WATCH 1.05726 1.04819-1.04974 0.71% 1.06139-1.06446 0.39% 0.39% below resistance –" [ref=e199]:
+            - cell "GBPCHF" [ref=e200]:
+              - link "GBPCHF" [ref=e201] [cursor=pointer]:
+                - /url: /chart?pair=GBPCHF
+            - cell "WATCH" [ref=e202]:
+              - generic [ref=e203]: WATCH
+            - cell "1.05726" [ref=e204]
+            - cell "1.04819-1.04974 0.71%" [ref=e205]
+            - cell "1.06139-1.06446 0.39%" [ref=e206]
+            - cell "0.39% below resistance" [ref=e207]
+            - cell "–" [ref=e208]
+          - row "AUDCAD WATCH 0.96225 0.93170-0.93456 2.88% 0.96678-0.96986 0.47% 0.47% below resistance –" [ref=e209]:
+            - cell "AUDCAD" [ref=e210]:
+              - link "AUDCAD" [ref=e211] [cursor=pointer]:
+                - /url: /chart?pair=AUDCAD
+            - cell "WATCH" [ref=e212]:
+              - generic [ref=e213]: WATCH
+            - cell "0.96225" [ref=e214]
+            - cell "0.93170-0.93456 2.88%" [ref=e215]
+            - cell "0.96678-0.96986 0.47%" [ref=e216]
+            - cell "0.47% below resistance" [ref=e217]
+            - cell "–" [ref=e218]
+          - row "NZDJPY WATCH 92.619 91.932-92.051 0.61% 93.737-93.873 1.21% 0.61% above support –" [ref=e219]:
+            - cell "NZDJPY" [ref=e220]:
+              - link "NZDJPY" [ref=e221] [cursor=pointer]:
+                - /url: /chart?pair=NZDJPY
+            - cell "WATCH" [ref=e222]:
+              - generic [ref=e223]: WATCH
+            - cell "92.619" [ref=e224]
+            - cell "91.932-92.051 0.61%" [ref=e225]
+            - cell "93.737-93.873 1.21%" [ref=e226]
+            - cell "0.61% above support" [ref=e227]
+            - cell "–" [ref=e228]
+          - row "AUDNZD WATCH 1.19848 1.16797-1.17162 2.24% 1.21261-1.21493 1.18% 1.18% below resistance –" [ref=e229]:
+            - cell "AUDNZD" [ref=e230]:
+              - link "AUDNZD" [ref=e231] [cursor=pointer]:
+                - /url: /chart?pair=AUDNZD
+            - cell "WATCH" [ref=e232]:
+              - generic [ref=e233]: WATCH
+            - cell "1.19848" [ref=e234]
+            - cell "1.16797-1.17162 2.24%" [ref=e235]
+            - cell "1.21261-1.21493 1.18%" [ref=e236]
+            - cell "1.18% below resistance" [ref=e237]
+            - cell "–" [ref=e238]
+          - row "CHFJPY WATCH 201.374 198.524-198.617 1.37% - 1.37% above support –" [ref=e239]:
+            - cell "CHFJPY" [ref=e240]:
+              - link "CHFJPY" [ref=e241] [cursor=pointer]:
+                - /url: /chart?pair=CHFJPY
+            - cell "WATCH" [ref=e242]:
+              - generic [ref=e243]: WATCH
+            - cell "201.374" [ref=e244]
+            - cell "198.524-198.617 1.37%" [ref=e245]
+            - cell "-" [ref=e246]
+            - cell "1.37% above support" [ref=e247]
+            - cell "–" [ref=e248]
+          - row "AUDUSD WATCH 0.69944 0.66757-0.66861 4.41% - 4.41% above support –" [ref=e249]:
+            - cell "AUDUSD" [ref=e250]:
+              - link "AUDUSD" [ref=e251] [cursor=pointer]:
+                - /url: /chart?pair=AUDUSD
+            - cell "WATCH" [ref=e252]:
+              - generic [ref=e253]: WATCH
+            - cell "0.69944" [ref=e254]
+            - cell "0.66757-0.66861 4.41%" [ref=e255]
+            - cell "-" [ref=e256]
+            - cell "4.41% above support" [ref=e257]
+            - cell "–" [ref=e258]
+    - generic [ref=e53]:
+      - generic [ref=e56]: No active signals.
+      - generic [ref=e59]: No tracked positions.
+    - generic [ref=e61]:
+      - generic [ref=e62]:
+        - generic [ref=e63]: Exit alerts
+        - generic [ref=e65]: No exit alerts.
+      - generic [ref=e66]:
+        - generic [ref=e67]: Transactions
+        - generic [ref=e68]:
+          - article [ref=e259] [cursor=pointer]:
+            - generic [ref=e260]:
+              - generic [ref=e261]:
+                - strong [ref=e262]: GBPCAD
+                - generic [ref=e263]: SHORT · 127,500 units
+              - generic [ref=e264]: INACTIVE
+            - generic [ref=e265]:
+              - generic [ref=e266]:
+                - generic [ref=e267]: When / Order
+                - generic [ref=e268]: "24 Mar 2026, 19:00:05 · #660"
+              - generic [ref=e269]:
+                - generic [ref=e270]: Note
+                - generic [ref=e271]: risk GBP 378.79; l2 quote @ 1.84278; order submitted
+          - article [ref=e272] [cursor=pointer]:
+            - generic [ref=e273]:
+              - generic [ref=e274]:
+                - strong [ref=e275]: GBPCAD
+                - generic [ref=e276]: LONG · 128,003 units
+              - generic [ref=e277]: INACTIVE
+            - generic [ref=e278]:
+              - generic [ref=e279]:
+                - generic [ref=e280]: When / Order
+                - generic [ref=e281]: "24 Mar 2026, 06:00:05 · #524"
+              - generic [ref=e282]:
+                - generic [ref=e283]: Note
+                - generic [ref=e284]: risk GBP 376.78; l2 quote @ 1.84333; order submitted
+          - article [ref=e285] [cursor=pointer]:
+            - generic [ref=e286]:
+              - generic [ref=e287]:
+                - strong [ref=e288]: GBPCAD
+                - generic [ref=e289]: LONG · 135,000 units
+              - generic [ref=e290]: INACTIVE
+            - generic [ref=e291]:
+              - generic [ref=e292]:
+                - generic [ref=e293]: When / Order
+                - generic [ref=e294]: "24 Mar 2026, 02:00:06 · #514"
+              - generic [ref=e295]:
+                - generic [ref=e296]: Note
+                - generic [ref=e297]: risk GBP 340.22; l1 quote @ 1.84170; order submitted
+          - article [ref=e298] [cursor=pointer]:
+            - generic [ref=e299]:
+              - generic [ref=e300]:
+                - strong [ref=e301]: GBPCAD
+                - generic [ref=e302]: LONG · 135,000 units
+              - generic [ref=e303]: INACTIVE
+            - generic [ref=e304]:
+              - generic [ref=e305]:
+                - generic [ref=e306]: When / Order
+                - generic [ref=e307]: "20 Mar 2026, 08:00:05 · #340"
+              - generic [ref=e308]:
+                - generic [ref=e309]: Note
+                - generic [ref=e310]: risk GBP 410.18; l2 quote @ 1.84244; order submitted
+          - article [ref=e311] [cursor=pointer]:
+            - generic [ref=e312]:
+              - generic [ref=e313]:
+                - strong [ref=e314]: GBPCAD
+                - generic [ref=e315]: LONG · 135,000 units
+              - generic [ref=e316]: INACTIVE
+            - generic [ref=e317]:
+              - generic [ref=e318]:
+                - generic [ref=e319]: When / Order
+                - generic [ref=e320]: "20 Mar 2026, 07:00:05 · #331"
+              - generic [ref=e321]:
+                - generic [ref=e322]: Note
+                - generic [ref=e323]: risk GBP 377.50; l2 quote @ 1.84143; order submitted
+          - article [ref=e324] [cursor=pointer]:
+            - generic [ref=e325]:
+              - generic [ref=e326]:
+                - strong [ref=e327]: GBPCAD
+                - generic [ref=e328]: LONG · 0 units
+              - generic [ref=e329]: SKIPPED
+            - generic [ref=e330]:
+              - generic [ref=e331]:
+                - generic [ref=e332]: When / Order
+                - generic [ref=e333]: "20 Mar 2026, 06:00:07 · #–"
+              - generic [ref=e334]:
+                - generic [ref=e335]: Note
+                - generic [ref=e336]: size unavailable
+          - article [ref=e337] [cursor=pointer]:
+            - generic [ref=e338]:
+              - generic [ref=e339]:
+                - strong [ref=e340]: CADJPY
+                - generic [ref=e341]: SHORT · 248,549 units
+              - generic [ref=e342]: INACTIVE
+            - generic [ref=e343]:
+              - generic [ref=e344]:
+                - generic [ref=e345]: When / Order
+                - generic [ref=e346]: "20 Mar 2026, 06:00:06 · #322"
+              - generic [ref=e347]:
+                - generic [ref=e348]: Note
+                - generic [ref=e349]: risk GBP 390.04; l2 quote @ 115.31300; order submitted
+          - article [ref=e350] [cursor=pointer]:
+            - generic [ref=e351]:
+              - generic [ref=e352]:
+                - strong [ref=e353]: CADJPY
+                - generic [ref=e354]: SHORT · 36,501 units
+              - generic [ref=e355]: INACTIVE
+            - generic [ref=e356]:
+              - generic [ref=e357]:
+                - generic [ref=e358]: When / Order
+                - generic [ref=e359]: "19 Mar 2026, 17:00:06 · #149"
+              - generic [ref=e360]:
+                - generic [ref=e361]: Note
+                - generic [ref=e362]: risk GBP 62.02; l2 quote @ 115.14200; order submitted
+          - article [ref=e363] [cursor=pointer]:
+            - generic [ref=e364]:
+              - generic [ref=e365]:
+                - strong [ref=e366]: USDJPY
+                - generic [ref=e367]: SHORT · 64,068 units
+              - generic [ref=e368]: CANCELLED
+            - generic [ref=e369]:
+              - generic [ref=e370]:
+                - generic [ref=e371]: When / Order
+                - generic [ref=e372]: "18 Mar 2026, 15:00:04 · #15"
+              - generic [ref=e373]:
+                - generic [ref=e374]: Note
+                - generic [ref=e375]: risk GBP 82.69; l2 quote @ 159.41200; order submitted
+          - article [ref=e376] [cursor=pointer]:
+            - generic [ref=e377]:
+              - generic [ref=e378]:
+                - strong [ref=e379]: GBPUSD
+                - generic [ref=e380]: SHORT · 1,636,485 units
+              - generic [ref=e381]: CANCELLED
+            - generic [ref=e382]:
+              - generic [ref=e383]:
+                - generic [ref=e384]: When / Order
+                - generic [ref=e385]: "16 Mar 2026, 19:00:04 · #6"
+              - generic [ref=e386]:
+                - generic [ref=e387]: Note
+                - generic [ref=e388]: risk GBP 4,003.28; l2 quote @ 1.33334; order submitted
+    - generic [ref=e70]:
+      - generic [ref=e72]:
+        - paragraph [ref=e73]: Flow
+        - heading "Event log" [level=2] [ref=e74]
+      - article [ref=e389]:
+        - paragraph [ref=e390]: "Backfill complete: 18 pairs, 0 signals"
+        - time [ref=e391]: 23:53:19

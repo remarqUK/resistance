@@ -14,8 +14,10 @@ from .sizing import split_pair, convert_currency, PriceLookup
 # FCA major currencies — any pair composed entirely of these gets 30:1
 MAJOR_CURRENCIES = frozenset({'USD', 'EUR', 'JPY', 'GBP', 'CAD', 'CHF'})
 
-MARGIN_RATE_MAJOR = 1.0 / 30.0   # ~3.33%
-MARGIN_RATE_MINOR = 1.0 / 20.0   # 5.00%
+# Conservative margin rates — IBKR initial margin is typically higher than
+# the FCA minimum (3.33%).  Using 5% for all pairs as a safe floor.
+MARGIN_RATE_MAJOR = 1.0 / 20.0   # 5.00%  (FCA min is 3.33% but IBKR charges ~4.6%)
+MARGIN_RATE_MINOR = 1.0 / 15.0   # 6.67%  (FCA min is 5%)
 
 # IBKR minimum order sizes (base currency units)
 MIN_UNITS_ODD_LOT = 1_000

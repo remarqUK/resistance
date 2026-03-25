@@ -1,0 +1,41 @@
+[  169409ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  173480ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  177572ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  181682ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  185781ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  189315ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  192870ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  196409ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  199983ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  203548ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  207139ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  210830ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  214455ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  228336ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:8765/api/chart-data?pair=EURJPY:0
+[  228337ms] [ERROR] Failed to load chart data: SyntaxError: Unexpected non-whitespace character after JSON at position 4 (line 1 column 5) @ http://127.0.0.1:8765/chart?pair=EURJPY:195
+[  228518ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8765/favicon.ico:0
+[  235537ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:8765/api/chart-data?pair=EURJPY:0
+[  235538ms] [ERROR] Failed to load chart data: SyntaxError: Unexpected non-whitespace character after JSON at position 4 (line 1 column 5) @ http://127.0.0.1:8765/chart?pair=EURJPY:195
+[  286509ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  290596ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  294119ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  297657ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  301180ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  304715ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  308241ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  311793ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  315311ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  318826ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  322356ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  325878ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  329409ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  332961ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  336507ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  340066ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  343589ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  347127ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  350672ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  354203ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  357746ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  361274ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040
+[  364812ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/app.js:1040

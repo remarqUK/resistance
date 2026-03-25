@@ -93,6 +93,8 @@
       }).observe(container);
     }
 
+    let zoneBands = [];
+
     function addZoneLines(support, resistance) {
       if (support) {
         supportLine = candleSeries.createPriceLine({
@@ -134,6 +136,44 @@
       }
     }
 
+    function addZoneBands(support, resistance, bars) {
+      if (!bars || bars.length < 2) return;
+      const first = bars[0].time;
+      const last = bars[bars.length - 1].time;
+      // Extend well beyond visible range so scrolling still shows the band
+      const pad = 365 * 24 * 3600;
+      const t0 = first - pad;
+      const t1 = last + pad;
+
+      function createBand(lower, upper, fillColor) {
+        const series = chart.addBaselineSeries({
+          baseValue: { type: 'price', price: lower },
+          topFillColor1: fillColor,
+          topFillColor2: fillColor,
+          topLineColor: 'transparent',
+          bottomFillColor1: 'transparent',
+          bottomFillColor2: 'transparent',
+          bottomLineColor: 'transparent',
+          lineWidth: 0,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        series.setData([
+          { time: t0, value: upper },
+          { time: t1, value: upper },
+        ]);
+        zoneBands.push(series);
+      }
+
+      if (support) {
+        createBand(support.lower, support.upper, 'rgba(31, 122, 73, 0.10)');
+      }
+      if (resistance) {
+        createBand(resistance.lower, resistance.upper, 'rgba(178, 59, 41, 0.10)');
+      }
+    }
+
     async function loadChartData() {
       if (!pair) return;
       try {
@@ -150,6 +190,7 @@
           const last = data.bars[data.bars.length - 1];
           document.getElementById('live-price').textContent = last.close.toFixed(decimals);
         }
+        addZoneBands(data.support, data.resistance, data.bars);
         addZoneLines(data.support, data.resistance);
       } catch (e) {
         console.error('Failed to load chart data:', e);

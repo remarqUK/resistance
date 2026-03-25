@@ -1,0 +1,108 @@
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: transparent;
+  color: #333;
+  margin: 0;
+  padding: 0;
+}
+
+body::before {
+  display: none;
+}
+
+.trade-log-page {
+  color: var(--ink);
+}
+
+.trade-log-page .hero {
+  margin-bottom: 18px;
+}
+
+.trade-log-page .filter-toolbar {
+  margin-bottom: 16px;
+  align-items: end;
+}
+
+.trade-log-page .field {
+  min-width: 180px;
+}
+
+.trade-log-page .field label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+
+.trade-log-page select {
+  width: 100%;
+}
+
+.trade-log-page .toolbar-btn {
+  min-width: 112px;
+}
+
+.trade-log-page .table-wrap {
+  overflow: auto;
+}
+
+.trade-log-page .trade-log-table {
+  font-size: 0.82rem;
+}
+
+.trade-log-page .trade-log-table th {
+  position: sticky;
+  top: 0;
+  background: rgba(255, 248, 238, 0.98);
+}
+
+.trade-log-page .trade-log-table td {
+  white-space: nowrap;
+}
+
+.trade-log-page .trade-log-table tbody tr:hover {
+  background: rgba(185, 87, 40, 0.05);
+}
+
+.trade-log-page .status-SUBMITTED,
+.trade-log-page .status-OPEN {
+  color: #58a6ff;
+}
+
+.trade-log-page .status-FILLED,
+.trade-log-page .status-CLOSED {
+  color: #3fb950;
+}
+
+.trade-log-page .status-CANCELLED,
+.trade-log-page .status-FAILED {
+  color: #f85149;
+}
+
+.trade-log-page .status-SKIPPED {
+  color: #8b949e;
+}
+
+.trade-log-page .status-DETECTED {
+  color: #d2a8ff;
+}
+
+.trade-log-page .dir-LONG {
+  color: #3fb950;
+}
+
+.trade-log-page .dir-SHORT {
+  color: #f85149;
+}
+
+.trade-log-page .note {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trade-log-page .empty {
+  padding: 18px 0 6px;
+}

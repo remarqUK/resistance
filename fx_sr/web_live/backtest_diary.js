@@ -396,9 +396,9 @@ function renderDay(dayDate, activeMonth) {
   if (hasTrades) dayClasses.push("has-trades");
   if (isSelected) dayClasses.push("selected");
   if (hasTrades) {
-    if (dayState.total_pnl_pips > 0) {
+    if (dayState.total_pnl_r > 0) {
       dayClasses.push("up");
-    } else if (dayState.total_pnl_pips < 0) {
+    } else if (dayState.total_pnl_r < 0) {
       dayClasses.push("down");
     }
   }
@@ -411,7 +411,7 @@ function renderDay(dayDate, activeMonth) {
     return `<div class="${dayClasses.join(" ")} no-trades"><span class="diary-day-number">${dayDate.getDate()}</span><span class="diary-day-count">No trades</span></div>`;
   }
 
-  const pnlDisplay = hasTrades ? formatSigned(dayState.total_pnl_pips, 1, "p") : "—";
+  const pnlDisplay = hasTrades ? formatSigned(dayState.total_pnl_r, 2, "R") : "—";
   const countDisplay = hasTrades ? `${dayState.count} trade${dayState.count === 1 ? "" : "s"}` : "No trades";
 
   return `

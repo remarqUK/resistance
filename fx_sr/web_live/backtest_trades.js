@@ -1,4 +1,4 @@
-const backtestFilter = document.getElementById("backtest-filter");
+﻿const backtestFilter = document.getElementById("backtest-filter");
 const pairFilter = document.getElementById("pair-filter");
 const loadBtn = document.getElementById("load-btn");
 const summaryEl = document.getElementById("summary");
@@ -52,7 +52,7 @@ function openReplay(pair, date, entryTime = "", backtestKey = "", preset = "") {
 
 function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
+    return "-";
   }
   return Number(value).toLocaleString(undefined, {
     minimumFractionDigits: digits,
@@ -62,7 +62,7 @@ function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
 
 function formatSigned(value, digits = 2, suffix = "") {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
+    return "-";
   }
   const number = Number(value);
   const prefix = number > 0 ? "+" : "";
@@ -71,7 +71,7 @@ function formatSigned(value, digits = 2, suffix = "") {
 
 function formatCurrency(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "—";
+    return "-";
   }
   return `${BACKTEST_CURRENCY} ${formatNumber(value, 0)}`;
 }
@@ -85,11 +85,11 @@ function formatApproxMoneyDelta(value) {
 
 function formatTime(isoTime) {
   if (!isoTime) {
-    return "—";
+    return "-";
   }
   const parsed = new Date(isoTime);
   if (Number.isNaN(parsed.getTime())) {
-    return "—";
+    return "-";
   }
   return parsed.toLocaleString([], {
     year: "numeric",
@@ -185,7 +185,7 @@ function updateSortHeaders() {
       !isActive ? "none" : (sortState.direction === "asc" ? "ascending" : "descending"),
     );
     header.textContent = isActive
-      ? `${label} ${sortState.direction === "asc" ? "▲" : "▼"}`
+      ? `${label} ${sortState.direction === "asc" ? "â–²" : "â–¼"}`
       : label;
   });
 }
@@ -208,7 +208,7 @@ function toggleSort(key) {
 
 function buildRows(trades) {
   if (!trades.length) {
-    bodyEl.innerHTML = `<tr><td colspan="9" class="empty">No completed backtest trades in the cache.</td></tr>`;
+    bodyEl.innerHTML = `<tr><td colspan="8" class="empty">No completed backtest trades in the cache.</td></tr>`;
     return;
   }
 
@@ -217,7 +217,7 @@ function buildRows(trades) {
     const directionClass = (trade.direction || "").toLowerCase();
     const digits = PRICE_DISPLAY_DECIMALS;
     const tradeDate = replayDateForTrade(trade);
-    const exitPrice = trade.exit_price ? formatNumber(trade.exit_price, digits) : "—";
+    const exitPrice = trade.exit_price ? formatNumber(trade.exit_price, digits) : "-";
     const balanceDisplay = formatCurrency(trade.balance_after);
     const profitDisplay = formatApproxMoneyDelta(trade.pnl_amount);
     const safePair = escapeHtml(trade.pair || "");
@@ -225,18 +225,17 @@ function buildRows(trades) {
     const safeEntry = escapeHtml(trade.entry_time || "");
     return `
       <tr class="trade-history-row" data-pair="${safePair}" data-date="${safeDate}" data-entry="${safeEntry}">
-        <td><span class="pair-main">${trade.pair || "–"}</span></td>
+        <td><span class="pair-main">${trade.pair || "-"}</span></td>
         <td>${formatTime(trade.entry_time)}</td>
-        <td>${trade.exit_time ? formatTime(trade.exit_time) : "—"}</td>
-        <td><span class="pill pill-${directionClass}" style="min-width:auto;padding:4px 8px;font-size:0.65rem">${trade.direction || "—"}</span></td>
-        <td>${formatNumber(trade.entry_price, digits)} → ${exitPrice}</td>
-        <td class="${pnlClass}">${formatSigned(trade.pnl_pips, 1, "p")}</td>
+        <td>${trade.exit_time ? formatTime(trade.exit_time) : "-"}</td>
+        <td><span class="pill pill-${directionClass}" style="min-width:auto;padding:4px 8px;font-size:0.65rem">${trade.direction || "-"}</span></td>
+        <td>${formatNumber(trade.entry_price, digits)} / ${exitPrice}</td>
         <td class="${pnlClass}">${formatSigned(trade.pnl_r, 2, "R")}</td>
         <td>
           <div>${balanceDisplay}</div>
           ${profitDisplay ? `<div style="font-size:0.74rem;color:var(--muted);opacity:0.72">${profitDisplay}</div>` : ""}
         </td>
-        <td>${trade.exit_reason || "—"}</td>
+        <td>${trade.exit_reason || "-"}</td>
       </tr>
     `;
   }).join("");
@@ -290,7 +289,7 @@ function formatBacktestOption(backtest) {
   if (backtest.starting_balance !== null && backtest.starting_balance !== undefined) {
     parts.push(`${formatCurrency(backtest.starting_balance)} @ ${formatNumber(backtest.risk_pct, 2)}%`);
   }
-  return parts.join(" · ");
+  return parts.join(" Â· ");
 }
 
 function populateBacktests(backtests, selectedKey = "") {
@@ -327,24 +326,24 @@ function renderSummary(data) {
   const activePair = data.pair_filter || "All pairs";
   let summary = `${total} trade${total === 1 ? "" : "s"} from ${activePair} in cache`;
   if (data.selected_backtest) {
-    summary += ` · backtest: ${data.selected_backtest.label || data.selected_backtest.profile_name || data.selected_backtest.key}`;
+    summary += ` - backtest: ${data.selected_backtest.label || data.selected_backtest.profile_name || data.selected_backtest.key}`;
   }
   const compounding = data.compounding;
   if (compounding && compounding.starting_balance) {
     const assumption = compounding.assumed ? "assumed " : "";
-    summary += ` · ${assumption}balance starts at ${formatCurrency(compounding.starting_balance)} @ ${formatNumber(compounding.risk_pct, 2)}% risk`;
+    summary += ` - ${assumption}balance starts at ${formatCurrency(compounding.starting_balance)} @ ${formatNumber(compounding.risk_pct, 2)}% risk`;
     if (compounding.profile_name) {
       summary += ` (${compounding.profile_name})`;
     }
     if (compounding.mixed_params) {
-      summary += " · mixed cached parameter sets";
+      summary += " - mixed cached parameter sets";
     }
   }
   summaryEl.textContent = summary;
 }
 
 function showMessage(message) {
-  bodyEl.innerHTML = `<tr><td colspan="9" class="empty">${message}</td></tr>`;
+  bodyEl.innerHTML = `<tr><td colspan="8" class="empty">${message}</td></tr>`;
   summaryEl.textContent = message;
 }
 

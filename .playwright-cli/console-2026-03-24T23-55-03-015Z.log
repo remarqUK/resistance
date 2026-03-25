@@ -1,0 +1,23 @@
+[      61ms] [ERROR] ReferenceError: useCallback is not defined
+    at ic (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:72:162890)
+    at _a (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:38:16961)
+    at cf (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:43768)
+    at af (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:39561)
+    at mv (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:39492)
+    at lr (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:39348)
+    at bo (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:35751)
+    at rf (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:34707)
+    at C (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:25:1568)
+    at MessagePort.Jt (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:25:1937) @ http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:39
+[      66ms] ReferenceError: useCallback is not defined
+    at ic (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:72:162890)
+    at _a (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:38:16961)
+    at cf (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:43768)
+    at af (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:39561)
+    at mv (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:39492)
+    at lr (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:39348)
+    at bo (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:35751)
+    at rf (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:40:34707)
+    at C (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:25:1568)
+    at MessagePort.Jt (http://127.0.0.1:8765/static/react/assets/index-B3jhQrRf.js:25:1937)
+[      65ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8765/favicon.ico:0

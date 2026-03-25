@@ -87,12 +87,14 @@ def _remaining_days_to_fetch(
         return min(requested_days, max(1, missing_days))
 
     # For 1h/1m we need to be weekend-aware because FX is closed on weekends.
+    # Allow up to 2× the interval before flagging a gap, since the current
+    # (incomplete) bar won't be cached until it closes.
     interval_delta = {
         '1h': pd.Timedelta(hours=1),
         '1m': pd.Timedelta(minutes=1),
     }[interval]
     gap_seconds = (now_ts - cached_last).total_seconds()
-    if gap_seconds <= interval_delta.total_seconds():
+    if gap_seconds <= interval_delta.total_seconds() * 2:
         return 0
 
     trading_days = _trading_days_between(cached_last, now_ts)

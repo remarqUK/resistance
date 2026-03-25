@@ -1,0 +1,5 @@
+[   64223ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8765/favicon.ico:0
+[   90104ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[   94176ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[   98273ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202
+[  102375ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/chart?pair=EURJPY:202

@@ -1304,14 +1304,37 @@ def whatif_margin_check(
             if state is None:
                 return None
 
-            init_margin = _safe_float(getattr(state, 'initMarginChange', None))
-            maint_margin = _safe_float(getattr(state, 'maintMarginChange', None))
-            equity_after = _safe_float(getattr(state, 'equityWithLoanAfter', None))
-            maint_after = _safe_float(getattr(state, 'maintMarginAfter', None))
+            # Extract all margin fields — IBKR may return '' for some
+            raw = {
+                'initMarginChange': getattr(state, 'initMarginChange', None),
+                'maintMarginChange': getattr(state, 'maintMarginChange', None),
+                'equityWithLoanAfter': getattr(state, 'equityWithLoanAfter', None),
+                'equityWithLoanBefore': getattr(state, 'equityWithLoanBefore', None),
+                'initMarginAfter': getattr(state, 'initMarginAfter', None),
+                'maintMarginAfter': getattr(state, 'maintMarginAfter', None),
+            }
+            init_margin = _safe_float(raw['initMarginChange'])
+            maint_margin = _safe_float(raw['maintMarginChange'])
+            equity_after = _safe_float(raw['equityWithLoanAfter'])
+            maint_after = _safe_float(raw['maintMarginAfter'])
+            init_margin_after = _safe_float(raw['initMarginAfter'])
+            equity_before = _safe_float(raw['equityWithLoanBefore'])
+
+            print(f"    whatIf {pair} {direction} {quantity}: "
+                  f"equity_before={equity_before} equity_after={equity_after} "
+                  f"init_margin_change={init_margin} init_margin_after={init_margin_after} "
+                  f"raw_initMarginAfter={raw['initMarginAfter']!r}")
 
             would_liquidate = False
             if equity_after is not None and maint_after is not None:
                 would_liquidate = equity_after <= maint_after
+
+            # Check if equity can cover the initial margin requirement
+            margin_exceeded = False
+            if equity_after is not None and init_margin_after is not None:
+                margin_exceeded = equity_after < init_margin_after
+            elif equity_before is not None and init_margin is not None:
+                margin_exceeded = equity_before < init_margin
 
             return {
                 'pair': pair,
@@ -1320,7 +1343,9 @@ def whatif_margin_check(
                 'init_margin_change': init_margin,
                 'maint_margin_change': maint_margin,
                 'equity_with_loan_after': equity_after,
+                'init_margin_after': init_margin_after,
                 'would_liquidate': would_liquidate,
+                'margin_exceeded': margin_exceeded,
             }
         except Exception as e:
             print(f"    Warning: whatIf margin check failed for {pair}: {e}")
@@ -1668,6 +1693,7 @@ def submit_fx_market_bracket_order(
                 int(quantity),
                 orderId=parent_order_id,
                 orderRef=order_ref,
+                tif='GTC',
                 transmit=False,
             )
             take_profit = LimitOrder(
@@ -1677,6 +1703,7 @@ def submit_fx_market_bracket_order(
                 orderId=ib.client.getReqId(),
                 parentId=parent_order_id,
                 orderRef=f'{order_ref}:tp' if order_ref else '',
+                tif='GTC',
                 transmit=False,
             )
             stop_loss = StopOrder(
@@ -1686,6 +1713,7 @@ def submit_fx_market_bracket_order(
                 orderId=ib.client.getReqId(),
                 parentId=parent_order_id,
                 orderRef=f'{order_ref}:sl' if order_ref else '',
+                tif='GTC',
                 transmit=True,
             )
 

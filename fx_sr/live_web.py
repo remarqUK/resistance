@@ -47,6 +47,7 @@ from .positions import calc_pnl_pips, pair_pip, process_hourly_exit_bars, sync_p
 
 
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
+REACT_BUILD_DIR = WEB_DIR / 'react'
 RUN_PY_PATH = Path(__file__).resolve().parent.parent / 'run.py'
 LOG_LIMIT = 80
 ALERT_LIMIT = 200
@@ -108,6 +109,7 @@ class LiveDashboardHub:
         self._execution_results = deque(maxlen=EXECUTION_LIMIT)
         self._last_quotes: dict[str, float] = {}
         self._log: deque[dict] = deque(maxlen=LOG_LIMIT)
+        self._active_signal_meta: dict[str, dict[str, str]] = {}
 
         self._clients: set[web.WebSocketResponse] = set()
         self._lock = asyncio.Lock()
@@ -206,6 +208,87 @@ class LiveDashboardHub:
         }
         self._log.append(entry)
         return entry
+
+    @staticmethod
+    def _signal_identity(signal) -> str:
+        """Return a stable identity for one active signal instance."""
+
+        signal_time = pd.Timestamp(signal.time)
+        if signal_time.tzinfo is None:
+            signal_time = signal_time.tz_localize('UTC')
+        else:
+            signal_time = signal_time.tz_convert('UTC')
+        return f'{signal.pair}:{signal.direction}:{signal_time.isoformat()}'
+
+    @staticmethod
+    def _normalize_signal_seen_at(seen_at=None) -> pd.Timestamp:
+        """Normalize a signal lifecycle timestamp to UTC."""
+
+        ts = pd.Timestamp.now(tz='UTC') if seen_at is None else pd.Timestamp(seen_at)
+        if ts.tzinfo is None:
+            return ts.tz_localize('UTC')
+        return ts.tz_convert('UTC')
+
+    def _mark_signal_valid(self, signal, *, seen_at=None) -> None:
+        """Record when a signal first appeared and when it was last revalidated."""
+
+        signal_id = self._signal_identity(signal)
+        now_iso = self._normalize_signal_seen_at(seen_at).isoformat()
+        current = self._active_signal_meta.get(signal.pair)
+        if current is not None and current.get('signal_id') == signal_id:
+            current['last_valid_at'] = now_iso
+            return
+
+        self._active_signal_meta[signal.pair] = {
+            'signal_id': signal_id,
+            'arrived_at': now_iso,
+            'last_valid_at': now_iso,
+        }
+
+    def _clear_signal_tracking(self, pair: str) -> None:
+        """Drop lifecycle metadata once a signal is no longer active."""
+
+        self._active_signal_meta.pop(pair, None)
+
+    def _sync_active_signal_tracking(self, rows: list[PairScanRow], *, seen_at=None) -> None:
+        """Refresh lifecycle metadata from the current authoritative pair rows."""
+
+        active_pairs: set[str] = set()
+        for row in rows:
+            if row.signal is None:
+                continue
+            self._mark_signal_valid(row.signal, seen_at=seen_at)
+            active_pairs.add(row.pair)
+
+        for pair in list(self._active_signal_meta):
+            if pair not in active_pairs:
+                self._clear_signal_tracking(pair)
+
+    def _evaluate_pair_row(
+        self,
+        pair: str,
+        *,
+        tracked_positions: dict[str, dict],
+        blocked_pairs: set[str],
+        price: float,
+        hourly_df,
+    ) -> tuple[PairScanRow | None, object | None]:
+        """Rebuild one pair row from authoritative scan inputs."""
+
+        signals, rows = collect_scan_rows(
+            pairs={pair: self.pairs[pair]},
+            params=self.params,
+            zone_history_days=self.zone_history_days,
+            tracked_positions=tracked_positions,
+            blocked_pairs=blocked_pairs,
+            price_cache={pair: price},
+            hourly_data_cache={self.pairs[pair]['ticker']: hourly_df},
+            portfolio_state=self._portfolio_state,
+        )
+        return (
+            rows[0] if rows else None,
+            signals[0] if signals else None,
+        )
 
     async def _broadcast_log(self, level: str, message: str) -> None:
         """Append a log entry and push it to connected clients."""
@@ -879,6 +962,8 @@ class LiveDashboardHub:
         """Serialize a signal for the browser."""
 
         pair_info = self.pairs.get(signal.pair, {})
+        signal_id = self._signal_identity(signal)
+        lifecycle = self._active_signal_meta.get(signal.pair, {})
         payload = {
             'time': signal.time.isoformat(),
             'pair': signal.pair,
@@ -891,6 +976,16 @@ class LiveDashboardHub:
             'zone_strength': signal.zone_strength,
             'zone_type': signal.zone_type,
             'decimals': pair_info.get('decimals', 5),
+            'arrived_at': (
+                lifecycle.get('arrived_at')
+                if lifecycle.get('signal_id') == signal_id
+                else None
+            ),
+            'last_valid_at': (
+                lifecycle.get('last_valid_at')
+                if lifecycle.get('signal_id') == signal_id
+                else None
+            ),
         }
         if size_plan is not None:
             payload['size_plan'] = {
@@ -1111,8 +1206,11 @@ class LiveDashboardHub:
             if row.signal is not None:
                 signals.append(self._serialize_signal(row.signal, None))
 
+        summary = dict(self.summary)
+        summary['signal_count'] = len(signals)
+
         return {
-            'summary': dict(self.summary),
+            'summary': summary,
             'pairs': {
                 pair: self._serialize_pair_row(row)
                 for pair, row in sorted(self._pair_rows.items())
@@ -1266,6 +1364,7 @@ class LiveDashboardHub:
             state, note = block
             async with self._lock:
                 self._append_log('info', f"{source.title()} signal blocked: {signal.pair} {note}")
+                self._clear_signal_tracking(signal.pair)
                 row = self._pair_rows.get(signal.pair)
                 if row is not None:
                     self._pair_rows[signal.pair] = replace(
@@ -1284,6 +1383,7 @@ class LiveDashboardHub:
                 'success',
                 f"{source.title()} signal: {signal.pair} {signal.direction} @ {signal.entry_price:.5f}",
             )
+            self._mark_signal_valid(signal)
             row = self._pair_rows.get(signal.pair)
             if row is not None:
                 note = f"{signal.zone_type.title()} reversal ({signal.zone_strength})"
@@ -1404,12 +1504,18 @@ class LiveDashboardHub:
                     self._tick_pending_pairs.add(result.pair)
                 row = self._pair_rows.get(result.pair)
                 if row is not None:
+                    self._clear_signal_tracking(result.pair)
                     if result.status == 'PARTIAL':
                         self._pair_rows[result.pair] = replace(row, state='PARTIAL', note=result.note, signal=None)
                     elif result.status == 'OPEN':
                         self._pair_rows[result.pair] = replace(row, state='OPEN', note=result.note, signal=None)
                     elif result.order_id is not None:
                         self._pair_rows[result.pair] = replace(row, state='PENDING', note=result.note, signal=None)
+                    else:
+                        # Clear the transient directional signal when execution was
+                        # skipped or failed so the dashboard does not keep showing
+                        # a stale LONG/SHORT setup as still actionable.
+                        self._pair_rows[result.pair] = replace(row, state='WAIT', note=result.note, signal=None)
             self.summary = self._build_summary(status=summary_status)
             state = self._export_state()
 
@@ -1530,28 +1636,34 @@ class LiveDashboardHub:
                             f"Bar exit: {pair} {alert['direction']} {alert['exit_reason']} @ {alert['exit_price']:.5f}",
                         )
 
-            tracked_pairs: dict[str, set[str]] = {}
-            for info in self._tracked.values():
-                tracked_pair = info.get('pair')
-                trade = info.get('trade')
-                if tracked_pair and trade:
-                    tracked_pairs.setdefault(tracked_pair, set()).add(trade.direction)
+            tracked_copy = dict(self._tracked)
             blocked = set(self._tick_pending_pairs)
-            state = self._export_state()
+            current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
+            current_price = self._last_quotes.get(pair, completed_close)
 
-        signal = await self._loop.run_in_executor(
+        updated_row, signal = await self._loop.run_in_executor(
             self._scan_executor,
-            lambda: self._scanner.evaluate_completed_bar(
+            lambda: self._evaluate_pair_row(
                 pair,
-                completed_close,
-                tracked_pairs={p: set(dirs) for p, dirs in tracked_pairs.items()},
+                tracked_positions=tracked_copy,
                 blocked_pairs=set(blocked),
+                price=current_price,
                 hourly_df=hourly_df,
             ),
         )
-        if signal is not None:
+        if signal is not None and self._signal_identity(signal) != current_signal_id:
             await self._handle_signal(signal, source='hourly')
             return
+
+        async with self._lock:
+            if updated_row is not None:
+                if signal is not None:
+                    self._mark_signal_valid(signal)
+                else:
+                    self._clear_signal_tracking(pair)
+                self._pair_rows[pair] = updated_row
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+            state = self._export_state()
 
         await self._broadcast({'type': 'snapshot', 'state': state})
 
@@ -1716,6 +1828,7 @@ class LiveDashboardHub:
 
         async with self._lock:
             self._pair_rows = {row.pair: row for row in pair_rows}
+            self._sync_active_signal_tracking(pair_rows)
             self._tracked = tracked
             if balance is not None:
                 self.balance = balance
@@ -1880,6 +1993,22 @@ async def _chart_page(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(WEB_DIR / 'chart_live.html')
 
 
+def _spa_index_response() -> web.StreamResponse:
+    """Serve the built React shell or fail with a clear build instruction."""
+
+    index_path = REACT_BUILD_DIR / 'index.html'
+    if index_path.exists():
+        return web.FileResponse(index_path)
+    return web.Response(
+        status=503,
+        text=(
+            'React live web build not found. Run `npm install` then `npm run build` '
+            'from the repo root before starting the dashboard.'
+        ),
+        content_type='text/plain',
+    )
+
+
 async def _chart_data(request: web.Request) -> web.StreamResponse:
     """Return OHLC data for a pair from the accumulator."""
 
@@ -1901,10 +2030,19 @@ async def _chart_data(request: web.Request) -> web.StreamResponse:
             })
 
     pair_info = hub.pairs.get(pair, {})
-    zones = hub._scanner._zones.get(pair)
+    zone_data = hub._scanner._zones.get(pair)
     support, resistance = (None, None)
-    if zones:
-        s, r, _ = zones
+    if zone_data:
+        _, _, all_zones = zone_data
+        # Re-derive nearest zones using the latest price (same as the scan does)
+        last_price = bars[-1]['close'] if bars else None
+        live_price = hub._last_quotes.get(pair)
+        ref_price = live_price or last_price
+        if ref_price and all_zones:
+            from .strategy import get_tradeable_zones
+            s, r = get_tradeable_zones(all_zones, ref_price)
+        else:
+            s, r = zone_data[0], zone_data[1]
         if s:
             support = {'lower': s.lower, 'upper': s.upper, 'strength': s.strength}
         if r:
@@ -1922,7 +2060,7 @@ async def _chart_data(request: web.Request) -> web.StreamResponse:
 async def _index(_request: web.Request) -> web.StreamResponse:
     """Serve the dashboard shell."""
 
-    return web.FileResponse(WEB_DIR / 'index.html')
+    return _spa_index_response()
 
 
 def _dashboard_url(port: int) -> str:
@@ -2131,13 +2269,12 @@ def run_live_web_app(
         client_id=client_id,
         port=port,
     )
-    from .replay import handle_replay, handle_replay_bars, handle_replay_dates, handle_replay_page, handle_replay_refresh, handle_replay_presets
+    from .replay import handle_replay, handle_replay_bars, handle_replay_dates, handle_replay_refresh, handle_replay_presets
     from .replay import (
         handle_backtest_trades_api,
         handle_backtest_trades_page,
         handle_backtest_diary_api,
         handle_backtest_diary_page,
-        handle_trade_log_page,
         handle_trade_log_api,
     )
 
@@ -2152,12 +2289,12 @@ def run_live_web_app(
     app.router.add_post('/backtest-rerun', _rerun_backtest)
     app.router.add_post('/api/backtest-rerun/', _rerun_backtest)
     app.router.add_post('/backtest-rerun/', _rerun_backtest)
-    app.router.add_get('/replay', handle_replay_page)
+    app.router.add_get('/replay', _index)
     app.router.add_get('/backtest-trades', handle_backtest_trades_page)
     app.router.add_get('/api/backtest/trades', handle_backtest_trades_api)
     app.router.add_get('/backtest-diary', handle_backtest_diary_page)
     app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)
-    app.router.add_get('/trade-log', handle_trade_log_page)
+    app.router.add_get('/trade-log', _index)
     app.router.add_get('/api/trade-log', handle_trade_log_api)
     app.router.add_get('/api/replay', handle_replay)
     app.router.add_get('/api/replay/bars', handle_replay_bars)
@@ -2168,7 +2305,7 @@ def run_live_web_app(
     @web.middleware
     async def no_cache(request, handler):
         response = await handler(request)
-        if request.path.startswith('/static/') or request.path in ('/', '/chart'):
+        if request.path.startswith('/static/') or request.path in ('/', '/chart', '/trade-log', '/replay'):
             response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
         return response
 

@@ -15,3 +15,7 @@ backups/
 .venv/
 venv/
 env/
+
+# Frontend tooling
+node_modules/
+fx_sr/web_live/react/

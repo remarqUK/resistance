@@ -43,6 +43,8 @@ class HourlyBarAccumulator:
         self._completed: Dict[str, pd.DataFrame] = {}
         self._current: Dict[str, dict] = {}
         self._on_bar_complete: List[Callable[[str, pd.Timestamp], None]] = []
+        self._on_minute_bar_complete: List[Callable[[str, float], None]] = []
+        self._current_minute: Dict[str, int] = {}  # pair -> minute timestamp
         self._seeded: set[str] = set()
 
     @property

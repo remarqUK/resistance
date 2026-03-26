@@ -167,6 +167,7 @@ class LiveDashboardHub:
         self._accumulator = HourlyBarAccumulator()
         self._tick_pending_pairs: set[str] = set()
         self._tick_exit_alerted: set[str] = set()
+        self._minute_tracker: dict[str, int] = {}
         self._portfolio_state = build_portfolio_state([], params=params, current_balance=balance)
         self._backfill_done = False
         self._backfill_progress: dict = {
@@ -1663,6 +1664,58 @@ class LiveDashboardHub:
 
         # Delegate to the existing quote handler for display and tick exits
         await self._handle_quote_update(pair, price)
+
+        # Intrabar mode: evaluate signals on minute bar completion
+        if self._backfill_done and self.execution_mode == 'intrabar':
+            bar_time = getattr(bar, 'time', None) or getattr(bar, 'date', None)
+            if bar_time is not None:
+                import datetime as _dt
+                if isinstance(bar_time, _dt.datetime):
+                    minute_ts = int(bar_time.timestamp()) // 60
+                else:
+                    minute_ts = int(pd.Timestamp(bar_time).timestamp()) // 60
+                prev_minute = self._minute_tracker.get(pair)
+                self._minute_tracker[pair] = minute_ts
+                if prev_minute is not None and minute_ts != prev_minute:
+                    await self._handle_minute_bar_complete(pair, price)
+
+    async def _handle_minute_bar_complete(self, pair: str, price: float) -> None:
+        """Intrabar mode: evaluate signal at each minute bar close."""
+
+        if not self._backfill_done:
+            return
+
+        # Build hourly df including the in-progress bar
+        hourly_df = self._accumulator.get_hourly_df(pair)
+        if hourly_df is None or hourly_df.empty:
+            return
+
+        async with self._lock:
+            tracked_copy = dict(self._tracked)
+            blocked = set(self._tick_pending_pairs)
+            current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
+
+        updated_row, signal = await self._loop.run_in_executor(
+            self._scan_executor,
+            lambda: self._evaluate_pair_row(
+                pair,
+                tracked_positions=tracked_copy,
+                blocked_pairs=set(blocked),
+                price=price,
+                hourly_df=hourly_df,
+            ),
+        )
+        if signal is not None and self._signal_identity(signal) != current_signal_id:
+            await self._handle_signal(signal, source='intrabar')
+            return
+
+        async with self._lock:
+            if updated_row is not None:
+                if signal is not None:
+                    self._mark_signal_valid(signal)
+                else:
+                    self._clear_signal_tracking(pair)
+                self._pair_rows[pair] = updated_row
 
     def _completed_hourly_df(self, pair: str, bar_time) -> pd.DataFrame:
         """Return completed hourly bars up to the finalized bar that triggered the callback."""

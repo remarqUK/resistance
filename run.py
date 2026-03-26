@@ -81,7 +81,7 @@ def _build_backtest_run_config(
     *,
     hourly_days: int,
     zone_history_days: int,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
     requested_profile: str | None = None,
     starting_balance: float | None = None,
     risk_pct: float | None = None,
@@ -311,7 +311,7 @@ def _run_backtests_until_target(
     zone_days: int,
     active_client_id: int,
     hourly_days: int,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
     fetch_workers: int | None = None,
 ) -> tuple[
     dict[str, object],
@@ -723,7 +723,7 @@ def cmd_backtest(args):
         args.balance = profile.get('starting_balance', None)
     if args.risk_pct is None:
         args.risk_pct = profile.get('risk_pct', 5.0)
-    execution_mode = getattr(args, 'execution_mode', 'next_bar')
+    execution_mode = getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar')
 
     profile_name = _requested_profile_name(args)
     print(f"\n  IBKR client ID: {active_client_id}")
@@ -1401,9 +1401,10 @@ def cmd_live(args):
     pairs = _resolve_pairs(args.pair)
     zone_days = args.zone_history
     profile_name = _requested_profile_name(args)
-    execution_mode = getattr(args, 'execution_mode', 'next_bar')
+    profile = get_profile(profile_name)
+    execution_mode = getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar')
     if args.risk_pct is None:
-        args.risk_pct = get_profile(profile_name).get('risk_pct', 5.0)
+        args.risk_pct = profile.get('risk_pct', 5.0)
 
     if args.zones:
         for pair_id, pair_info in pairs.items():
@@ -1622,7 +1623,7 @@ def main():
         '--execution-mode',
         choices=('next_bar', 'intrabar'),
         default='next_bar',
-        help='Execution timing mode for backtests: next_bar (default) or intrabar',
+        help='Execution timing mode for backtests: intrabar (default) or next_bar',
     )
     bt.add_argument(
         '--target-trades',

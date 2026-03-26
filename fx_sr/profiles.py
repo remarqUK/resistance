@@ -354,6 +354,9 @@ PROFILES = {
         # Margin safety
         'margin_cushion_pct': 15.0,
 
+        # Execution mode: 'intrabar' evaluates on minute bars, 'next_bar' waits for hourly close
+        'execution_mode': 'intrabar',
+
         # Dynamic risk sizing: scale risk down during drawdowns
         'dynamic_risk': True,
         'dd_risk_start': 5.0,

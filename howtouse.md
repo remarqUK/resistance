@@ -99,22 +99,27 @@ Do not use `--no-positions` in normal live operation. Position tracking is what 
 - Header controls:
   - **Live status pill** on the left side of the control row
   - **Pause Entries** button to stop/resume paper/live entries
-  - **Stop Server** to request a shutdown
-  - **Strategy Replay**, **All Backtest Trades**, **Backtest Diary** links on the far right
+  - **Re-run Backtest** to launch a full backtest in the background
+  - **Rebuild UI** to rebuild the React frontend and reload
+  - **Restart** to restart the live server process
+  - **Stop** to request a shutdown
+  - Navigation links: **Live Trade Log**, **Live Diary**, **Backtest Trades**, **Backtest Diary**, **Strategy Replay**
 - Backtest Diary (`/backtest-diary`) now includes:
   - cached-backtest run selector
   - transaction calendar
   - daily drill-down list for the selected date
+- Live Diary (`/live-diary`) shows a calendar diary of executed live trades
+- Live Trade Review (`/live-trade`) provides a detailed review page for individual live trades
 
 ## 4. Automatic Execution
 
-To let the system place trades automatically, add `--paper-trade`:
+Paper-trade execution is **on by default**. To run in scan-only mode, add `--no-paper-trade`:
 
 ```bash
-python run.py live --interval 60 --paper-trade --balance 10000 --account-currency GBP
+python run.py live --interval 60 --balance 10000 --account-currency GBP
 ```
 
-What this adds:
+What automatic execution adds:
 
 - submits market-entry FX bracket orders
 - stores broker order IDs
@@ -124,10 +129,16 @@ What this adds:
 
 Execution only happens when:
 
-- `--paper-trade` is passed
+- `--paper-trade` is active (the default)
 - balance is known
 - account currency is known
 - the signal passes duplicate-position, pending-order, risk, and correlation checks
+
+To disable execution and scan only:
+
+```bash
+python run.py live --interval 60 --no-paper-trade --balance 10000 --account-currency GBP
+```
 
 ## 5. What Gets Recorded
 

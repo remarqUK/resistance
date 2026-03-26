@@ -128,14 +128,14 @@ python run.py live --no-positions
 - Header controls now include:
   - live status pill (`Connecting` / `Live` / `Scanning` / `Disconnected`)
   - `Pause Entries`
-  - `Fill`
   - `Re-run Backtest`
-  - `Stop Server`
-  - links: `Trade Log`, `Strategy Replay`, `All Backtest Trades`, `Backtest Diary`
-- `Fill` fills missing cache rows for all configured pairs across `1d`, `1h`, and `1m`, and kicks off in a background worker so the dashboard stays responsive.
+  - `Rebuild UI`
+  - `Restart`
+  - `Stop`
+  - links: `Live Trade Log`, `Live Diary`, `Backtest Trades`, `Backtest Diary`, `Strategy Replay`
 - Fill progress appears in the dashboard scan-progress line as `Fill: X of Y (Z%)` while running, then completes as `Fill complete...`.
 - Fill milestones are also written into the board event log so you can track each percent step while keeping the UI status card visible.
-- `Fill` uses the same server-side IBKR caching logic as the CLI fill path (`POST /api/fill?days=<int>`), default `days=365`.
+- Fill uses the same server-side IBKR caching logic as the CLI fill path (`POST /api/fill?days=<int>`), default `days=365`.
 - Legacy/alternate dashboard paths also accept `POST /fill`, `POST /fill/`, `POST /fill-cache`, `POST /fill_cache`, `POST /api/fill/`, and `POST /api/fill-cache`.
 - `Re-run Backtest` launches `python run.py backtest` in a background worker with dashboard strategy/session settings (`--ibkr-client-id`, `--pair`, `--zone-history`, and all tuned strategy args), then streams progress in the scan-progress line as `Backtest: X of Y (Z%)` plus websocket log updates.
 - Backtest rerun runs against `POST /api/backtest-rerun` and `POST /backtest-rerun` for compatibility.
@@ -146,6 +146,8 @@ python run.py live --no-positions
 - Backtest reruns also use a separate client-id offset (base client ID shifted by +3000, and +4000 when the live client is 60) so they do not collide with live scan or fill workers.
 - API responses are shown in the board event log and reused through the websocket (`success` / `warning` / `error` entries).
 - `Backtest Diary` now loads available cached backtest runs first, then shows the selected run in the calendar view
+- `Live Diary` (`/live-diary`) shows the live trade diary calendar for executed trades
+- `Live Trade Review` (`/live-trade`) provides a detailed review page for individual live trades
 - Dashboard shows a next-transaction countdown and beeps at:
   - 10 minutes: 1 beep
   - 5 minutes: 2 beeps
@@ -224,7 +226,7 @@ viz_data.json --> chart.html
 
 1. Enable API in TWS: `Configure > API > Settings`
 2. Check `Enable ActiveX and Socket Clients`
-3. Socket port: `7497` (paper) or `7496` (live)
+3. Socket port: `7497` (TWS paper) or `7496` (TWS live); IB Gateway uses `4002` (paper) or `4001` (live)
 4. The system uses `clientId 60` for data and monitoring. Fill workers use a separate base client id offset (`2060+`) to avoid reusing that slot.
 
 Position tracking is read-only. The system monitors existing positions and alerts on exit conditions, but does not place orders.

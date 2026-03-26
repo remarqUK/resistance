@@ -1085,7 +1085,16 @@ export function DashboardPage() {
                       <div><span className="value-label">TP</span><span className="value">{formatNumber(position.tp_price, dec)}</span></div>
                       <div><span className="value-label">Current</span><span className="value">{formatNumber(position.current_price, dec)}</span></div>
                       <div><span className="value-label">P/L pips</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{formatSigned(position.pnl_pips, 1, ' pips')}</span></div>
-                      <div><span className="value-label">P/L</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{position.pnl_amount != null ? `${position.pnl_amount >= 0 ? '+' : ''}${position.account_currency || '\u00a3'}${Number(position.pnl_amount).toFixed(2)}` : '\u2013'}</span></div>
+                      <div><span className="value-label">P/L</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{(() => {
+                        const amt = position.pnl_amount != null ? `${position.pnl_amount >= 0 ? '+' : ''}${position.account_currency || '\u00a3'}${Number(position.pnl_amount).toFixed(2)}` : '\u2013';
+                        const riskDist = position.entry_price && position.sl_price ? Math.abs(position.entry_price - position.sl_price) : 0;
+                        const pnlDist = position.entry_price && position.current_price
+                          ? (position.direction === 'LONG' ? position.current_price - position.entry_price : position.entry_price - position.current_price)
+                          : 0;
+                        const r = riskDist > 0 ? (pnlDist / riskDist) : null;
+                        const rStr = r != null ? ` (${r >= 0 ? '+' : ''}${r.toFixed(2)}R)` : '';
+                        return `${amt}${rStr}`;
+                      })()}</span></div>
                     </div>
                     {posSelected ? (
                       <div onClick={(e) => e.stopPropagation()}>

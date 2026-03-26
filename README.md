@@ -54,6 +54,41 @@ python run.py backtest --no-cache
 python run.py backtest --preset source --rr-ratio 1.2
 ```
 
+### PostgreSQL tuning for backtest scale
+
+If full scans are slow or appear to stall, tune PostgreSQL for read-heavy backtest workloads first.
+
+- Keep backtest DB pressure down:
+  - Start with `--fetch-workers 2` (or 4 if stable).
+  - Use:
+    - `--fetch-workers 2`
+    - `--backtest-debug`
+  - Set app-level query timeouts:
+    - Current shell:  
+      - `$env:FX_SR_DB_STATEMENT_TIMEOUT_MS = '120000'`
+      - `$env:FX_SR_DB_LOCK_TIMEOUT_MS = '5000'`
+      - `$env:FX_SR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS = '30000'`
+    - Persisted process/user env:
+      - `setx FX_SR_DB_STATEMENT_TIMEOUT_MS 120000`
+      - `setx FX_SR_DB_LOCK_TIMEOUT_MS 5000`
+      - `setx FX_SR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS 30000`
+
+- Apply server-level settings (Windows examples):
+
+```powershell
+psql -h localhost -U postgres -d resistance -f .\scripts\postgres_tuning.sql
+```
+
+Then restart PostgreSQL and verify with:
+
+```sql
+SHOW shared_buffers;
+SHOW work_mem;
+SHOW statement_timeout;
+```
+
+You can edit [`scripts/postgres_tuning.sql`](./scripts/postgres_tuning.sql) as needed for your hardware.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--pair` | all 10 | Specific pair (for example `EURUSD`) |
@@ -96,7 +131,7 @@ python run.py live --no-positions
   - `Fill`
   - `Re-run Backtest`
   - `Stop Server`
-  - links: `Trade Log`, `Strategy Replay`, `All Backtest Trades`, `Trade Diary`
+  - links: `Trade Log`, `Strategy Replay`, `All Backtest Trades`, `Backtest Diary`
 - `Fill` fills missing cache rows for all configured pairs across `1d`, `1h`, and `1m`, and kicks off in a background worker so the dashboard stays responsive.
 - Fill progress appears in the dashboard scan-progress line as `Fill: X of Y (Z%)` while running, then completes as `Fill complete...`.
 - Fill milestones are also written into the board event log so you can track each percent step while keeping the UI status card visible.
@@ -110,7 +145,7 @@ python run.py live --no-positions
   - fill workers use an offset range (`clientId 2060+`)
 - Backtest reruns also use a separate client-id offset (base client ID shifted by +3000, and +4000 when the live client is 60) so they do not collide with live scan or fill workers.
 - API responses are shown in the board event log and reused through the websocket (`success` / `warning` / `error` entries).
-- `Trade Diary` now loads available cached backtest runs first, then shows the selected run in the calendar view
+- `Backtest Diary` now loads available cached backtest runs first, then shows the selected run in the calendar view
 - Dashboard shows a next-transaction countdown and beeps at:
   - 10 minutes: 1 beep
   - 5 minutes: 2 beeps

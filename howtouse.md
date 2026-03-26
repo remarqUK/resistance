@@ -100,8 +100,8 @@ Do not use `--no-positions` in normal live operation. Position tracking is what 
   - **Live status pill** on the left side of the control row
   - **Pause Entries** button to stop/resume paper/live entries
   - **Stop Server** to request a shutdown
-  - **Strategy Replay**, **All Backtest Trades**, **Trade Diary** links on the far right
-- Trade Diary (`/backtest-diary`) now includes:
+  - **Strategy Replay**, **All Backtest Trades**, **Backtest Diary** links on the far right
+- Backtest Diary (`/backtest-diary`) now includes:
   - cached-backtest run selector
   - transaction calendar
   - daily drill-down list for the selected date

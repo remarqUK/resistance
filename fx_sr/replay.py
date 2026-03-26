@@ -208,10 +208,12 @@ def _load_latest_cached_backtest_rows(pair: str | None = None) -> list[dict]:
 
 
 def _cached_backtest_key(row: dict) -> str:
+    execution_mode = str(row.get('execution_mode', 'next_bar') or 'next_bar')
     return (
         f"{row.get('params_hash', '')}|"
         f"{int(row.get('hourly_days', 0))}|"
-        f"{int(row.get('zone_history_days', 0))}"
+        f"{int(row.get('zone_history_days', 0))}|"
+        f"{execution_mode}"
     )
 
 
@@ -240,13 +242,17 @@ def _describe_backtest_row(row: dict) -> dict:
         or matched_profile.get('description', '')
         or ''
     )
+    execution_mode = str(row.get('execution_mode', 'next_bar') or 'next_bar')
     selection_label = run_config.get('selection_label') or ''
     label = profile_name or selection_label or row.get('params_hash', '')[:10] or 'cached run'
+    if execution_mode != 'next_bar':
+        label = f'{label} [{execution_mode}]'
     if selection_label and selection_label not in {'baseline', profile_name}:
         label = f"{label} [{selection_label}]"
     return {
         'key': _cached_backtest_key(row),
         'label': label,
+        'execution_mode': str(row.get('execution_mode', 'next_bar') or 'next_bar'),
         'profile_name': profile_name,
         'description': profile_description,
         'selection_label': selection_label,
@@ -573,6 +579,7 @@ def generate_replay_frames(
     frame_index = 0
     selected_day_bar_count = 0
     carry_trade_entry_time: Optional[pd.Timestamp] = None
+    has_post_target_context = False
 
     def zone_provider(current_time, current_date, _bar_index):
         bar_date = pd.Timestamp(current_date)
@@ -590,10 +597,7 @@ def generate_replay_frames(
             params,
             minute_df=minute_df,
             l2_snapshots=l2_snapshots,
-            allow_h1_fallback=(
-                bool(params.allow_h1_execution_fallback)
-                and not bool(params.strict_backtest_execution)
-            ),
+            allow_h1_fallback=True,
             fallback_mid_price=float(row['Open']),
         )
 
@@ -618,7 +622,7 @@ def generate_replay_frames(
 
     def on_bar(step: WalkForwardBar) -> None:
         nonlocal frame_index, selected_day_bar_count, day_zones, carry_trade_entry_time
-        nonlocal carry_exit_date, target_ended
+        nonlocal carry_exit_date, target_ended, has_post_target_context
 
         row = step.row
         current_time = step.bar_time
@@ -645,6 +649,7 @@ def generate_replay_frames(
         # for the next 24h so the chart shows price action continuing
         if target_ended and not is_target:
             if carry_exit_date is not None and current_date <= carry_exit_date:
+                has_post_target_context = True
                 # Still on carry exit day — include as tail context
                 context_bars.append({
                     'time': pd.Timestamp(current_time).isoformat(),
@@ -656,6 +661,7 @@ def generate_replay_frames(
                 return
             tail_cutoff = target_date + timedelta(days=2)
             if current_date <= tail_cutoff and carry_trade_entry_time is None:
+                has_post_target_context = True
                 context_bars.append({
                     'time': pd.Timestamp(current_time).isoformat(),
                     'open': round(float(row['Open']), decimals),
@@ -690,7 +696,7 @@ def generate_replay_frames(
                 'pnl_r': round(step.exit_trade.pnl_r, 2),
             }
             completed_trades.append(_trade_to_dict(step.exit_trade, pip))
-            if is_target or was_carry_trade:
+            if is_target:
                 frames.append(_build_frame(
                     frame_index,
                     current_time,
@@ -705,8 +711,7 @@ def generate_replay_frames(
                     decimals,
                 ))
                 frame_index += 1
-                if is_target:
-                    selected_day_bar_count += 1
+                selected_day_bar_count += 1
             if was_carry_trade:
                 carry_trade_entry_time = None
                 carry_exit_date = current_date
@@ -740,20 +745,6 @@ def generate_replay_frames(
             return
 
         if is_carry_continuation:
-            frames.append(_build_frame(
-                frame_index,
-                current_time,
-                row,
-                step.zones,
-                step.support_zone,
-                step.resistance_zone,
-                signal_event,
-                None,
-                serialize_open_trade(step.open_trade, step.bars_held),
-                list(completed_trades),
-                decimals,
-            ))
-            frame_index += 1
             return
 
         # Past target day, no carry — mark target as ended so tail bars get added
@@ -815,7 +806,7 @@ def generate_replay_frames(
             'decimals': decimals,
             'pip': pip,
             'incomplete': incomplete,
-            'continues_after_selected_day': len(frames) > selected_day_bar_count,
+            'continues_after_selected_day': has_post_target_context,
         },
     }
 

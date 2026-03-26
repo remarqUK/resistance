@@ -38,6 +38,21 @@ class RunArgumentTests(unittest.TestCase):
         self.assertEqual(parsed.save_baseline, 'artifacts/current.json')
         self.assertEqual(parsed.compare_baseline, 'artifacts/expected.json')
 
+    def test_main_parses_backtest_execution_mode(self):
+        argv = [
+            'run.py',
+            'backtest',
+            '--execution-mode',
+            'intrabar',
+        ]
+
+        with patch.object(sys, 'argv', argv), \
+                patch('run.cmd_backtest') as cmd_backtest:
+            run.main()
+
+        parsed = cmd_backtest.call_args.args[0]
+        self.assertEqual(parsed.execution_mode, 'intrabar')
+
     def test_main_parses_download_minute_backfill_flags(self):
         argv = [
             'run.py',
@@ -102,6 +117,7 @@ class RunArgumentTests(unittest.TestCase):
             days=30,
             balance=None,
             risk_pct=5.0,
+            execution_mode='next_bar',
             no_cache=False,
             target_trades=None,
             target_profit_floor=1.0,

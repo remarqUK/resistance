@@ -1,3 +1,6 @@
+/* Backtest Diary — page-specific logic.
+ * Shared utilities are loaded from diary_shared.js (must be included first). */
+
 const backtestFilter = document.getElementById("backtest-filter");
 const loadBtn = document.getElementById("load-btn");
 const monthRangeEl = document.getElementById("month-range");
@@ -6,109 +9,16 @@ const selectedDateEl = document.getElementById("selected-date");
 const calendarEl = document.getElementById("diary-calendar");
 const bodyEl = document.getElementById("diary-body");
 const BACKTEST_CURRENCY = "GBP";
-const PRICE_DISPLAY_DECIMALS = 5;
 let selectedBacktest = null;
 
-const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => {
-    const map = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      "\"": "&quot;",
-      "'": "&#39;",
-    };
-    return map[char];
-  });
-}
-
-function formatDateLabel(dateKey) {
-  const date = parseDateKey(dateKey);
-  return date.toLocaleDateString(undefined, {
-    weekday: "short",
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-  });
-}
-
-function formatMonthLabel(date) {
-  return date.toLocaleDateString(undefined, {
-    month: "long",
-    year: "numeric",
-  });
-}
-
-function parseDateKey(value) {
-  const [year, month, day] = String(value).split("-").map((part) => Number(part));
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
-    return new Date(NaN);
-  }
-  return new Date(year, month - 1, day);
-}
-
-function formatDateKey(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function isIsoDate(value) {
-  if (!value || typeof value !== "string") return false;
-  const match = /^\d{4}-\d{2}-\d{2}$/.test(value);
-  if (!match) return false;
-  const parsed = new Date(`${value}T00:00:00`);
-  return !Number.isNaN(parsed.getTime()) && formatDateKey(parsed) === value;
-}
-
-function formatSigned(value, digits = 2, suffix = "") {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
-  }
-  const number = Number(value);
-  const prefix = number > 0 ? "+" : "";
-  return `${prefix}${Number(number).toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })}${suffix}`;
-}
-
-function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
-  }
-  return Number(value).toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
-}
+let dateMap = new Map();
+let selectedDate = "";
 
 function formatCurrency(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "—";
+    return "\u2014";
   }
   return `${BACKTEST_CURRENCY} ${formatNumber(value, 2)}`;
-}
-
-function formatTime(isoTime) {
-  if (!isoTime) {
-    return "—";
-  }
-  const parsed = new Date(isoTime);
-  if (Number.isNaN(parsed.getTime())) {
-    return "—";
-  }
-  return parsed.toLocaleString([], {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
 }
 
 function formatBacktestDate(isoTime) {
@@ -152,7 +62,7 @@ function formatBacktestOption(backtest) {
   if (backtest.starting_balance !== null && backtest.starting_balance !== undefined) {
     parts.push(`${formatCurrency(backtest.starting_balance)} @ ${formatNumber(backtest.risk_pct, 2)}%`);
   }
-  return parts.join(" · ");
+  return parts.join(" \u00b7 ");
 }
 
 function populateBacktests(backtests, selectedKey = "") {
@@ -202,61 +112,61 @@ function openReplay(pair, date, preset, entryTime = "", backtestKey = "") {
 }
 
 function showMessage(message) {
-  bodyEl.innerHTML = `<tr><td colspan=\"9\" class=\"empty\">${message}</td></tr>`;
+  bodyEl.innerHTML = `<div style="color:var(--muted);font-size:0.84rem;padding:8px 0">${message}</div>`;
   summaryEl.textContent = message;
 }
 
 function buildRows(trades, dateFilter = "") {
   if (!trades.length) {
-    bodyEl.innerHTML = `<tr><td colspan="9" class="empty">No trades for this date.</td></tr>`;
+    bodyEl.innerHTML = `<div style="color:var(--muted);font-size:0.84rem;padding:8px 0">No trades for this date.</div>`;
     return;
   }
-
-  bodyEl.innerHTML = trades.map((trade) => {
-    const pnlClass = (trade.pnl_pips || 0) >= 0 ? "up" : "down";
-    const directionClass = (trade.direction || "").toLowerCase();
-    const digits = PRICE_DISPLAY_DECIMALS;
-    const tradeDate = dateFilter || replayDateForTrade(trade);
-    const exitPrice = trade.exit_price ? formatNumber(trade.exit_price, digits) : "—";
-    const safePair = escapeHtml(trade.pair || "");
-    const safeDate = escapeHtml(tradeDate);
-    const safeEntry = escapeHtml(trade.entry_time || "");
+  const _hhmm = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",hour12:false});
+  };
+  bodyEl.innerHTML = trades.map((trade, i) => {
+    const cls = (trade.pnl_r || 0) >= 0 ? "up" : "down";
+    const dirCls = (trade.direction || "").toLowerCase();
+    const dirLabel = (trade.direction || "").charAt(0);
+    const entryHm = _hhmm(trade.entry_time);
+    const exitHm = _hhmm(trade.exit_time);
+    const timeRange = exitHm ? `${entryHm}\u2013${exitHm}` : entryHm;
+    const reason = trade.exit_reason || "\u2014";
     return `
-      <tr class="trade-history-row" data-pair="${safePair}" data-date="${safeDate}" data-entry="${safeEntry}">
-        <td><span class="pair-main">${trade.pair || "–"}</span></td>
-        <td>${formatTime(trade.entry_time)}</td>
-        <td>${trade.exit_time ? formatTime(trade.exit_time) : "—"}</td>
-        <td><span class="pill pill-${directionClass}" style="min-width:auto;padding:4px 8px;font-size:0.65rem">${trade.direction || "—"}</span></td>
-        <td>${formatNumber(trade.entry_price, digits)} → ${exitPrice}</td>
-        <td class="${pnlClass}">${formatSigned(trade.pnl_pips, 1, "p")}</td>
-        <td class="${pnlClass}">${formatSigned(trade.pnl_r, 2, "R")}</td>
-        <td>${formatCurrency(trade.balance_after)}</td>
-        <td>${trade.exit_reason || "—"}</td>
-      </tr>
+      <div class="trade-history-row" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--line);cursor:pointer;font-size:0.82rem">
+        <span class="pill pill-${dirCls}" style="font-size:0.62rem;padding:1px 5px;min-width:auto">${dirLabel}</span>
+        <span style="font-weight:600;min-width:56px">${trade.pair || "\u2013"}</span>
+        <span style="flex:1;color:var(--muted);font-size:0.76rem">${timeRange}</span>
+        <span class="${cls}" style="font-weight:600;min-width:50px;text-align:right">${formatSigned(trade.pnl_r, 2, "R")}</span>
+        <span style="color:var(--muted);font-size:0.72rem;min-width:30px;text-align:right">${reason}</span>
+      </div>
     `;
   }).join("");
 
   bodyEl.querySelectorAll(".trade-history-row").forEach((row) => {
-    const pair = row.dataset.pair || "";
-    const date = row.dataset.date || "";
-    const entry = row.dataset.entry || "";
+    const idx = Number(row.dataset.idx);
+    const trade = trades[idx];
+    if (!trade) return;
+    const tradeDate = dateFilter || replayDateForTrade(trade);
     row.addEventListener("click", () => openReplay(
-      pair,
-      date,
+      trade.pair || "",
+      tradeDate,
       "",
-      entry,
+      trade.entry_time || "",
       selectedBacktest?.key || "",
     ));
   });
 }
 
 function buildCalendarState(trades) {
-  const dateMap = new Map();
+  const map = new Map();
   for (const trade of trades) {
     const entryDate = tradeEntryDate(trade);
     if (!entryDate) continue;
-    if (!dateMap.has(entryDate)) {
-      dateMap.set(entryDate, {
+    if (!map.has(entryDate)) {
+      map.set(entryDate, {
         date: entryDate,
         trades: [],
         count: 0,
@@ -266,7 +176,7 @@ function buildCalendarState(trades) {
         total_pnl_r: 0,
       });
     }
-    const row = dateMap.get(entryDate);
+    const row = map.get(entryDate);
     row.trades.push(trade);
     row.count += 1;
     const pnlPips = Number(trade.pnl_pips) || 0;
@@ -277,7 +187,7 @@ function buildCalendarState(trades) {
     if (pnlPips < 0) row.losses += 1;
   }
 
-  for (const row of dateMap.values()) {
+  for (const row of map.values()) {
     row.trades.sort((a, b) => {
       const aTime = String(a.entry_time || "");
       const bTime = String(b.entry_time || "");
@@ -287,7 +197,7 @@ function buildCalendarState(trades) {
     row.total_pnl_r = Number(row.total_pnl_r.toFixed(2));
   }
 
-  return dateMap;
+  return map;
 }
 
 function selectReplayPair(trades) {
@@ -306,23 +216,6 @@ function openReplayForDate(date) {
   const pair = selectReplayPair(dayData.trades);
   if (!pair) return;
   openReplay(pair, date, "", firstTrade?.entry_time || "", selectedBacktest?.key || "");
-}
-
-function monthStartFromDate(date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
-function monthKeyFromDate(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function getMonthRange(dateMap) {
-  const dates = Array.from(dateMap.keys()).sort();
-  if (!dates.length) return null;
-  return {
-    start: parseDateKey(dates[0]),
-    end: parseDateKey(dates[dates.length - 1]),
-  };
 }
 
 function renderCalendar() {
@@ -346,95 +239,15 @@ function renderCalendar() {
   }
 
   calendarEl.innerHTML = monthRows.join("");
-  monthRangeEl.textContent = `${formatMonthLabel(range.end)} — ${formatMonthLabel(range.start)} (${dateMap.size} entry days)`;
+  monthRangeEl.textContent = `${formatMonthLabel(range.end)} \u2014 ${formatMonthLabel(range.start)} (${dateMap.size} entry days)`;
   wireDayClicks();
-}
-
-function renderMonth(monthDate) {
-  const monthKey = monthKeyFromDate(monthDate);
-  const monthStart = monthStartFromDate(monthDate);
-  const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
-  const firstWeekday = (monthStart.getDay() + 6) % 7; // Monday = 0
-  const lastWeekday = (monthEnd.getDay() + 6) % 7; // Monday = 0
-  const gridStart = new Date(monthStart);
-  gridStart.setDate(1 - firstWeekday);
-  const gridEnd = new Date(monthEnd);
-  gridEnd.setDate(monthEnd.getDate() + (6 - lastWeekday));
-
-  const header = `<div class="diary-weekdays">${WEEKDAY_LABELS.map((day) => `<div>${day}</div>`).join("")}</div>`;
-  const weeks = [];
-  for (let cursor = new Date(gridStart); cursor <= gridEnd; cursor.setDate(cursor.getDate() + 7)) {
-    const week = [];
-    for (let i = 0; i < 7; i++) {
-      const day = new Date(cursor);
-      day.setDate(cursor.getDate() + i);
-      week.push(renderDay(day, monthDate.getMonth()));
-    }
-    weeks.push(`<div class="diary-week">${week.join("")}</div>`);
-  }
-
-  return `
-    <section class="diary-month" data-month="${monthKey}">
-      <h3>${formatMonthLabel(monthDate)}</h3>
-      ${header}
-      ${weeks.join("")}
-    </section>
-  `;
-}
-
-function renderDay(dayDate, activeMonth) {
-  const isCurrentMonth = dayDate.getMonth() === activeMonth;
-  const dateKey = formatDateKey(dayDate);
-  const dayState = isCurrentMonth ? dateMap.get(dateKey) : null;
-  const isSelected = dateKey === selectedDate;
-  const hasTrades = dayState && dayState.count > 0;
-  const dayClasses = ["diary-day"];
-  if (!isCurrentMonth) dayClasses.push("other-month");
-  if (!isCurrentMonth) {
-    dayClasses.push("outside");
-  }
-  if (hasTrades) dayClasses.push("has-trades");
-  if (isSelected) dayClasses.push("selected");
-  if (hasTrades) {
-    if (dayState.total_pnl_r > 0) {
-      dayClasses.push("up");
-    } else if (dayState.total_pnl_r < 0) {
-      dayClasses.push("down");
-    }
-  }
-
-  if (!isCurrentMonth) {
-    return `<div class="${dayClasses.join(" ")}"><span class="diary-day-number">${dayDate.getDate()}</span></div>`;
-  }
-
-  if (!hasTrades) {
-    return `<div class="${dayClasses.join(" ")} no-trades"><span class="diary-day-number">${dayDate.getDate()}</span><span class="diary-day-count">No trades</span></div>`;
-  }
-
-  const pnlDisplay = hasTrades ? formatSigned(dayState.total_pnl_r, 2, "R") : "—";
-  const countDisplay = hasTrades ? `${dayState.count} trade${dayState.count === 1 ? "" : "s"}` : "No trades";
-
-  return `
-    <button class="${dayClasses.join(" ")}" data-date="${dateKey}" type="button">
-      <span class="diary-day-number">${dayDate.getDate()}</span>
-      <span class="diary-day-count">${countDisplay}</span>
-      <span class="diary-day-pl">${pnlDisplay}</span>
-    </button>
-  `;
-}
-
-function wireDayClicks() {
-  calendarEl.querySelectorAll(".diary-day[data-date]").forEach((dayBtn) => {
-    const date = dayBtn.dataset.date;
-    dayBtn.addEventListener("click", () => selectDate(date));
-  });
 }
 
 function selectDate(date) {
   if (!isIsoDate(date)) return;
   selectedDate = date;
   renderCalendar();
-  openReplayForDate(date);
+  loadDateTrades(date);
 }
 
 function renderDateSummary(date, data) {
@@ -447,19 +260,19 @@ function renderDateSummary(date, data) {
   };
 
   const cls = (selected.total_pnl_pips || 0) > 0 ? "up" : (selected.total_pnl_pips || 0) < 0 ? "down" : "";
-  selectedDateEl.textContent = `${formatDateLabel(date)} · ${selected.count} trade${selected.count === 1 ? "" : "s"}`;
+  selectedDateEl.textContent = `${formatDateLabel(date)} \u00b7 ${selected.count} trade${selected.count === 1 ? "" : "s"}`;
   summaryEl.innerHTML = `
-    <strong>${date}</strong> — ${selected.count} trade${selected.count === 1 ? "" : "s"} (W/L ${selected.wins}/${selected.losses})
-    · P/L: <span class="${cls}">${formatSigned(selected.total_pnl_pips, 1, " pips")}</span>
-    · R: ${formatSigned(selected.total_pnl_r, 2, "R")}
+    <strong>${date}</strong> \u2014 ${selected.count} trade${selected.count === 1 ? "" : "s"} (W/L ${selected.wins}/${selected.losses})
+    \u00b7 P/L: <span class="${cls}">${formatSigned(selected.total_pnl_pips, 1, " pips")}</span>
+    \u00b7 R: ${formatSigned(selected.total_pnl_r, 2, "R")}
   `;
 }
 
 function loadDateTrades(date) {
   const dayData = dateMap.get(date);
   if (!dayData) {
-    summaryEl.textContent = `${date} — no trades in cache for this day`;
-    bodyEl.innerHTML = `<tr><td colspan="9" class="empty">No trades for this date.</td></tr>`;
+    summaryEl.textContent = `${date} \u2014 no trades in cache for this day`;
+    bodyEl.innerHTML = `<div style="color:var(--muted);font-size:0.84rem;padding:8px 0">No trades for this date.</div>`;
     return;
   }
 
@@ -471,14 +284,14 @@ function showLoading(message) {
   calendarEl.innerHTML = `<div class=\"empty-card empty\">${message}</div>`;
   monthRangeEl.textContent = "";
   selectedDateEl.textContent = "Loading diary...";
-  bodyEl.innerHTML = `<tr><td colspan="9" class="empty">Load diary to view trades.</td></tr>`;
+  bodyEl.innerHTML = `<div style="color:var(--muted);font-size:0.84rem;padding:8px 0">Load diary to view trades.</div>`;
   summaryEl.textContent = message;
 }
 
 function loadDiaryData() {
   loadBtn.disabled = true;
   loadBtn.textContent = "Loading...";
-  showLoading("Loading trades cache…");
+  showLoading("Loading trades cache\u2026");
 
   const params = new URLSearchParams();
   const selectedBacktestKey = backtestFilter.value;
@@ -531,9 +344,6 @@ function defaultDateFromQuery(sortedDates) {
   }
   return candidate;
 }
-
-let dateMap = new Map();
-let selectedDate = "";
 
 backtestFilter.addEventListener("change", loadDiaryData);
 loadBtn.addEventListener("click", loadDiaryData);

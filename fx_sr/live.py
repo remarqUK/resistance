@@ -13,7 +13,7 @@ import time
 from typing import Callable, Dict, List, Optional, Set
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
-from .data import fetch_daily_data, fetch_hourly_data
+from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
 from .execution import build_execution_plan
 from .levels import detect_zones, get_nearest_zones, SRZone, is_price_in_zone
 from .live_history import (
@@ -39,6 +39,7 @@ from .strategy import (
     is_pair_fully_blocked,
     select_entry_signal,
 )
+from .intrabar import find_intrabar_signal
 from .sizing import (
     PositionSizePlan,
     build_position_size_plan,
@@ -149,6 +150,10 @@ class ExecutionResult:
     submit_spread: Optional[float] = None
     quote_source: Optional[str] = None
     quote_time: Optional[pd.Timestamp] = None
+    pnl_pips: Optional[float] = None
+    closed_price: Optional[float] = None
+    closed_at: Optional[pd.Timestamp] = None
+    close_reason: Optional[str] = None
     note: str = ''
 
 
@@ -386,6 +391,77 @@ def _get_live_hourly_data(
     if hourly_data_cache is not None:
         hourly_data_cache[ticker_symbol] = hourly_df
     return hourly_df
+
+
+def _get_live_minute_data(
+    ticker_symbol: str,
+    days: int,
+    minute_data_cache: Optional[Dict[str, object]] = None,
+) -> pd.DataFrame:
+    """Fetch live minute data with an optional in-memory per-run cache."""
+
+    if minute_data_cache is not None and ticker_symbol in minute_data_cache:
+        return minute_data_cache[ticker_symbol]
+
+    minute_df = fetch_minute_data_cached(ticker_symbol, days=days)
+    if minute_data_cache is not None:
+        minute_data_cache[ticker_symbol] = minute_df
+    return minute_df
+
+
+def _completed_live_hourly_data(
+    hourly_df: pd.DataFrame,
+    *,
+    now: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Return only completed live hourly bars.
+
+    Live entry decisions must be based on the most recently closed 1H bar,
+    never the currently forming hour. This keeps live scanning aligned with
+    the backtest contract of "bar T closes, earliest action is at T+1".
+    """
+
+    if hourly_df.empty:
+        return hourly_df
+
+    now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize('UTC')
+    else:
+        now_ts = now_ts.tz_convert('UTC')
+    current_hour = now_ts.floor('h')
+
+    index = hourly_df.index
+    if index.tz is None:
+        current_hour = current_hour.tz_localize(None)
+    else:
+        current_hour = current_hour.tz_convert(index.tz)
+
+    return hourly_df[index < current_hour]
+
+
+def _live_submit_time(signal_time: pd.Timestamp) -> pd.Timestamp:
+    """Return the earliest live submit time for a completed hourly signal bar."""
+
+    ts = pd.Timestamp(signal_time)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+    return ts + pd.Timedelta(hours=1)
+
+
+def _align_live_signal_time(signal: Optional[Signal]) -> Optional[Signal]:
+    """Stamp live signals at the next-hour submit time.
+
+    Live evaluates a completed 1H bar and can only act once that bar has closed.
+    The stored signal timestamp therefore represents the earliest submit hour,
+    matching the backtest execution contract.
+    """
+
+    if signal is None:
+        return None
+    return replace(signal, time=_live_submit_time(signal.time))
 
 
 def load_closed_trade_summaries() -> list:
@@ -635,6 +711,8 @@ def _scan_pair(
     daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
     zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    minute_data_cache: Optional[Dict[str, object]] = None,
+    execution_mode: str = 'next_bar',
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
 ) -> tuple[PairScanRow, Optional[Signal]]:
@@ -651,6 +729,9 @@ def _scan_pair(
         tracked_states = {}
     if blocked_pairs is None:
         blocked_pairs = set()
+
+    if execution_mode not in {'next_bar', 'intrabar'}:
+        execution_mode = 'next_bar'
 
     decimals = pair_info.get('decimals', 5)
     name = pair_info.get('name', pair_id)
@@ -675,7 +756,11 @@ def _scan_pair(
         days=3,
         hourly_data_cache=hourly_data_cache,
     )
-    if hourly_df.empty:
+    if execution_mode == 'intrabar':
+        scan_df = hourly_df
+    else:
+        scan_df = _completed_live_hourly_data(hourly_df)
+    if scan_df.empty:
         return (
             PairScanRow(
                 pair_id,
@@ -698,7 +783,7 @@ def _scan_pair(
             None,
         )
 
-    last_bar = hourly_df.iloc[-1]
+    last_bar = scan_df.iloc[-1]
     current_price = float(last_bar['Close'])
     nearest_support, nearest_resistance = get_tradeable_zones(zones, current_price)
     if price_cache is not None:
@@ -752,7 +837,7 @@ def _scan_pair(
 
     entry_block = get_entry_block(
         pair_id,
-        hourly_df.index[-1],
+        scan_df.index[-1],
         portfolio_state or [],
         params,
     )
@@ -766,14 +851,34 @@ def _scan_pair(
             None,
         )
 
-    signal = select_entry_signal(
-        hourly_df=hourly_df,
-        bar_idx=len(hourly_df) - 1,
-        pair=pair_id,
-        params=params,
-        support_zone=nearest_support,
-        resistance_zone=nearest_resistance,
-    )
+    signal: Optional[Signal] | None = None
+    if execution_mode == 'intrabar':
+        minute_df = _get_live_minute_data(
+            pair_info['ticker'],
+            days=2,
+            minute_data_cache=minute_data_cache,
+        )
+        intrabar_signal = find_intrabar_signal(
+            scan_df.index[-1],
+            minute_df,
+            pair_id,
+            params=params,
+            support_zone=nearest_support,
+            resistance_zone=nearest_resistance,
+        )
+        signal = intrabar_signal[0] if intrabar_signal is not None else None
+
+    if signal is None:
+        signal = select_entry_signal(
+            hourly_df=scan_df,
+            bar_idx=len(scan_df) - 1,
+            pair=pair_id,
+            params=params,
+            support_zone=nearest_support,
+            resistance_zone=nearest_resistance,
+        )
+        if execution_mode == 'next_bar':
+            signal = _align_live_signal_time(signal)
 
     if signal:
         note = f"{signal.zone_type.title()} reversal ({signal.zone_strength})"
@@ -807,6 +912,8 @@ def collect_scan_rows(
     daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
     zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    minute_data_cache: Optional[Dict[str, object]] = None,
+    execution_mode: str = 'next_bar',
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
 ) -> tuple[List[Signal], List[PairScanRow]]:
@@ -816,6 +923,8 @@ def collect_scan_rows(
         pairs = PAIRS
     if params is None:
         params = StrategyParams()
+    if execution_mode not in {'next_bar', 'intrabar'}:
+        execution_mode = 'next_bar'
     if portfolio_state is None and closed_trades is not None:
         portfolio_state = build_portfolio_state(closed_trades, params=params)
 
@@ -850,6 +959,8 @@ def collect_scan_rows(
             daily_data_cache=daily_data_cache,
             zone_cache=zone_cache,
             hourly_data_cache=hourly_data_cache,
+            minute_data_cache=minute_data_cache,
+            execution_mode=execution_mode,
             portfolio_state=portfolio_state,
             closed_trades=closed_trades,
         )
@@ -894,6 +1005,7 @@ def scan_opportunities(
     daily_data_cache: Optional[Dict[tuple[str, int], object]] = None,
     zone_cache: Optional[Dict[tuple[str, int], List[SRZone]]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    execution_mode: str = 'next_bar',
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
 ) -> List[Signal]:
@@ -909,6 +1021,7 @@ def scan_opportunities(
         daily_data_cache=daily_data_cache,
         zone_cache=zone_cache,
         hourly_data_cache=hourly_data_cache,
+        execution_mode=execution_mode,
         portfolio_state=portfolio_state,
         closed_trades=closed_trades,
     )
@@ -1199,6 +1312,7 @@ def execute_signal_plans(
     account_currency: Optional[str] = None,
     price_cache: Optional[Dict[str, float]] = None,
     hourly_data_cache: Optional[Dict[str, object]] = None,
+    execution_mode: str = 'next_bar',
 ) -> List[ExecutionResult]:
     """Submit market orders for valid size plans when execution is enabled."""
 
@@ -1207,6 +1321,8 @@ def execute_signal_plans(
 
     if params is None:
         params = StrategyParams()
+    if execution_mode not in {'next_bar', 'intrabar'}:
+        execution_mode = 'next_bar'
     existing_pairs = existing_pairs or set()
     pending_pairs = pending_pairs or set()
     slot_risk_amount = (
@@ -1276,6 +1392,23 @@ def execute_signal_plans(
         if plan is None:
             results[idx] = ExecutionResult(signal.pair, signal.direction, 0, 'SKIPPED', note='size unavailable')
             continue
+
+        if execution_mode == 'next_bar':
+            signal_time = pd.Timestamp(signal.time)
+            if signal_time.tzinfo is None:
+                signal_time = signal_time.tz_localize('UTC')
+            else:
+                signal_time = signal_time.tz_convert('UTC')
+            now_ts = pd.Timestamp.now(tz='UTC')
+            if signal_time > now_ts:
+                results[idx] = ExecutionResult(
+                    signal.pair,
+                    signal.direction,
+                    plan.units,
+                    'SKIPPED',
+                    note=f'awaiting scheduled submit at {signal_time:%Y%m%d%H%M%S}',
+                )
+                continue
 
         same_pair_nonreplaceable = any(
             exposure.pair == signal.pair and not exposure.replaceable
@@ -1564,6 +1697,7 @@ def run_monitor_cycle(
     account_currency: Optional[str] = None,
     execute_orders: bool = False,
     capture_output: bool = False,
+    execution_mode: str = 'next_bar',
 ) -> MonitorSnapshot:
     """Execute one full live-monitor cycle and return a structured snapshot."""
 
@@ -1571,6 +1705,8 @@ def run_monitor_cycle(
         pairs = PAIRS
     if params is None:
         params = StrategyParams()
+    if execution_mode not in {'next_bar', 'intrabar'}:
+        execution_mode = 'next_bar'
 
     scan_started_at = datetime.now()
     buffer = io.StringIO()
@@ -1589,6 +1725,7 @@ def run_monitor_cycle(
         daily_data_cache: Dict[tuple[str, int], object] = {}
         zone_cache: Dict[tuple[str, int], List[SRZone]] = {}
         hourly_data_cache: Dict[str, object] = {}
+        minute_data_cache: Dict[str, object] = {}
         active_balance, active_currency = _account_cache.get_balance(
             balance, account_currency,
         )
@@ -1616,6 +1753,8 @@ def run_monitor_cycle(
             daily_data_cache=daily_data_cache,
             zone_cache=zone_cache,
             hourly_data_cache=hourly_data_cache,
+            minute_data_cache=minute_data_cache,
+            execution_mode=execution_mode,
             portfolio_state=portfolio_state,
         )
 
@@ -1651,6 +1790,7 @@ def run_monitor_cycle(
             account_currency=active_currency,
             price_cache=market_prices,
             hourly_data_cache=hourly_data_cache,
+            execution_mode=execution_mode,
         )
         record_execution_results(
             signals, size_plans, execution_results,
@@ -1787,6 +1927,7 @@ def _live_monitor_plain(
     execute_orders: bool,
     strategy_label: Optional[str],
     client_id: Optional[int],
+    execution_mode: str = 'next_bar',
 ) -> None:
     """Fallback monitor loop for non-interactive terminals."""
 
@@ -1809,6 +1950,7 @@ def _live_monitor_plain(
                 account_currency=account_currency,
                 execute_orders=execute_orders,
                 capture_output=False,
+                execution_mode=execution_mode,
             )
             _display_snapshot_plain(snapshot, strategy_label, client_id)
             print(f"\n  Next scan in {interval}s...")
@@ -1829,6 +1971,7 @@ def live_monitor(
     execute_orders: bool = False,
     strategy_label: Optional[str] = None,
     client_id: Optional[int] = None,
+    execution_mode: str = 'next_bar',
 ) -> None:
     """Continuously monitor for opportunities and open positions."""
 
@@ -1852,6 +1995,7 @@ def live_monitor(
             execute_orders=execute_orders,
             strategy_label=strategy_label,
             client_id=client_id,
+            execution_mode=execution_mode,
         )
         return
 
@@ -1867,4 +2011,5 @@ def live_monitor(
         execute_orders=execute_orders,
         strategy_label=strategy_label,
         client_id=client_id,
+        execution_mode=execution_mode,
     )

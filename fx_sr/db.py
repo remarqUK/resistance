@@ -54,9 +54,40 @@ CODE_TO_INTERVAL = {code: interval for interval, code in INTERVAL_TO_CODE.items(
 
 DEFAULT_POSTGRES_URL = 'postgresql://postgres:Harrison12_!@localhost:5432/resistance'
 RESISTANCE_DB_URL_ENV = 'RESISTANCE_DATABASE_URL'
+DB_STATEMENT_TIMEOUT_MS = os.getenv('FX_SR_DB_STATEMENT_TIMEOUT_MS', '120000')
+DB_LOCK_TIMEOUT_MS = os.getenv('FX_SR_DB_LOCK_TIMEOUT_MS', '5000')
+DB_IDLE_IN_TRANSACTION_TIMEOUT_MS = os.getenv('FX_SR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', '30000')
 
 _DB_SCHEMA_INIT_LOCK = threading.Lock()
 _DB_SCHEMA_READY: set[str] = set()
+
+
+def _apply_session_timeouts(conn: _CompatConnection) -> None:
+    """Apply per-connection defensive timeouts to avoid long/hung query waits."""
+
+    for name, raw_value in (
+        ('statement_timeout', DB_STATEMENT_TIMEOUT_MS),
+        ('lock_timeout', DB_LOCK_TIMEOUT_MS),
+        ('idle_in_transaction_session_timeout', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS),
+    ):
+        if raw_value is None:
+            continue
+        try:
+            value = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            continue
+        if value < 0:
+            continue
+        try:
+            conn.execute(f"SET {name} = %s", (value,))
+        except Exception:
+            # Keep default behavior if a deployment does not permit per-connection GUC changes.
+            # Ensure a failed SET does not poison the connection for subsequent reads.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            continue
 
 def _default_db_url() -> str:
     return os.environ.get(RESISTANCE_DB_URL_ENV, DEFAULT_POSTGRES_URL)
@@ -254,7 +285,9 @@ def _connect(db_path: str | None = None) -> _CompatConnection:
         conn.autocommit = False
     else:
         conn = psycopg.connect(db_path, autocommit=False)
-    return _CompatConnection(conn)
+    wrapper = _CompatConnection(conn)
+    _apply_session_timeouts(wrapper)
+    return wrapper
 
 
 @contextmanager
@@ -351,6 +384,7 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
             params_hash        TEXT NOT NULL,
             hourly_days        INTEGER NOT NULL,
             zone_history_days  INTEGER NOT NULL,
+            execution_mode     TEXT NOT NULL DEFAULT 'next_bar',
             data_signature     TEXT NOT NULL,
             ticker             SMALLINT NOT NULL CHECK (ticker > 0),
             strategy_version   TEXT NOT NULL,
@@ -358,13 +392,20 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
             run_config_json    TEXT,
             created_at         TIMESTAMPTZ NOT NULL,
             updated_at         TIMESTAMPTZ NOT NULL,
-            PRIMARY KEY (pair, params_hash, hourly_days, zone_history_days)
+            PRIMARY KEY (pair, params_hash, execution_mode, hourly_days, zone_history_days)
         )
     """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-        ON backtest_result (pair, params_hash, hourly_days, zone_history_days)
-    """)
+    existing_backtest_columns = _table_columns(conn, 'backtest_result')
+    if 'execution_mode' in existing_backtest_columns:
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+            ON backtest_result (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+        """)
+    else:
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+            ON backtest_result (pair, params_hash, hourly_days, zone_history_days)
+        """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_backtest_pair_updated_at
         ON backtest_result (pair, updated_at DESC)
@@ -604,6 +645,67 @@ def init_db(db_path: str | None = None) -> None:
             existing_columns = _table_columns(conn, 'backtest_result')
             if 'run_config_json' not in existing_columns:
                 conn.execute('ALTER TABLE backtest_result ADD COLUMN run_config_json TEXT')
+            if 'execution_mode' not in existing_columns:
+                conn.execute("""
+                    ALTER TABLE backtest_result
+                        ADD COLUMN execution_mode TEXT
+                """)
+            conn.execute("""
+                UPDATE backtest_result
+                SET execution_mode = 'next_bar'
+                WHERE execution_mode IS NULL OR execution_mode = ''
+            """)
+            conn.execute("""
+                ALTER TABLE backtest_result
+                    ALTER COLUMN execution_mode SET DEFAULT 'next_bar'
+            """)
+            conn.execute("""
+                ALTER TABLE backtest_result
+                    ALTER COLUMN execution_mode SET NOT NULL
+            """)
+            conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conrelid = 'backtest_result'::regclass
+                          AND conname = 'backtest_result_execution_mode_chk'
+                    ) THEN
+                        ALTER TABLE backtest_result
+                            ADD CONSTRAINT backtest_result_execution_mode_chk
+                            CHECK (execution_mode IN ('next_bar', 'intrabar'));
+                    END IF;
+                END
+                $$;
+            """)
+
+            has_execution_mode_pk = conn.execute("""
+                SELECT 1
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                 AND tc.table_name = kcu.table_name
+                WHERE tc.table_schema = 'public'
+                  AND tc.table_name = 'backtest_result'
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                  AND kcu.column_name = 'execution_mode'
+                LIMIT 1
+            """).fetchone()
+            if not has_execution_mode_pk:
+                conn.execute(
+                    'ALTER TABLE backtest_result DROP CONSTRAINT IF EXISTS backtest_result_pkey'
+                )
+                conn.execute("""
+                    ALTER TABLE backtest_result
+                        ADD PRIMARY KEY (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+                """)
+                conn.execute('DROP INDEX IF EXISTS idx_backtest_lookup')
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+                    ON backtest_result (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+                """)
             conn.commit()
             _DB_SCHEMA_READY.add(db_path)
         finally:
@@ -685,6 +787,7 @@ def save_backtest_result(
     strategy_version: str,
     result_json: str,
     run_config_json: str | None = None,
+    execution_mode: str = 'next_bar',
     db_path: str | None = None,
 ) -> None:
     """Save or replace a cached backtest result."""
@@ -702,11 +805,11 @@ def save_backtest_result(
             conn.execute(
                 """
                 INSERT INTO backtest_result (
-                    pair, params_hash, hourly_days, zone_history_days, data_signature,
-                    ticker, strategy_version, result_json, run_config_json, created_at, updated_at
+                    pair, params_hash, hourly_days, zone_history_days, execution_mode,
+                    data_signature, ticker, strategy_version, result_json, run_config_json, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT(pair, params_hash, hourly_days, zone_history_days)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(pair, params_hash, execution_mode, hourly_days, zone_history_days)
                 DO UPDATE SET
                     data_signature = excluded.data_signature,
                     ticker = excluded.ticker,
@@ -720,6 +823,7 @@ def save_backtest_result(
                     params_hash,
                     int(hourly_days),
                     int(zone_history_days),
+                    execution_mode,
                     data_signature,
                     db_ticker,
                     strategy_version,
@@ -748,6 +852,7 @@ def load_backtest_result(
     params_hash: str,
     hourly_days: int,
     zone_history_days: int,
+    execution_mode: str = 'next_bar',
     db_path: str | None = None,
 ) -> tuple[str, str, str, str | None] | None:
     """Load cached backtest metadata and payload."""
@@ -764,9 +869,9 @@ def load_backtest_result(
             """
             SELECT data_signature, result_json, strategy_version, run_config_json
             FROM backtest_result
-            WHERE pair=%s AND params_hash=%s AND hourly_days=%s AND zone_history_days=%s
+            WHERE pair=%s AND params_hash=%s AND execution_mode=%s AND hourly_days=%s AND zone_history_days=%s
             """,
-            (pair, params_hash, int(hourly_days), int(zone_history_days)),
+            (pair, params_hash, execution_mode, int(hourly_days), int(zone_history_days)),
         )
         row = cursor.fetchone()
     finally:
@@ -791,7 +896,7 @@ def load_backtest_results(
 
     query = """
         SELECT pair, params_hash, hourly_days, zone_history_days, data_signature,
-            ticker, strategy_version, result_json, run_config_json, created_at, updated_at
+            ticker, strategy_version, result_json, run_config_json, execution_mode, created_at, updated_at
         FROM backtest_result
     """
     params: list[object] = []
@@ -822,8 +927,9 @@ def load_backtest_results(
             'strategy_version': row[6],
             'result_json': row[7],
             'run_config_json': row[8],
-            'created_at': row[9],
-            'updated_at': row[10],
+            'execution_mode': row[9] or 'next_bar',
+            'created_at': row[10],
+            'updated_at': row[11],
         }
         for row in rows
     ]
@@ -834,6 +940,7 @@ def delete_backtest_result(
     params_hash: str,
     hourly_days: int,
     zone_history_days: int,
+    execution_mode: str = 'next_bar',
     db_path: str | None = None,
 ) -> None:
     """Delete one cached backtest result."""
@@ -849,9 +956,9 @@ def delete_backtest_result(
         conn.execute(
             """
             DELETE FROM backtest_result
-            WHERE pair=%s AND params_hash=%s AND hourly_days=%s AND zone_history_days=%s
+            WHERE pair=%s AND params_hash=%s AND execution_mode=%s AND hourly_days=%s AND zone_history_days=%s
             """,
-            (pair, params_hash, int(hourly_days), int(zone_history_days)),
+            (pair, params_hash, execution_mode, int(hourly_days), int(zone_history_days)),
         )
         conn.commit()
     finally:

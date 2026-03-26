@@ -43,6 +43,10 @@ def _sample_hourly_df() -> pd.DataFrame:
     )
 
 
+def _sample_minute_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
+
+
 def _empty_backtest() -> BacktestResult:
     return BacktestResult(
         pair='EURUSD',
@@ -59,6 +63,7 @@ def _empty_backtest() -> BacktestResult:
         max_loss_pips=0.0,
         profit_factor=0.0,
         trades=[],
+        pending_trades=[],
         zones=[],
     )
 
@@ -72,12 +77,13 @@ class BacktestCacheTests(unittest.TestCase):
         self.zone_history_days = 20
         self.daily_df = _sample_daily_df()
         self.hourly_df = _sample_hourly_df()
-        self.expected_signature = _data_signature(self.daily_df, self.hourly_df)
+        self.minute_df = _sample_minute_df()
+        self.expected_signature = _data_signature(self.daily_df, self.hourly_df, self.minute_df)
 
     def test_cached_result_short_circuits_run(self):
         cached = _serialize_backtest_result(_empty_backtest())
-        with patch('fx_sr.backtest.fetch_daily_data', return_value=self.daily_df), \
-                patch('fx_sr.backtest.fetch_hourly_data', return_value=self.hourly_df), \
+        with patch('fx_sr.backtest._load_cached_backtest_data', return_value=(self.daily_df, self.hourly_df, self.minute_df)), \
+                patch('fx_sr.backtest.load_l2_snapshots', return_value=[]), \
                 patch('fx_sr.backtest.load_backtest_result', return_value=(
                     self.expected_signature,
                     cached,
@@ -102,8 +108,8 @@ class BacktestCacheTests(unittest.TestCase):
     def test_stale_cache_runs_backtest_and_saves(self):
         stale = _empty_backtest()
         stale_sig = 'stale-sig'
-        with patch('fx_sr.backtest.fetch_daily_data', return_value=self.daily_df), \
-                patch('fx_sr.backtest.fetch_hourly_data', return_value=self.hourly_df), \
+        with patch('fx_sr.backtest._load_cached_backtest_data', return_value=(self.daily_df, self.hourly_df, self.minute_df)), \
+                patch('fx_sr.backtest.load_l2_snapshots', return_value=[]), \
                 patch('fx_sr.backtest.load_backtest_result', return_value=(
                     stale_sig,
                     _serialize_backtest_result(stale),
@@ -131,8 +137,8 @@ class BacktestCacheTests(unittest.TestCase):
 
     def test_force_refresh_ignores_cache(self):
         cached = _serialize_backtest_result(_empty_backtest())
-        with patch('fx_sr.backtest.fetch_daily_data', return_value=self.daily_df), \
-                patch('fx_sr.backtest.fetch_hourly_data', return_value=self.hourly_df), \
+        with patch('fx_sr.backtest._load_cached_backtest_data', return_value=(self.daily_df, self.hourly_df, self.minute_df)), \
+                patch('fx_sr.backtest.load_l2_snapshots', return_value=[]), \
                 patch('fx_sr.backtest.load_backtest_result') as load_result, \
                 patch('fx_sr.backtest.run_backtest') as run_backtest, \
                 patch('fx_sr.backtest.save_backtest_result') as save_result:
@@ -169,8 +175,8 @@ class BacktestCacheTests(unittest.TestCase):
             risk_pct=8.0,
             selection_label='baseline',
         )
-        with patch('fx_sr.backtest.fetch_daily_data', return_value=self.daily_df), \
-                patch('fx_sr.backtest.fetch_hourly_data', return_value=self.hourly_df), \
+        with patch('fx_sr.backtest._load_cached_backtest_data', return_value=(self.daily_df, self.hourly_df, self.minute_df)), \
+                patch('fx_sr.backtest.load_l2_snapshots', return_value=[]), \
                 patch('fx_sr.backtest.load_backtest_result', return_value=(
                     self.expected_signature,
                     cached,

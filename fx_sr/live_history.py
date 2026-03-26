@@ -482,7 +482,67 @@ def load_execution_activity(
 
         cursor = conn.execute(query, params)
         rows = cursor.fetchall()
-        return [_row_to_dict(cursor, row) for row in rows]
+        result = []
+        for row in rows:
+            d = _row_to_dict(cursor, row)
+            d['pnl_r'] = _compute_pnl_r(d)
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def _compute_pnl_r(row: dict) -> float | None:
+    """Derive P&L in R from entry, close, and SL prices."""
+
+    opened = row.get('opened_price')
+    closed = row.get('closed_price')
+    sl = row.get('submitted_sl_price')
+    direction = row.get('direction')
+
+    if opened is None or closed is None or sl is None or direction is None:
+        return None
+
+    try:
+        opened, closed, sl = float(opened), float(closed), float(sl)
+    except (TypeError, ValueError):
+        return None
+
+    risk_dist = abs(opened - sl)
+    if risk_dist < 1e-10:
+        return None
+
+    if direction.upper() == 'LONG':
+        pnl_r = (closed - opened) / risk_dist
+    else:
+        pnl_r = (opened - closed) / risk_dist
+
+    return round(pnl_r, 2)
+
+
+def load_live_diary_trades(
+    *,
+    db_path: str | None = None,
+) -> list[dict]:
+    """Load all filled live trades for the live diary calendar."""
+
+    db_path = _ensure_table(db_path)
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("""
+            SELECT *
+            FROM detected_signal
+            WHERE open_units > 0
+               OR status IN ('OPEN', 'CLOSED', 'PARTIAL')
+            ORDER BY signal_time
+        """)
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            d = _row_to_dict(cursor, row)
+            d['pnl_r'] = _compute_pnl_r(d)
+            result.append(d)
+        return result
     finally:
         conn.close()
 
@@ -776,8 +836,18 @@ def reconcile_detected_signal_orders(
             for row in rows
             if row.get('order_id') is not None
         }
+        # Also collect bracket child order IDs (TP/SL) so we can detect
+        # closing fills that happened while the server was offline.
+        child_order_ids: set[int] = set()
+        for row in rows:
+            for key in ('take_profit_order_id', 'stop_loss_order_id'):
+                raw = row.get(key)
+                if raw is not None:
+                    child_order_ids.add(int(raw))
+
+        all_fetch_ids = order_ids | child_order_ids
         fills_by_order: dict[int, list[dict]] = {}
-        for fill in ibkr.fetch_fx_fills(order_ids=order_ids):
+        for fill in ibkr.fetch_fx_fills(order_ids=all_fetch_ids):
             order_id = fill.get('order_id')
             if order_id is None:
                 continue
@@ -785,9 +855,18 @@ def reconcile_detected_signal_orders(
 
         statuses_by_order = {
             int(snapshot['order_id']): snapshot
-            for snapshot in ibkr.fetch_fx_order_statuses(order_ids=order_ids)
+            for snapshot in ibkr.fetch_fx_order_statuses(order_ids=all_fetch_ids)
             if snapshot.get('order_id') is not None
         }
+
+        # Pre-fetch completed orders for bracket children so we can resolve
+        # close price/reason even when execution reports have been purged.
+        completed_by_order: dict[int, dict] = {}
+        if child_order_ids:
+            for completed in ibkr.fetch_completed_fx_orders(order_ids=child_order_ids):
+                oid = completed.get('order_id')
+                if oid is not None:
+                    completed_by_order[int(oid)] = completed
 
         updated_rows: list[dict] = []
         for existing in rows:
@@ -847,8 +926,138 @@ def reconcile_detected_signal_orders(
             else:
                 note = existing.get('note')
 
-            # Close out signals that reached a terminal state
+            # ----- Bracket fill resolution for offline closures -----
+            # When the signal was filled (open_units > 0) but the parent
+            # order has vanished from IBKR, the bracket SL/TP likely
+            # executed while the server was offline.  Check child order
+            # fills and completed orders to resolve the close properly
+            # instead of leaving it for sync_positions to mark as
+            # EXTERNAL_CLOSE with no price.
             closed_at = existing.get('closed_at')
+            closed_price = existing.get('closed_price')
+            close_reason = existing.get('close_reason')
+            close_source = existing.get('close_source')
+            pnl_pips = existing.get('pnl_pips')
+
+            if (
+                open_units > 0
+                and not order_found
+                and closed_at is None
+                and status in ('OPEN', 'PARTIAL', 'EXIT_SIGNAL')
+            ):
+                tp_order_id = (
+                    int(existing['take_profit_order_id'])
+                    if existing.get('take_profit_order_id') is not None
+                    else None
+                )
+                sl_order_id = (
+                    int(existing['stop_loss_order_id'])
+                    if existing.get('stop_loss_order_id') is not None
+                    else None
+                )
+
+                bracket_close_price = None
+                bracket_close_reason = None
+                bracket_close_source = None
+                bracket_close_time = None
+
+                # 1) Check execution reports (fills) for child orders
+                if tp_order_id is not None:
+                    tp_fills = fills_by_order.get(tp_order_id, [])
+                    if tp_fills:
+                        latest = tp_fills[-1]
+                        bracket_close_price = latest.get('avg_price') or latest.get('price')
+                        bracket_close_reason = 'TP'
+                        bracket_close_source = 'broker_tp'
+                        bracket_close_time = latest.get('time')
+
+                if bracket_close_price is None and sl_order_id is not None:
+                    sl_fills = fills_by_order.get(sl_order_id, [])
+                    if sl_fills:
+                        latest = sl_fills[-1]
+                        bracket_close_price = latest.get('avg_price') or latest.get('price')
+                        bracket_close_reason = 'SL'
+                        bracket_close_source = 'broker_sl'
+                        bracket_close_time = latest.get('time')
+
+                # 2) Fallback: check completed orders when fills are absent
+                if bracket_close_price is None and tp_order_id is not None:
+                    tp_completed = completed_by_order.get(tp_order_id)
+                    if tp_completed and (tp_completed.get('status') or '').upper() == 'FILLED':
+                        bracket_close_price = tp_completed.get('avg_fill_price') or None
+                        bracket_close_reason = 'TP'
+                        bracket_close_source = 'broker_tp'
+
+                if bracket_close_price is None and sl_order_id is not None:
+                    sl_completed = completed_by_order.get(sl_order_id)
+                    if sl_completed and (sl_completed.get('status') or '').upper() == 'FILLED':
+                        bracket_close_price = sl_completed.get('avg_fill_price') or None
+                        bracket_close_reason = 'SL'
+                        bracket_close_source = 'broker_sl'
+
+                # 3) Last resort: unmatched fills on the same pair in the
+                #    opposite direction (manual close while offline)
+                if bracket_close_price is None:
+                    expected_close_side = (
+                        'SELL' if existing['direction'] == 'LONG' else 'BUY'
+                    )
+                    opened_at_ts = existing.get('opened_at') or existing.get('executed_at') or existing.get('signal_time')
+                    pair_fills = ibkr.fetch_fx_fills(
+                        pair=existing['pair'],
+                        since=opened_at_ts,
+                    )
+                    known_ids = {
+                        oid
+                        for oid in (int(order_id), tp_order_id, sl_order_id)
+                        if oid is not None
+                    }
+                    manual_fills = [
+                        f for f in pair_fills
+                        if (f.get('side') or '').upper() == expected_close_side
+                        and f.get('order_id') not in known_ids
+                    ]
+                    if manual_fills:
+                        latest = manual_fills[-1]
+                        bracket_close_price = latest.get('avg_price') or latest.get('price')
+                        bracket_close_reason = 'MANUAL'
+                        bracket_close_source = 'broker_fill'
+                        bracket_close_time = latest.get('time')
+
+                # Apply the resolved bracket close
+                if bracket_close_price is not None:
+                    closed_price = float(bracket_close_price)
+                    close_reason = bracket_close_reason
+                    close_source = bracket_close_source
+                    closed_at = (
+                        _normalize_ts(pd.Timestamp(bracket_close_time))
+                        if bracket_close_time is not None
+                        else now
+                    )
+                    # Compute PnL
+                    resolved_opened_price = (
+                        float(opened_price)
+                        if opened_price is not None
+                        else (
+                            float(existing['opened_price'])
+                            if existing.get('opened_price') is not None
+                            else float(existing['entry_price'])
+                        )
+                    )
+                    pip = _pair_pip(existing['pair'])
+                    if existing['direction'] == 'LONG':
+                        pnl_pips = (closed_price - resolved_opened_price) / pip
+                    else:
+                        pnl_pips = (resolved_opened_price - closed_price) / pip
+                    status = 'CLOSED'
+                    note = f"bracket {close_reason} filled @ {closed_price:.5f}"
+                    _LOGGER.info(
+                        "Reconciled offline bracket close: %s %s %s → %s @ %.5f (%.1f pips)",
+                        existing['pair'], existing['direction'],
+                        existing['signal_id'][:12], close_reason,
+                        closed_price, pnl_pips,
+                    )
+
+            # Close out signals that reached a terminal state
             if status in ('CANCELLED', 'REJECTED') and closed_at is None:
                 closed_at = now
 
@@ -865,6 +1074,10 @@ def reconcile_detected_signal_orders(
                 broker_order_status=broker_order_status,
                 note=note,
                 closed_at=closed_at,
+                closed_price=closed_price,
+                close_reason=close_reason,
+                close_source=close_source,
+                pnl_pips=pnl_pips,
                 last_updated_at=now,
             )
             _replace_row_conn(conn, merged)

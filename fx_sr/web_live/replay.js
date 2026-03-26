@@ -157,6 +157,15 @@ async function fetchDateRange() {
   } catch (_) { /* ignore */ }
 }
 
+// ── Switch pair in-place from sidebar ──
+
+function switchReplayPair(newPair, newDate, entryTime) {
+  pairSelect.value = newPair;
+  if (newDate) dateInput.value = newDate;
+  requestedTradeEntry = entryTime || '';
+  loadReplay();
+}
+
 // ── Load replay data ──
 
 async function loadReplay() {
@@ -228,6 +237,7 @@ async function loadReplay() {
     }
 
     renderSummary();
+    _fetchOtherPairTrades(dateVal, pair, backtestKey);
     if (replay.frames.length > 0) {
       stepTo(replay.frames.length - 1);
       if (requestedTradeEntry) {
@@ -1169,6 +1179,74 @@ function _renderTradeList(dec) {
     }
   }
   document.getElementById('trade-list').innerHTML = listHtml;
+}
+
+async function _fetchOtherPairTrades(dateVal, currentPair, backtestKey) {
+  const el = document.getElementById('other-trades-list');
+  const sidebar = document.getElementById('other-trades-sidebar');
+  if (!el) return;
+  if (sidebar) sidebar.style.display = '';
+  el.innerHTML = '<p style="color:var(--muted);font-size:0.84rem">Loading...</p>';
+  try {
+    const params = new URLSearchParams();
+    if (backtestKey) params.set('backtest', backtestKey);
+    const res = await fetch(`/api/backtest/trades?${params}`);
+    const data = await res.json();
+    if (!res.ok) { el.innerHTML = ''; return; }
+    const allTrades = data.trades || [];
+    // Filter to trades active on this date, across ALL pairs
+    const dayTrades = allTrades.filter(t => {
+      const active = t.active_dates || [];
+      if (active.includes(dateVal)) return true;
+      const entry = (t.entry_time || '').slice(0, 10);
+      const exit = (t.exit_time || '').slice(0, 10);
+      return entry === dateVal || exit === dateVal;
+    });
+    if (!dayTrades.length) {
+      el.innerHTML = '<p style="color:var(--muted);font-size:0.84rem">No trades across any pair on this day</p>';
+      return;
+    }
+    const dec = replay.summary?.decimals || REPLAY_DECIMALS;
+    let html = '';
+    // Day total
+    const dayR = dayTrades.reduce((s, t) => s + (Number(t.pnl_r) || 0), 0);
+    const dayRCls = dayR > 0 ? 'up' : dayR < 0 ? 'down' : '';
+    html += `<div style="font-size:0.78rem;font-weight:700;padding:6px 0 8px;border-bottom:2px solid var(--line)">`;
+    html += `${dayTrades.length} trades \u00b7 <span class="${dayRCls}">${dayR > 0 ? '+' : ''}${dayR.toFixed(2)}R</span>`;
+    html += `</div>`;
+
+    // Sort all trades chronologically by entry time
+    dayTrades.sort((a, b) => String(a.entry_time || '').localeCompare(String(b.entry_time || '')));
+    const _hhmm = (iso) => iso ? formatTimestamp(iso, {hour:'2-digit',minute:'2-digit',hour12:false}) : '';
+    const _dayHhmm = (iso) => {
+      if (!iso) return '';
+      const d = String(iso).slice(0, 10);
+      const hm = _hhmm(iso);
+      return d !== dateVal ? `${String(iso).slice(8, 10)}/${String(iso).slice(5, 7)} ${hm}` : hm;
+    };
+    for (const t of dayTrades) {
+      const pairId = t.pair || '?';
+      const isCurrent = pairId === currentPair;
+      const cls = (t.pnl_pips || 0) > 0 ? 'up' : 'down';
+      const pnlR = t.pnl_r != null ? `${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R` : '';
+      const entryHm = _dayHhmm(t.entry_time);
+      const exitHm = _dayHhmm(t.exit_time);
+      const timeRange = exitHm ? `${entryHm}\u2013${exitHm}` : entryHm;
+      const replayDate = (t.entry_time || '').slice(0, 10) || dateVal;
+      const clickAttr = !isCurrent
+        ? `onclick="switchReplayPair('${pairId}','${replayDate}','${escapeAttr(t.entry_time||'')}')" style="cursor:pointer"`
+        : `onclick="jumpToTradeEntry('${escapeAttr(t.entry_time)}')" style="cursor:pointer"`;
+      html += `<div style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:0.8rem;border-bottom:1px solid var(--line)" ${clickAttr}>`;
+      html += `<span class="pill pill-${(t.direction||'').toLowerCase()}" style="font-size:0.62rem;padding:1px 5px;min-width:auto">${t.direction === 'LONG' ? 'L' : 'S'}</span>`;
+      html += `<span style="font-weight:${isCurrent ? '700' : '400'};min-width:52px">${pairId}</span>`;
+      html += `<span style="flex:1;color:var(--muted);font-size:0.74rem">${timeRange}</span>`;
+      html += `<span class="${cls}" style="font-weight:600;min-width:48px;text-align:right">${pnlR}</span>`;
+      html += `</div>`;
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '';
+  }
 }
 
 function renderSummary() {

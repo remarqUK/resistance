@@ -120,6 +120,9 @@ class StrategyParams:
     use_pair_direction_filter: bool = True        # block bad pair+direction combos
     use_time_filters: bool = True                # block bad hours and days
     min_entry_candle_body_pct: float = DEFAULT_MIN_ENTRY_CANDLE_BODY_PCT  # min body/range ratio for entry candle
+    # Backtest execution compatibility controls
+    strict_backtest_execution: bool = True           # require minute/L2 evidence for backtest fills
+    allow_h1_execution_fallback: bool = True         # allow 1H close fallback when strict mode is off
     blocked_hours: FrozenSet[int] = DEFAULT_BLOCKED_HOURS
     blocked_days: FrozenSet[int] = DEFAULT_BLOCKED_DAYS
     streak_pause_trigger: int = 0              # pause entries after this many consecutive portfolio losses (0=off)
@@ -146,9 +149,6 @@ class StrategyParams:
     max_submit_spread_pips: float = 2.0        # reject wide spreads at submit time
     max_submit_entry_drift_r: float = 0.25     # reject entries drifting too far from planned R
     prefer_l2_submit_quote: bool = True        # prefer L2 top-of-book over L1 when available
-    # Historical execution parity
-    strict_backtest_execution: bool = False    # require historical execution quotes for backtests
-    allow_h1_execution_fallback: bool = True   # allow next-hour modeled fallback when quote data is missing
     # Margin enforcement (FCA UK retail)
     enforce_margin: bool = True               # enable margin and min-size checks
     margin_cushion_pct: float = 10.0          # keep 10% margin buffer to avoid liquidation
@@ -187,6 +187,8 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         use_pair_direction_filter=merged.get('use_pair_direction_filter', True),
         use_time_filters=merged.get('use_time_filters', True),
         min_entry_candle_body_pct=merged['min_entry_candle_body_pct'],
+        strict_backtest_execution=merged.get('strict_backtest_execution', True),
+        allow_h1_execution_fallback=merged.get('allow_h1_execution_fallback', True),
         blocked_hours=frozenset(merged.get('blocked_hours', [2, 3])),
         blocked_days=frozenset(merged.get('blocked_days', [])),
         streak_pause_trigger=merged.get('streak_pause_trigger', 0),
@@ -208,8 +210,6 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         max_submit_spread_pips=merged.get('max_submit_spread_pips', 2.0),
         max_submit_entry_drift_r=merged.get('max_submit_entry_drift_r', 0.25),
         prefer_l2_submit_quote=merged.get('prefer_l2_submit_quote', True),
-        strict_backtest_execution=merged.get('strict_backtest_execution', False),
-        allow_h1_execution_fallback=merged.get('allow_h1_execution_fallback', True),
         enforce_margin=merged.get('enforce_margin', True),
         margin_cushion_pct=merged.get('margin_cushion_pct', 10.0),
         min_order_units=merged.get('min_order_units', 1000),

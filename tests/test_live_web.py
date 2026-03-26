@@ -103,17 +103,17 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
     async def test_hourly_bar_complete_uses_finalized_bar_and_persists_tracking(self):
         captured = {}
 
-        def _capture_signal_eval(pair, price, tracked_pairs=None, blocked_pairs=None, hourly_df=None):
+        def _capture_signal_eval(pair, tracked_positions=None, blocked_pairs=None, price=None, hourly_df=None):
             captured['pair'] = pair
             captured['price'] = price
-            captured['tracked_pairs'] = tracked_pairs
+            captured['tracked_pairs'] = tracked_positions
             captured['blocked_pairs'] = blocked_pairs
             captured['hourly_df'] = hourly_df.copy()
-            return None
+            return None, None
 
         with patch('fx_sr.positions.check_exit', return_value=None), \
                 patch('fx_sr.positions._save_bar_tracking') as save_tracking_mock, \
-                patch.object(self.hub._scanner, 'evaluate_completed_bar', side_effect=_capture_signal_eval):
+                patch.object(self.hub, '_evaluate_pair_row', side_effect=_capture_signal_eval):
             await self.hub._handle_hourly_bar_complete(
                 'EURUSD',
                 pd.Timestamp('2026-03-10 14:00:00', tz='UTC'),
@@ -122,7 +122,9 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         completed_time = pd.Timestamp('2026-03-10 14:00:00', tz='UTC')
         self.assertEqual(captured['pair'], 'EURUSD')
         self.assertAlmostEqual(captured['price'], 1.1010)
-        self.assertEqual(captured['tracked_pairs'], {'EURUSD': {'LONG'}})
+        self.assertEqual(set(captured['tracked_pairs']), {'EURUSD:LONG'})
+        self.assertEqual(captured['tracked_pairs']['EURUSD:LONG']['pair'], 'EURUSD')
+        self.assertEqual(captured['tracked_pairs']['EURUSD:LONG']['trade'].direction, 'LONG')
         self.assertEqual(captured['blocked_pairs'], set())
         self.assertEqual(list(captured['hourly_df'].index), [completed_time])
         self.assertAlmostEqual(captured['hourly_df'].iloc[-1]['Close'], 1.1010)

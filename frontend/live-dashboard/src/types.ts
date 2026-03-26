@@ -78,6 +78,11 @@ export interface ExecutionRow {
   submitted_entry_price?: number | null;
   submitted_sl_price?: number | null;
   submitted_tp_price?: number | null;
+  pnl_pips?: number | null;
+  pnl_r?: number | null;
+  closed_price?: number | null;
+  closed_at?: string | null;
+  close_reason?: string | null;
 }
 
 export interface LogEntry {
@@ -96,6 +101,8 @@ export interface SummaryState {
   execution_enabled?: boolean;
   execution_available?: boolean;
   execution_paused?: boolean;
+  execution_mode?: string;
+  execution_mode_label?: string;
   strategy_label?: string;
   mode?: string;
   url?: string;

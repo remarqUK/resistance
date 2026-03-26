@@ -21,6 +21,7 @@ from .strategy import (
     get_tradeable_zones,
     select_entry_signal,
 )
+from .intrabar import find_intrabar_signal, intrabar_execution_time
 
 
 def slice_daily_window(
@@ -114,9 +115,10 @@ def run_walk_forward(
     pip: float,
     zone_provider: Callable[[pd.Timestamp, object, int], list[SRZone]],
     execution_quote_provider: Callable[[Signal, pd.Timestamp, int, pd.Series], tuple[Optional[ExecutionQuote], str]] | None = None,
+    minute_df: pd.DataFrame | None = None,
+    execution_mode: str = 'next_bar',
     on_bar: Callable[[WalkForwardBar], None] | None = None,
     force_close_end: bool = True,
-    skip_execution_plan: bool = False,
 ) -> WalkForwardResult:
     """Run the shared per-bar execution loop for one pair.
 
@@ -128,6 +130,7 @@ def run_walk_forward(
     trades: list[Trade] = []
     current_trade: Optional[Trade] = None
     pending_signal: Optional[Signal] = None
+    pending_signal_submit_time: Optional[pd.Timestamp] = None
     current_zones: list[SRZone] = []
     last_trade_exit_time: pd.Timestamp | None = None
     last_trade_pnl_r: float | None = None
@@ -196,10 +199,17 @@ def run_walk_forward(
 
         if current_trade is None and pending_signal is not None:
             quote_note = ''
+            submit_time = pd.Timestamp(current_time) if execution_mode == 'next_bar' else None
+            if submit_time is None:
+                submit_time = (
+                    pending_signal_submit_time
+                    if pending_signal_submit_time is not None
+                    else intrabar_execution_time(pending_signal.time, minute_df)
+                )
             if execution_quote_provider is not None:
                 quote, quote_note = execution_quote_provider(
                     pending_signal,
-                    current_time,
+                    submit_time,
                     i,
                     row,
                 )
@@ -207,36 +217,34 @@ def run_walk_forward(
                 quote = build_modeled_execution_quote(
                     pending_signal.pair,
                     float(row['Open']),
-                    current_time,
+                    submit_time,
                     params,
                     source='historical_1h_fallback',
                 )
 
-            if skip_execution_plan:
-                current_trade = build_trade_from_signal(pending_signal)
-            else:
-                execution_plan = None
-                if quote is not None:
-                    execution_plan, quote_note = build_execution_plan(
-                        pending_signal,
-                        quote,
-                        params,
-                        now=current_time,
-                    )
+            execution_plan = None
+            if quote is not None:
+                execution_plan, quote_note = build_execution_plan(
+                    pending_signal,
+                    quote,
+                    params,
+                    now=submit_time,
+                )
 
-                if execution_plan is not None:
-                    current_trade = build_trade_from_signal(
-                        pending_signal,
-                        entry_price=execution_plan.entry_price,
-                        entry_time=execution_plan.quote.captured_at,
-                        sl_price=execution_plan.stop_price,
-                        tp_price=execution_plan.take_profit_price,
-                    )
-                else:
-                    current_trade = None
+            if execution_plan is not None:
+                current_trade = build_trade_from_signal(
+                    pending_signal,
+                    entry_price=execution_plan.entry_price,
+                    entry_time=execution_plan.quote.captured_at,
+                    sl_price=execution_plan.stop_price,
+                    tp_price=execution_plan.take_profit_price,
+                )
+            else:
+                current_trade = None
 
             del quote_note
             pending_signal = None
+            pending_signal_submit_time = None
             if current_trade is not None:
                 trade_entry_bar = i
                 opened_trade = current_trade
@@ -290,23 +298,79 @@ def run_walk_forward(
             last_pnl_r=last_trade_pnl_r,
             params=params,
         ):
-            signal = select_entry_signal(
-                hourly_df=hourly_df,
-                bar_idx=i,
-                pair=pair,
-                params=params,
-                support_zone=nearest_support,
-                resistance_zone=nearest_resistance,
-            )
+            signal = None
+            intrabar_submit_time = None
+            if execution_mode == 'intrabar':
+                intrabar_signal = find_intrabar_signal(
+                    current_time,
+                    minute_df,
+                    pair,
+                    params,
+                    nearest_support,
+                    nearest_resistance,
+                )
+                if intrabar_signal is not None:
+                    signal, intrabar_submit_time = intrabar_signal
+
+            if signal is None:
+                signal = select_entry_signal(
+                    hourly_df=hourly_df,
+                    bar_idx=i,
+                    pair=pair,
+                    params=params,
+                    support_zone=nearest_support,
+                    resistance_zone=nearest_resistance,
+                )
+
             if signal is not None:
-                if skip_execution_plan:
-                    # Immediate execution on the signal bar (no 1-bar delay).
-                    # Realistic for limit-order entries at zones.
-                    current_trade = build_trade_from_signal(signal)
+                if execution_mode == 'intrabar':
+                    if intrabar_submit_time is None:
+                        submit_time = intrabar_execution_time(current_time, minute_df)
+                    else:
+                        submit_time = intrabar_submit_time
+                else:
+                    submit_time = pd.Timestamp(current_time) + pd.Timedelta(hours=1)
+
+                if execution_quote_provider is not None:
+                    quote, _quote_note = execution_quote_provider(
+                        signal,
+                        submit_time,
+                        i,
+                        row,
+                    )
+                else:
+                    quote = build_modeled_execution_quote(
+                        signal.pair,
+                        float(row['Open']),
+                        submit_time,
+                        params,
+                        source='historical_1m',
+                    )
+
+                execution_plan = None
+                if quote is not None:
+                    execution_plan, _ = build_execution_plan(
+                        signal,
+                        quote,
+                        params,
+                        now=submit_time,
+                    )
+
+                if execution_plan is not None:
+                    current_trade = build_trade_from_signal(
+                        signal,
+                        entry_price=execution_plan.entry_price,
+                        entry_time=execution_plan.quote.captured_at,
+                        sl_price=execution_plan.stop_price,
+                        tp_price=execution_plan.take_profit_price,
+                    )
                     trade_entry_bar = i
                     opened_trade = current_trade
                 else:
                     pending_signal = signal
+                    pending_signal_submit_time = submit_time
+            else:
+                pending_signal = signal
 
         bars_held = 0 if current_trade is None else i - trade_entry_bar
         if on_bar is not None:

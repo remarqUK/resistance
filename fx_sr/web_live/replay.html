@@ -171,48 +171,55 @@
         <a href="/" class="hero-action">Back to Live Board</a>
         <a href="/trade-log" class="hero-action">Trade Log</a>
         <a href="/backtest-trades" class="hero-action">All Backtest Trades</a>
-        <a href="/backtest-diary" class="hero-action">Trade Diary</a>
+        <a href="/backtest-diary" class="hero-action">Backtest Diary</a>
       </div>
     </div>
   </div>
 
-  <div class="panel" style="margin-bottom:18px">
-    <div class="replay-controls">
-      <div class="field">
-        <label for="pair-select">Pair</label>
-        <select id="pair-select"></select>
+  <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:18px">
+    <div class="panel" style="flex:1;min-width:0;margin-bottom:0">
+      <div class="replay-controls">
+        <div class="field">
+          <label for="pair-select">Pair</label>
+          <select id="pair-select"></select>
+        </div>
+        <div class="field">
+          <label for="date-input">Date</label>
+          <input type="date" id="date-input">
+        </div>
+        <div class="field">
+          <label for="preset-select">Profile</label>
+          <select id="preset-select">
+            <option value="high_volume" selected>high_volume</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tf-select">Timeframe</label>
+          <select id="tf-select">
+            <option value="1m">1 min</option>
+            <option value="1h" selected>1 hour</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="load-btn">Load</button>
+        <button class="btn btn-primary" id="refresh-btn" style="background:var(--info)">Update Data</button>
       </div>
-      <div class="field">
-        <label for="date-input">Date</label>
-        <input type="date" id="date-input">
+
+      <div class="error-banner" id="error-banner"></div>
+      <div id="tf-fallback-banner" style="display:none;padding:10px 18px;border-radius:var(--radius-sm);background:rgba(47,99,125,0.12);color:var(--info);font-weight:600;margin-bottom:14px;font-size:0.88rem">No minute data cached for this pair. Showing hourly bars. Click "Update Data" to fetch minute data from IBKR.</div>
+      <div id="incomplete-banner" style="display:none;padding:10px 18px;border-radius:var(--radius-sm);background:rgba(184,137,23,0.12);color:var(--warning);font-weight:600;margin-bottom:14px;font-size:0.88rem">Trading day in progress — data is incomplete and will update on next load.</div>
+
+      <div id="chart-container"></div>
+
+      <div id="playback-row" class="playback-row" style="display:none">
+        <button class="btn-icon" id="prev-trade-btn" title="Previous trade" aria-label="Previous trade">&larr;</button>
+        <div class="bar-label" id="trade-nav-label" style="min-width:220px">No trade selected</div>
+        <button class="btn-icon" id="next-trade-btn" title="Next trade" aria-label="Next trade">&rarr;</button>
       </div>
-      <div class="field">
-        <label for="preset-select">Profile</label>
-        <select id="preset-select">
-          <option value="high_volume" selected>high_volume</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="tf-select">Timeframe</label>
-        <select id="tf-select">
-          <option value="1m">1 min</option>
-          <option value="1h" selected>1 hour</option>
-        </select>
-      </div>
-      <button class="btn btn-primary" id="load-btn">Load</button>
-      <button class="btn btn-primary" id="refresh-btn" style="background:var(--info)">Update Data</button>
     </div>
 
-    <div class="error-banner" id="error-banner"></div>
-    <div id="tf-fallback-banner" style="display:none;padding:10px 18px;border-radius:var(--radius-sm);background:rgba(47,99,125,0.12);color:var(--info);font-weight:600;margin-bottom:14px;font-size:0.88rem">No minute data cached for this pair. Showing hourly bars. Click "Update Data" to fetch minute data from IBKR.</div>
-    <div id="incomplete-banner" style="display:none;padding:10px 18px;border-radius:var(--radius-sm);background:rgba(184,137,23,0.12);color:var(--warning);font-weight:600;margin-bottom:14px;font-size:0.88rem">Trading day in progress — data is incomplete and will update on next load.</div>
-
-    <div id="chart-container"></div>
-
-    <div id="playback-row" class="playback-row" style="display:none">
-      <button class="btn-icon" id="prev-trade-btn" title="Previous trade" aria-label="Previous trade">&larr;</button>
-      <div class="bar-label" id="trade-nav-label" style="min-width:220px">No trade selected</div>
-      <button class="btn-icon" id="next-trade-btn" title="Next trade" aria-label="Next trade">&rarr;</button>
+    <div id="other-trades-sidebar" class="info-card" style="width:280px;flex-shrink:0;max-height:620px;overflow-y:auto;display:none">
+      <h3>All Pairs This Day</h3>
+      <div class="trade-list" id="other-trades-list" style="max-height:none"></div>
     </div>
   </div>
 

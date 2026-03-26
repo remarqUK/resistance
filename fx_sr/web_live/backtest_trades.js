@@ -1,4 +1,4 @@
-﻿const backtestFilter = document.getElementById("backtest-filter");
+const backtestFilter = document.getElementById("backtest-filter");
 const pairFilter = document.getElementById("pair-filter");
 const loadBtn = document.getElementById("load-btn");
 const summaryEl = document.getElementById("summary");
@@ -185,7 +185,7 @@ function updateSortHeaders() {
       !isActive ? "none" : (sortState.direction === "asc" ? "ascending" : "descending"),
     );
     header.textContent = isActive
-      ? `${label} ${sortState.direction === "asc" ? "â–²" : "â–¼"}`
+      ? `${label} ${sortState.direction === "asc" ? "^" : "v"}`
       : label;
   });
 }
@@ -289,7 +289,7 @@ function formatBacktestOption(backtest) {
   if (backtest.starting_balance !== null && backtest.starting_balance !== undefined) {
     parts.push(`${formatCurrency(backtest.starting_balance)} @ ${formatNumber(backtest.risk_pct, 2)}%`);
   }
-  return parts.join(" Â· ");
+  return parts.join(" - ");
 }
 
 function populateBacktests(backtests, selectedKey = "") {

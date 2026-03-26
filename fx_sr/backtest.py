@@ -41,6 +41,7 @@ from .walkforward import (
     run_walk_forward,
     slice_daily_window as shared_slice_daily_window,
 )
+from .intrabar import find_intrabar_signal, intrabar_execution_time
 from .serialization import (
     deserialize_timestamp as shared_deserialize_timestamp,
     serialize_timestamp as shared_serialize_timestamp,
@@ -144,7 +145,7 @@ def _load_cached_backtest_data(
     minute_df = _load_cached_data_window(
         ticker,
         '1m',
-        max(1, min(int(hourly_days), 7)),
+        int(hourly_days),
         enforce_coverage=False,
     )
     return daily_df, hourly_df, minute_df
@@ -246,7 +247,7 @@ class _MarginTracker:
         self.balance = new_balance
 
 
-BACKTEST_CACHE_VERSION = '11'
+BACKTEST_CACHE_VERSION = '13'
 
 
 def _serialize_timestamp(value: pd.Timestamp | None) -> str | None:
@@ -400,6 +401,7 @@ def build_backtest_run_config_json(
     hourly_days: int,
     zone_history_days: int,
     *,
+    execution_mode: str = 'next_bar',
     requested_profile: str | None = None,
     starting_balance: float | None = None,
     risk_pct: float | None = None,
@@ -413,6 +415,7 @@ def build_backtest_run_config_json(
         'resolved_profile': _profile_name_for_params_hash(params_hash),
         'selection_label': selection_label,
         'params_hash': params_hash,
+        'execution_mode': execution_mode,
         'strategy_version': BACKTEST_CACHE_VERSION,
         'hourly_days': int(hourly_days),
         'zone_history_days': int(zone_history_days),
@@ -443,6 +446,7 @@ def _data_signature(
     daily_df: pd.DataFrame,
     hourly_df: pd.DataFrame,
     minute_df: pd.DataFrame | None = None,
+    execution_mode: str = 'next_bar',
 ) -> str:
     signature_payload = json.dumps({
         'daily': _normalize_df_for_signature(daily_df).to_json(orient='split', date_unit='ns'),
@@ -451,6 +455,7 @@ def _data_signature(
             orient='split',
             date_unit='ns',
         ),
+        'execution_mode': execution_mode,
     }, sort_keys=True)
     return hashlib.sha256(signature_payload.encode('utf-8')).hexdigest()
 
@@ -484,6 +489,8 @@ def _build_pending_end_trade(
     zone_provider,
     execution_quote_provider,
     trades: List[Trade],
+    execution_mode: str = 'next_bar',
+    minute_df: pd.DataFrame | None = None,
 ) -> Trade | None:
     """Materialize a final pending signal when submit-time data already exists.
 
@@ -494,8 +501,6 @@ def _build_pending_end_trade(
     """
 
     if hourly_df.empty or execution_quote_provider is None:
-        return None
-    if not bool(params.strict_backtest_execution):
         return None
 
     last_time = pd.Timestamp(hourly_df.index[-1])
@@ -532,24 +537,65 @@ def _build_pending_end_trade(
     ):
         return None
 
-    signal = select_entry_signal(
-        hourly_df=hourly_df,
-        bar_idx=len(hourly_df) - 1,
-        pair=pair,
-        params=params,
-        support_zone=nearest_support,
-        resistance_zone=nearest_resistance,
-    )
+    intrabar_submit_time = None
+    signal = None
+    if execution_mode == 'intrabar':
+        intrabar_signal = find_intrabar_signal(
+            last_time,
+            minute_df,
+            pair,
+            params,
+            nearest_support,
+            nearest_resistance,
+        )
+        if intrabar_signal is not None:
+            signal, intrabar_submit_time = intrabar_signal
+
+    if signal is None:
+        signal = select_entry_signal(
+            hourly_df=hourly_df,
+            bar_idx=len(hourly_df) - 1,
+            pair=pair,
+            params=params,
+            support_zone=nearest_support,
+            resistance_zone=nearest_resistance,
+        )
+        if signal is not None and execution_mode == 'next_bar':
+            intrabar_submit_time = pd.Timestamp(last_time) + pd.Timedelta(hours=1)
+
     if signal is None:
         return None
 
-    submit_time = last_time + pd.Timedelta(hours=1)
+    if execution_mode == 'intrabar':
+        submit_time = (
+            intrabar_submit_time if intrabar_submit_time is not None
+            else intrabar_execution_time(last_time, minute_df)
+        )
+        fallback_submit_time = submit_time
+        plan_now = submit_time
+    else:
+        submit_time = last_time + pd.Timedelta(hours=1)
+        fallback_submit_time = last_time
+        plan_now = submit_time
+
     quote, _quote_note = execution_quote_provider(
         signal,
         submit_time,
         len(hourly_df),
         last_row,
     )
+    if quote is None and execution_mode == 'next_bar':
+        quote, _quote_note = historical_execution_quote(
+            signal.pair,
+            fallback_submit_time,
+            params,
+            minute_df=None,
+            l2_snapshots=None,
+            allow_h1_fallback=True,
+            fallback_mid_price=float(last_row['Open']),
+        )
+        if quote is not None:
+            plan_now = fallback_submit_time
     if quote is None:
         return None
 
@@ -557,7 +603,7 @@ def _build_pending_end_trade(
         signal,
         quote,
         params,
-        now=submit_time,
+        now=plan_now,
     )
     if execution_plan is None:
         return None
@@ -586,6 +632,15 @@ def _load_minute_execution_data(
         '1m',
         start=start.to_pydatetime(),
         end=end.to_pydatetime(),
+    )
+
+
+def _allow_h1_fallback(params: StrategyParams) -> bool:
+    """Resolve whether 1-hour fallback quotes are allowed for backtests."""
+
+    return bool(
+        (not bool(params.strict_backtest_execution))
+        and bool(params.allow_h1_execution_fallback)
     )
 
 
@@ -628,6 +683,7 @@ def run_backtest(
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
     minute_df: pd.DataFrame | None = None,
     l2_snapshots: pd.DataFrame | None = None,
+    execution_mode: str = 'next_bar',
 ) -> BacktestResult:
     """Run multi-timeframe backtest: daily zones + hourly execution.
 
@@ -663,10 +719,7 @@ def run_backtest(
             params,
             minute_df=minute_df,
             l2_snapshots=l2_snapshots,
-            allow_h1_fallback=(
-                bool(params.allow_h1_execution_fallback)
-                and not bool(params.strict_backtest_execution)
-            ),
+            allow_h1_fallback=_allow_h1_fallback(params),
             fallback_mid_price=float(row['Open']),
         )
 
@@ -675,10 +728,11 @@ def run_backtest(
         pair=pair,
         params=params,
         pip=pip,
+        minute_df=minute_df,
         zone_provider=zone_provider,
         execution_quote_provider=execution_quote_provider,
+        execution_mode=execution_mode,
         force_close_end=True,
-        skip_execution_plan=not bool(params.strict_backtest_execution),
     )
     pending_trade = _build_pending_end_trade(
         hourly_df,
@@ -688,6 +742,8 @@ def run_backtest(
         zone_provider,
         execution_quote_provider,
         result.trades,
+        execution_mode=execution_mode,
+        minute_df=minute_df,
     )
     pending_trades = [pending_trade] if pending_trade is not None else []
     return _compile_results(pair, result.trades, result.zones, pending_trades=pending_trades)
@@ -842,6 +898,12 @@ def _fetch_pair_data_only(
     """Fetch daily and hourly data for a pair without running the backtest."""
     ticker = pair_info['ticker']
     t0 = time.perf_counter()
+    def _frame_summary(df: pd.DataFrame) -> str:
+        if df.empty:
+            return '0 rows'
+        first_ts = df.index.min().isoformat()
+        last_ts = df.index.max().isoformat()
+        return f'{len(df)} rows [{first_ts}..{last_ts}]'
 
     def _dbg(message: str) -> None:
         if debug:
@@ -850,28 +912,17 @@ def _fetch_pair_data_only(
     _dbg(f'phase1-worker: start pair={pair} ticker={ticker} client_id={client_id}')
     try:
         t_stage = time.perf_counter()
-        _dbg(f'phase1-worker: pair={pair} daily cache load start')
+        _dbg(f'phase1-worker: pair={pair} cached data load start')
         daily_df, hourly_df, minute_df = _load_cached_backtest_data(
             ticker,
             hourly_days,
             zone_history_days,
         )
         _dbg(
-            f'phase1-worker: pair={pair} daily cache load complete rows={len(daily_df)} '
-            f'elapsed={time.perf_counter() - t_stage:.2f}s'
-        )
-
-        t_stage = time.perf_counter()
-        _dbg(f'phase1-worker: pair={pair} hourly cache load start')
-        _dbg(
-            f'phase1-worker: pair={pair} hourly cache load complete rows={len(hourly_df)} '
-            f'elapsed={time.perf_counter() - t_stage:.2f}s'
-        )
-
-        t_stage = time.perf_counter()
-        _dbg(f'phase1-worker: pair={pair} minute cache load start')
-        _dbg(
-            f'phase1-worker: pair={pair} minute cache load complete rows={len(minute_df)} '
+            f'phase1-worker: pair={pair} cached data load complete '
+            f'daily={_frame_summary(daily_df)} '
+            f'hourly={_frame_summary(hourly_df)} '
+            f'minute={_frame_summary(minute_df)} '
             f'elapsed={time.perf_counter() - t_stage:.2f}s'
         )
 
@@ -908,14 +959,13 @@ def run_backtest_fast(
     pip: float,
     minute_df: pd.DataFrame | None = None,
     l2_snapshots: pd.DataFrame | None = None,
+    execution_mode: str = 'next_bar',
 ) -> BacktestResult:
     """Fast backtest using pre-computed zones (skips zone detection).
 
     Identical logic to run_backtest but looks up zones from zone_cache
     instead of calling detect_zones on each new day.
     """
-    skip_exec = not bool(params.strict_backtest_execution)
-
     def zone_provider(_current_time, current_date, _bar_index):
         return zone_cache.get((pair, str(current_date)), [])
 
@@ -926,10 +976,7 @@ def run_backtest_fast(
             params,
             minute_df=minute_df,
             l2_snapshots=l2_snapshots,
-            allow_h1_fallback=(
-                bool(params.allow_h1_execution_fallback)
-                and not bool(params.strict_backtest_execution)
-            ),
+            allow_h1_fallback=_allow_h1_fallback(params),
             fallback_mid_price=float(row['Open']),
         )
 
@@ -938,10 +985,11 @@ def run_backtest_fast(
         pair=pair,
         params=params,
         pip=pip,
+        minute_df=minute_df,
         zone_provider=zone_provider,
         execution_quote_provider=execution_quote_provider,
+        execution_mode=execution_mode,
         force_close_end=True,
-        skip_execution_plan=skip_exec,
     )
     pending_trade = _build_pending_end_trade(
         hourly_df,
@@ -951,6 +999,8 @@ def run_backtest_fast(
         zone_provider,
         execution_quote_provider,
         result.trades,
+        execution_mode=execution_mode,
+        minute_df=minute_df,
     )
     pending_trades = [pending_trade] if pending_trade is not None else []
     return _compile_results(pair, result.trades, result.zones, pending_trades=pending_trades)
@@ -1034,6 +1084,7 @@ def _backtest_pair(
     force_refresh: bool = False,
     client_id: int | None = None,
     run_config_json: str | None = None,
+    execution_mode: str = 'next_bar',
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Fetch data and run backtest for a single pair."""
     params_hash = _params_signature(params)
@@ -1052,7 +1103,12 @@ def _backtest_pair(
     )
     if daily_df.empty or hourly_df.empty:
         return pair, None
-    data_sig = _data_signature(daily_df, hourly_df, minute_df)
+    data_sig = _data_signature(
+        daily_df,
+        hourly_df,
+        minute_df,
+        execution_mode=execution_mode,
+    )
 
     if not force_refresh:
         cached = load_backtest_result(
@@ -1060,6 +1116,7 @@ def _backtest_pair(
             params_hash,
             hourly_days,
             zone_history_days,
+            execution_mode=execution_mode,
         )
         if cached is not None:
             cached_sig, cached_json, strategy_version, cached_run_config_json = cached
@@ -1074,6 +1131,7 @@ def _backtest_pair(
                             params_hash=params_hash,
                             hourly_days=hourly_days,
                             zone_history_days=zone_history_days,
+                            execution_mode=execution_mode,
                             data_signature=data_sig,
                             ticker=pair_info['ticker'],
                             strategy_version=BACKTEST_CACHE_VERSION,
@@ -1092,6 +1150,7 @@ def _backtest_pair(
         zone_history_days,
         minute_df=minute_df,
         l2_snapshots=l2_snapshots,
+        execution_mode=execution_mode,
     )
     if result is not None:
         save_backtest_result(
@@ -1099,6 +1158,7 @@ def _backtest_pair(
             params_hash=params_hash,
             hourly_days=hourly_days,
             zone_history_days=zone_history_days,
+            execution_mode=execution_mode,
             data_signature=data_sig,
             ticker=pair_info['ticker'],
             strategy_version=BACKTEST_CACHE_VERSION,
@@ -1118,6 +1178,7 @@ def _run_backtest_pair_on_core(
     client_id: int | None,
     core_id: int | None = None,
     run_config_json: str | None = None,
+    execution_mode: str = 'next_bar',
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Run a pair backtest in the current process and bind to a dedicated core if possible."""
     if core_id is not None:
@@ -1134,6 +1195,7 @@ def _run_backtest_pair_on_core(
         force_refresh=force_refresh,
         client_id=client_id,
         run_config_json=run_config_json,
+        execution_mode=execution_mode,
     )
 
 
@@ -1160,6 +1222,7 @@ def run_all_backtests_parallel(
     run_config_json: str | None = None,
     debug: bool = False,
     fetch_workers: int | None = None,
+    execution_mode: str = 'next_bar',
 ) -> Dict[str, BacktestResult]:
     """Run all pair backtests with maximum CPU utilisation.
 
@@ -1177,11 +1240,19 @@ def run_all_backtests_parallel(
         pairs = PAIRS
     if base_client_id is None:
         base_client_id = ibkr.TWS_CLIENT_ID
+    if execution_mode not in {'next_bar', 'intrabar'}:
+        raise ValueError('execution_mode must be one of: next_bar, intrabar')
     debug = bool(debug) or _backtest_debug_enabled()
 
     def _debug(message: str) -> None:
         if debug:
             print(f'    [DEBUG] {message}')
+
+    def _wait(message: str) -> None:
+        if debug:
+            print(f'    [DEBUG] {message}')
+        else:
+            print(f'    [WAIT] {message}')
 
     results = {}
     pair_items = [
@@ -1219,6 +1290,7 @@ def run_all_backtests_parallel(
                 zone_history_days,
                 force_refresh,
                 client_id=cid,
+                execution_mode=execution_mode,
             )
             done += 1
             if result:
@@ -1264,7 +1336,7 @@ def run_all_backtests_parallel(
         else:
             fetch_workers = None
     if fetch_workers is None:
-        fetch_workers = min(total, max_pool_workers, 20)
+        fetch_workers = 1
     _debug(f'phase1: fetch_workers={fetch_workers} total_pairs={total}')
     try:
         fetch_futures = {}
@@ -1295,9 +1367,13 @@ def run_all_backtests_parallel(
                 )
                 if not done_futures:
                     pending_pairs = [fetch_futures[f] for f in list(pending)[:3]]
-                    _debug(
-                        f'phase1: still waiting after {time.perf_counter() - t_phase:.1f}s; '
-                        f'pending={len(pending)} (e.g. {pending_pairs})'
+                    oldest = max(
+                        (time.perf_counter() - fetch_started[f] for f in pending),
+                        default=0.0,
+                    )
+                    _wait(
+                        f'phase1: waiting after {time.perf_counter() - t_phase:.1f}s; '
+                        f'pending={len(pending)} oldest_pending={oldest:.1f}s (e.g. {pending_pairs})'
                     )
                     continue
 
@@ -1364,8 +1440,19 @@ def run_all_backtests_parallel(
     cache_misses = 0
     cache_t = time.perf_counter()
     for pair, (daily_df, hourly_df, minute_df, l2_snapshots) in pair_data.items():
-        data_sig = _data_signature(daily_df, hourly_df, minute_df)
-        cached = load_backtest_result(pair, params_hash, hourly_days, zone_history_days)
+        data_sig = _data_signature(
+            daily_df,
+            hourly_df,
+            minute_df,
+            execution_mode=execution_mode,
+        )
+        cached = load_backtest_result(
+            pair=pair,
+            params_hash=params_hash,
+            hourly_days=hourly_days,
+            zone_history_days=zone_history_days,
+            execution_mode=execution_mode,
+        )
         if cached is not None:
             cached_sig, cached_json, strategy_version, cached_run_config_json = cached
             if (strategy_version == BACKTEST_CACHE_VERSION
@@ -1378,6 +1465,7 @@ def run_all_backtests_parallel(
                             params_hash=params_hash,
                             hourly_days=hourly_days,
                             zone_history_days=zone_history_days,
+                            execution_mode=execution_mode,
                             data_signature=data_sig,
                             ticker=pairs[pair].get('ticker', pair),
                             strategy_version=BACKTEST_CACHE_VERSION,
@@ -1445,14 +1533,49 @@ def run_all_backtests_parallel(
             # Submit all zone computation tasks
             zone_futures = []
             zone_started: Dict = {}
+            zone_meta: Dict = {}
             for task in zone_tasks:
+                pair = task[1]
+                chunk = task[2]
                 fut = executor.submit(_detect_zones_for_dates, *task)
                 zone_futures.append(fut)
+                zone_meta[fut] = (pair, chunk[0] if chunk else '')
                 zone_started[fut] = time.perf_counter()
             _debug(f'phase3: submitted {len(zone_futures)} zone tasks')
-            for future in as_completed(zone_futures):
-                _debug(f'phase3: zone task complete in {time.perf_counter() - zone_started[future]:.2f}s')
-                zone_cache.update(future.result())
+            pending_zone = set(zone_futures)
+            while pending_zone:
+                done_zone, pending_zone = wait(
+                    pending_zone,
+                    timeout=20,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_zone:
+                    sample = [zone_meta.get(f, ('?', ''))[0] for f in list(pending_zone)[:3]]
+                    oldest = max(
+                        (time.perf_counter() - zone_started[f] for f in pending_zone),
+                        default=0.0,
+                    )
+                    _wait(
+                        f'phase3: waiting after {time.perf_counter() - t_phase:.1f}s; '
+                        f'zone pending={len(pending_zone)} oldest_pending={oldest:.1f}s sample={sample}'
+                    )
+                    continue
+
+                for future in done_zone:
+                    pair, first_chunk = zone_meta.get(future, ('?', ''))
+                    try:
+                        zones_for_task = future.result()
+                    except Exception as exc:
+                        print(
+                            f'    phase3: zone task failed pair={pair} '
+                            f'from {first_chunk} ({type(exc).__name__}: {exc})'
+                        )
+                        raise
+                    zone_cache.update(zones_for_task)
+                    _debug(
+                        f'phase3: zone task complete pair={pair} first_chunk={first_chunk} '
+                        f'elapsed={time.perf_counter() - zone_started[future]:.2f}s'
+                    )
 
             t_zones = time.time()
             print(f"    Zones computed in {t_zones - t_phase:.1f}s")
@@ -1467,31 +1590,62 @@ def run_all_backtests_parallel(
                 pip = pairs[pair].get('pip', 0.0001)
                 pair_zones = per_pair_zone_cache.get(pair, {})
                 fut = executor.submit(
-                    run_backtest_fast, hourly_df, pair, params, pair_zones, pip, minute_df, l2_snapshots,
+                    run_backtest_fast,
+                    hourly_df,
+                    pair,
+                    params,
+                    pair_zones,
+                    pip,
+                    minute_df,
+                    l2_snapshots,
+                    execution_mode,
                 )
                 walk_futures[fut] = (pair, data_sig)
                 walk_started[fut] = time.perf_counter()
             _debug(f'phase4: submitted {len(walk_futures)} walk-forward tasks')
-            for future in as_completed(walk_futures):
-                pair, data_sig = walk_futures[future]
-                result = future.result()
-                results[pair] = result
-                done += 1
-                r = result
-                print(f"    [{done}/{total}] {pair}: {r.total_trades} trades, "
-                      f"{r.win_rate:.0f}% WR, {r.total_pnl_pips:+.0f} pips")
-                _debug(f'phase4: walk task complete pair={pair} in {time.perf_counter() - walk_started[future]:.2f}s')
-                save_backtest_result(
-                    pair=pair,
-                    params_hash=params_hash,
-                    hourly_days=hourly_days,
-                    zone_history_days=zone_history_days,
-                    data_signature=data_sig,
-                    ticker=pairs[pair].get('ticker', pair),
-                    strategy_version=BACKTEST_CACHE_VERSION,
-                    result_json=_serialize_backtest_result(result),
-                    run_config_json=run_config_json,
+            pending_walk = set(walk_futures.keys())
+            while pending_walk:
+                done_walk, pending_walk = wait(
+                    pending_walk,
+                    timeout=20,
+                    return_when=FIRST_COMPLETED,
                 )
+                if not done_walk:
+                    sample = [walk_futures[f][0] for f in list(pending_walk)[:3]]
+                    oldest = max(
+                        (time.perf_counter() - walk_started[f] for f in pending_walk),
+                        default=0.0,
+                    )
+                    _wait(
+                        f'phase4: waiting after {time.perf_counter() - t_phase:.1f}s; '
+                        f'walk pending={len(pending_walk)} oldest_pending={oldest:.1f}s sample={sample}'
+                    )
+                    continue
+
+                for future in done_walk:
+                    pair, data_sig = walk_futures[future]
+                    result = future.result()
+                    results[pair] = result
+                    done += 1
+                    r = result
+                    print(f"    [{done}/{total}] {pair}: {r.total_trades} trades, "
+                          f"{r.win_rate:.0f}% WR, {r.total_pnl_pips:+.0f} pips")
+                    _debug(
+                        f'phase4: walk task complete pair={pair} '
+                        f'elapsed={time.perf_counter() - walk_started[future]:.2f}s'
+                    )
+                    save_backtest_result(
+                        pair=pair,
+                        params_hash=params_hash,
+                        hourly_days=hourly_days,
+                        zone_history_days=zone_history_days,
+                        execution_mode=execution_mode,
+                        data_signature=data_sig,
+                        ticker=pairs[pair].get('ticker', pair),
+                        strategy_version=BACKTEST_CACHE_VERSION,
+                        result_json=_serialize_backtest_result(result),
+                        run_config_json=run_config_json,
+                    )
     except (OSError, ValueError) as exc:
         print(f"    Process pool unavailable ({exc}); falling back to sequential.")
         _debug('phase3/4: process pool unavailable; falling back to sequential.')
@@ -1505,7 +1659,16 @@ def run_all_backtests_parallel(
                 for k, v in zone_cache.items()
                 if k[0] == pair
             }
-            result = run_backtest_fast(hourly_df, pair, params, pair_zones, pip, minute_df, l2_snapshots)
+            result = run_backtest_fast(
+                hourly_df,
+                pair,
+                params,
+                pair_zones,
+                pip,
+                minute_df,
+                l2_snapshots,
+                execution_mode,
+            )
             results[pair] = result
             done += 1
             r = result
@@ -1517,6 +1680,7 @@ def run_all_backtests_parallel(
                 params_hash=params_hash,
                 hourly_days=hourly_days,
                 zone_history_days=zone_history_days,
+                execution_mode=execution_mode,
                 data_signature=data_sig,
                 ticker=pairs[pair].get('ticker', pair),
                 strategy_version=BACKTEST_CACHE_VERSION,

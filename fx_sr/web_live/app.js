@@ -679,12 +679,16 @@ function renderSummary() {
   els.positionCount.textContent = String(summary.position_count || 0);
 
   // Execution mode with trading-paused indicator during backfill
+  const modeLabel = summary.execution_mode_label
+    || (summary.execution_mode === "intrabar" ? "Intrabar (minute bars)" : "Next-bar (completed hourly)");
   if (isBackfilling) {
-    els.executionMode.textContent = "Trading paused (backfilling)";
+    els.executionMode.textContent = `${modeLabel} · Trading paused (backfilling)`;
   } else if (summary.execution_available && summary.execution_paused) {
-    els.executionMode.textContent = "Paper execution paused";
+    els.executionMode.textContent = `${modeLabel} · Execution paused`;
   } else {
-    els.executionMode.textContent = summary.execution_enabled ? "Paper execution active" : "Scan only";
+    els.executionMode.textContent = summary.execution_enabled
+      ? `${modeLabel} · Paper execution enabled`
+      : `${modeLabel} · Scan only`;
   }
 
   if (els.tradeToggleBtn) {

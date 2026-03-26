@@ -593,8 +593,18 @@ body::before {
 }
 
 .mini-head-copy {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mini-head-copy .pill,
+.position-head .pill,
+.signal-head .pill {
+  min-width: auto;
+  padding: 2px 7px;
+  font-size: 0.66rem;
 }
 
 .mini-head > div {
@@ -615,6 +625,7 @@ body::before {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 16px;
   margin-top: 12px;
+  font-size: 0.84rem;
 }
 
 .mini-meta-single {
@@ -755,6 +766,7 @@ body::before {
 
 .pill-live,
 .pill-long,
+.pill-open,
 .pill-success,
 .pill-ok {
   background: rgba(31, 122, 73, 0.12);

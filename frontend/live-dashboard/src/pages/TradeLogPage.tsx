@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { NavLinks } from '../components/NavLinks';
 import '../styles/trade-log.css';
 import type { TradeLogResponse } from '../types';
 
@@ -31,6 +32,7 @@ export function TradeLogPage() {
   const [status, setStatus] = useState('');
   const [data, setData] = useState<TradeLogResponse>({ signals: [], pairs: [], count: 0 });
   const [error, setError] = useState('');
+  const [selectedSignal, setSelectedSignal] = useState<any | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -60,6 +62,19 @@ export function TradeLogPage() {
   }, [load]);
 
   const rows = useMemo(() => data.signals || [], [data.signals]);
+  const chartUrl = useMemo(() => {
+    if (!selectedSignal?.pair) return '';
+    const targetDate = (selectedSignal.closed_at || selectedSignal.signal_time || '').slice(0, 10);
+    const entry = selectedSignal.signal_time || '';
+    const params = new URLSearchParams({ pair: String(selectedSignal.pair).toUpperCase() });
+    if (targetDate) {
+      params.set('date', targetDate);
+    }
+    if (entry) {
+      params.set('entry', String(entry));
+    }
+    return `/replay?${params.toString()}`;
+  }, [selectedSignal]);
 
   return (
     <div className="shell trade-log-page">
@@ -70,12 +85,7 @@ export function TradeLogPage() {
             <h1>Trade Log</h1>
             <p className="subtitle">Live signal and execution history. Filter by pair or broker status without leaving the dashboard stack.</p>
           </div>
-          <div className="hero-actions hero-actions-vertical hero-links-column">
-            <a className="hero-action" href="/">Back to Live Board</a>
-            <a className="hero-action" href="/replay">Strategy Replay</a>
-            <a className="hero-action" href="/backtest-trades">All Backtest Trades</a>
-            <a className="hero-action" href="/backtest-diary">Trade Diary</a>
-          </div>
+          <NavLinks current="/trade-log" />
         </div>
       </div>
 
@@ -132,6 +142,8 @@ export function TradeLogPage() {
                   <th>Spread</th>
                   <th>Quote</th>
                   <th>P&amp;L</th>
+                  <th>Close Price</th>
+                  <th>Close Reason</th>
                   <th>Note</th>
                 </tr>
               </thead>
@@ -142,8 +154,36 @@ export function TradeLogPage() {
                   const ask = row.submit_ask != null ? formatNumber(row.submit_ask, 5) : '';
                   const bidAsk = bid && ask ? `${bid}/${ask}` : '';
                   const pnl = row.pnl_pips != null ? `${Number(row.pnl_pips) > 0 ? '+' : ''}${Number(row.pnl_pips).toFixed(1)}` : '';
+                  const isClosed = String(row.status || '').toUpperCase() === 'CLOSED';
+                  const closePrice = row.closed_price != null ? formatNumber(row.closed_price, 5) : '';
+                  const closeReason = row.close_reason || '';
+                  const rowIsSelected = selectedSignal && row.signal_id
+                    ? row.signal_id === selectedSignal.signal_id
+                    : false;
                   return (
-                    <tr key={row.signal_id || `${row.pair}:${row.signal_time}:${row.direction}`}>
+                    <tr
+                      key={row.signal_id || `${row.pair}:${row.signal_time}:${row.direction}`}
+                      className={`trade-log-row${rowIsSelected ? ' trade-log-row-selected' : ''}`}
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => {
+                        if (row.opened_price != null || row.closed_price != null) {
+                          const p = new URLSearchParams({ pair: row.pair });
+                          if (row.opened_price != null) p.set('entry_price', row.opened_price);
+                          if (row.opened_at || row.signal_time) p.set('entry_time', row.opened_at || row.signal_time);
+                          if (row.closed_price != null) p.set('exit_price', row.closed_price);
+                          if (row.closed_at) p.set('exit_time', row.closed_at);
+                          if (row.submitted_sl_price != null) p.set('sl', row.submitted_sl_price);
+                          else if (row.sl_price != null) p.set('sl', row.sl_price);
+                          if (row.submitted_tp_price != null) p.set('tp', row.submitted_tp_price);
+                          else if (row.tp_price != null) p.set('tp', row.tp_price);
+                          if (row.direction) p.set('direction', row.direction);
+                          window.location.href = `/live-trade?${p.toString()}`;
+                        } else {
+                          setSelectedSignal(rowIsSelected ? null : row);
+                        }
+                      }}
+                      title="Click to review trade"
+                    >
                       <td>{formatSignalTime(row.signal_time)}</td>
                       <td>{row.pair}</td>
                       <td className={`dir-${row.direction || ''}`}>{row.direction}</td>
@@ -156,6 +196,8 @@ export function TradeLogPage() {
                       <td>{spread}</td>
                       <td>{row.quote_source || ''}</td>
                       <td>{pnl}</td>
+                      <td>{isClosed ? closePrice : ''}</td>
+                      <td>{isClosed ? closeReason : ''}</td>
                       <td className="note" title={row.note || ''}>{row.note || ''}</td>
                     </tr>
                   );
@@ -165,6 +207,26 @@ export function TradeLogPage() {
           </div>
         ) : null}
       </section>
+
+      {selectedSignal ? (
+        <section className="panel trade-log-chart-panel">
+          <div className="trade-log-chart-header">
+            <h2>Trade chart: {selectedSignal.pair}</h2>
+            <button
+              className="toolbar-btn"
+              type="button"
+              onClick={() => setSelectedSignal(null)}
+            >
+              Hide chart
+            </button>
+          </div>
+          <iframe
+            className="trade-log-chart-frame"
+            src={chartUrl}
+            title={`Replay for ${selectedSignal.pair}`}
+          />
+        </section>
+      ) : null}
     </div>
   );
 }

@@ -158,7 +158,6 @@ class SharedEntryLogicTests(unittest.TestCase):
             momentum_threshold=0.99,
             use_time_filters=False,
             use_pair_direction_filter=False,
-            strict_backtest_execution=True,
         )
 
         def zones(_):
@@ -200,6 +199,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         self.assertEqual(signal.zone_lower, 1.0900)
         self.assertEqual(signal.direction, result.trades[0].direction)
+        self.assertEqual(signal.time, result.trades[0].entry_time)
 
     def test_live_scan_and_backtest_share_short_resistance_entries(self):
         daily_df = _build_daily_df()
@@ -219,7 +219,6 @@ class SharedEntryLogicTests(unittest.TestCase):
             momentum_threshold=0.99,
             use_time_filters=False,
             use_pair_direction_filter=False,
-            strict_backtest_execution=True,
         )
 
         def zones(_):
@@ -261,6 +260,44 @@ class SharedEntryLogicTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         self.assertEqual(signal.zone_upper, 1.1110)
         self.assertEqual(signal.direction, result.trades[0].direction)
+        self.assertEqual(signal.time, result.trades[0].entry_time)
+
+    def test_live_scan_ignores_current_in_progress_hour_and_anchors_to_submit_hour(self):
+        daily_df = _build_daily_df()
+        current_hour = pd.Timestamp.now(tz='UTC').floor('h')
+        hourly_df = _build_hourly_df(
+            [
+                (str(current_hour - pd.Timedelta(hours=2)), 1.1030, 1.1034, 1.1028, 1.1030),
+                (str(current_hour - pd.Timedelta(hours=1)), 1.1000, 1.1005, 1.0999, 1.1003),
+                (str(current_hour), 1.0970, 1.0972, 1.0968, 1.0970),
+            ]
+        )
+        params = StrategyParams(
+            min_entry_candle_body_pct=0.0,
+            momentum_lookback=1,
+            momentum_threshold=0.99,
+            use_time_filters=False,
+            use_pair_direction_filter=False,
+        )
+
+        with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]):
+            _, signal = _scan_pair(
+                'EURUSD',
+                {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
+                params,
+                zone_history_days=20,
+                tracked_pairs={},
+                blocked_pairs=set(),
+                daily_data_cache={},
+                zone_cache={},
+                hourly_data_cache={},
+            )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.direction, 'LONG')
+        self.assertEqual(signal.time, current_hour)
 
     def test_run_backtest_fast_matches_walk_forward_backtest(self):
         daily_df = _build_daily_df()
@@ -327,8 +364,6 @@ class SharedEntryLogicTests(unittest.TestCase):
             momentum_threshold=0.99,
             use_time_filters=False,
             use_pair_direction_filter=False,
-            strict_backtest_execution=True,
-            allow_h1_execution_fallback=False,
         )
         minute_df = _build_minute_df([('2026-02-05 02:00:00', 1.1004)])
         zone = _support_zone(1.1000, 1.1010)
@@ -350,7 +385,7 @@ class SharedEntryLogicTests(unittest.TestCase):
             get_entry_execution_price(1.1004, 'LONG', 0.0001, params),
         )
 
-    def test_backtest_skips_entry_when_strict_execution_quote_is_missing(self):
+    def test_backtest_uses_modeled_next_hour_fallback_when_quote_snapshot_is_missing(self):
         daily_df = _build_daily_df()
         hourly_df = _build_hourly_df(
             [
@@ -365,8 +400,6 @@ class SharedEntryLogicTests(unittest.TestCase):
             momentum_threshold=0.99,
             use_time_filters=False,
             use_pair_direction_filter=False,
-            strict_backtest_execution=True,
-            allow_h1_execution_fallback=False,
         )
         zone = _support_zone(1.1000, 1.1010)
 
@@ -379,7 +412,48 @@ class SharedEntryLogicTests(unittest.TestCase):
                 zone_history_days=20,
             )
 
-        self.assertEqual(result.total_trades, 0)
+        self.assertEqual(result.total_trades, 1)
+        self.assertEqual(result.trades[0].entry_time, pd.Timestamp('2026-02-05 02:00:00', tz='UTC'))
+        self.assertAlmostEqual(
+            result.trades[0].entry_price,
+            get_entry_execution_price(1.1004, 'LONG', 0.0001, params),
+        )
+
+    def test_backtest_executes_intrabar_within_hour_when_minute_quote_exists(self):
+        daily_df = _build_daily_df()
+        hourly_df = _build_hourly_df(
+            [
+                ('2026-02-05 00:00:00', 1.1030, 1.1034, 1.1028, 1.1030),
+                ('2026-02-05 01:00:00', 1.1000, 1.1005, 1.0999, 1.1003),
+            ]
+        )
+        params = StrategyParams(
+            min_entry_candle_body_pct=0.0,
+            momentum_lookback=1,
+            momentum_threshold=0.99,
+            use_time_filters=False,
+            use_pair_direction_filter=False,
+        )
+        minute_df = _build_minute_df([('2026-02-05 01:59:00', 1.1004)])
+        zone = _support_zone(1.1000, 1.1010)
+
+        with patch('fx_sr.backtest.detect_zones', return_value=[zone]):
+            result = run_backtest(
+                daily_df,
+                hourly_df,
+                'EURUSD',
+                params=params,
+                zone_history_days=20,
+                minute_df=minute_df,
+                execution_mode='intrabar',
+            )
+
+        self.assertEqual(result.total_trades, 1)
+        self.assertEqual(result.trades[0].entry_time, pd.Timestamp('2026-02-05 01:59:00', tz='UTC'))
+        self.assertAlmostEqual(
+            result.trades[0].entry_price,
+            get_entry_execution_price(1.1004, 'LONG', 0.0001, params),
+        )
 
     def test_backtest_materializes_pending_end_of_sample_entry_from_minute_data(self):
         daily_df = _build_daily_df()
@@ -396,8 +470,6 @@ class SharedEntryLogicTests(unittest.TestCase):
             momentum_threshold=0.99,
             use_time_filters=False,
             use_pair_direction_filter=False,
-            strict_backtest_execution=True,
-            allow_h1_execution_fallback=False,
         )
         zone = _support_zone(1.1000, 1.1010)
 
@@ -467,7 +539,16 @@ class SharedEntryLogicTests(unittest.TestCase):
             total_pnl_pips=0.0,
         )
 
-        def fake_backtest_pair(pair, info, params, hourly_days, zone_history_days, force_refresh, client_id):
+        def fake_backtest_pair(
+            pair,
+            info,
+            params,
+            hourly_days,
+            zone_history_days,
+            force_refresh,
+            client_id,
+            execution_mode='next_bar',
+        ):
             scanned.append(pair)
             return pair, fake_result
 
@@ -484,6 +565,38 @@ class SharedEntryLogicTests(unittest.TestCase):
         self.assertEqual(scanned, ['EURUSD'])
         self.assertEqual(set(results.keys()), {'EURUSD'})
 
+    def test_run_all_backtests_parallel_forwards_execution_mode_to_backtest_pair(self):
+        pairs = {'EURUSD': {'ticker': 'EURUSD=X'}}
+        scanned: list[tuple[str, str]] = []
+        fake_result = SimpleNamespace(total_trades=0, win_rate=0.0, total_pnl_pips=0.0)
+
+        def fake_backtest_pair(
+            pair,
+            info,
+            params,
+            hourly_days,
+            zone_history_days,
+            force_refresh,
+            client_id,
+            execution_mode='next_bar',
+        ):
+            scanned.append((pair, execution_mode))
+            return pair, fake_result
+
+        with patch('fx_sr.backtest._backtest_pair', side_effect=fake_backtest_pair):
+            results = run_all_backtests_parallel(
+                params=StrategyParams(),
+                hourly_days=10,
+                zone_history_days=20,
+                pairs=pairs,
+                force_refresh=True,
+                base_client_id=1000,
+                execution_mode='intrabar',
+            )
+
+        self.assertEqual(scanned, [('EURUSD', 'intrabar')])
+        self.assertEqual(set(results.keys()), {'EURUSD'})
+
     def test_run_all_backtests_parallel_includes_fully_blocked_pair_when_filter_disabled(self):
         blocked_pair = _fully_blocked_pair()
         pairs = {
@@ -498,7 +611,16 @@ class SharedEntryLogicTests(unittest.TestCase):
             total_pnl_pips=0.0,
         )
 
-        def fake_backtest_pair(pair, info, params, hourly_days, zone_history_days, force_refresh, client_id):
+        def fake_backtest_pair(
+            pair,
+            info,
+            params,
+            hourly_days,
+            zone_history_days,
+            force_refresh,
+            client_id,
+            execution_mode='next_bar',
+        ):
             scanned.append(pair)
             return pair, fake_result
 

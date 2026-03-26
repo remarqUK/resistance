@@ -1,4 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { NavLinks } from '../components/NavLinks';
 import type {
   AlertRow,
   DashboardState,
@@ -97,6 +98,26 @@ function formatExecutionPrice(value: any, execution?: ExecutionRow) {
   return formatNumber(value, digits);
 }
 
+function executionPnlROrPips(execution: ExecutionRow) {
+  if (execution.pnl_r !== null && execution.pnl_r !== undefined && Number.isFinite(Number(execution.pnl_r))) {
+    return {
+      value: formatSigned(execution.pnl_r, 2, 'R'),
+      isUp: Number(execution.pnl_r) >= 0,
+    };
+  }
+
+  if (execution.pnl_pips !== null && execution.pnl_pips !== undefined && Number.isFinite(Number(execution.pnl_pips))) {
+    return {
+      value: formatSigned(execution.pnl_pips, 1, ' pips'),
+      isUp: Number(execution.pnl_pips) >= 0,
+    };
+  }
+
+  return {
+    value: '-',
+    isUp: true,
+  };
+}
 function executionKey(execution: ExecutionRow) {
   return [
     execution.pair || '',
@@ -487,11 +508,142 @@ function ExecutionMiniChart({ execution }: { execution: ExecutionRow }) {
   );
 }
 
+const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, slPrice, tpPrice }: { pair: string; entryPrice?: number; slPrice?: number; tpPrice?: number }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<any>(null);
+  const seriesRef = useRef<any>(null);
+  const lastBarRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
+  const [status, setStatus] = useState('Loading...');
+
+  // Load chart data once
+  useEffect(() => {
+    const chartApi = window.LightweightCharts;
+    const container = containerRef.current;
+    if (!container || !chartApi || !pair) {
+      setStatus('Chart unavailable');
+      return;
+    }
+
+    let active = true;
+
+    async function load() {
+      try {
+        const res = await fetch(`/api/chart-data?pair=${encodeURIComponent(pair)}`);
+        const data = await res.json();
+        if (!active || data.error) return;
+
+        const chart = chartApi.createChart(container, {
+          layout: { background: { type: 'solid', color: '#fffaf2' }, textColor: '#5b4b3a' },
+          grid: { vertLines: { color: 'rgba(91,75,58,0.08)' }, horzLines: { color: 'rgba(91,75,58,0.08)' } },
+          crosshair: { mode: chartApi.CrosshairMode.Normal },
+          rightPriceScale: { borderColor: 'rgba(91,75,58,0.18)' },
+          timeScale: { borderColor: 'rgba(91,75,58,0.18)', timeVisible: true, secondsVisible: false },
+          width: container.clientWidth || 520,
+          height: 260,
+        });
+        chartRef.current = chart;
+
+        const series = chart.addCandlestickSeries({
+          upColor: '#1f7a49', downColor: '#b23b29',
+          borderUpColor: '#1f7a49', borderDownColor: '#b23b29',
+          wickUpColor: '#1f7a49', wickDownColor: '#b23b29',
+        });
+        seriesRef.current = series;
+
+        if (data.bars?.length) {
+          series.setData(data.bars);
+          const last = data.bars[data.bars.length - 1];
+          lastBarRef.current = { time: last.time, open: last.open, high: last.high, low: last.low, close: last.close };
+        }
+
+        const line = (price: any, color: string, title: string, style?: number) => {
+          if (price == null || isNaN(Number(price))) return;
+          series.createPriceLine({ price: Number(price), color, lineWidth: 1, lineStyle: style ?? chartApi.LineStyle.Dashed, axisLabelVisible: true, title });
+        };
+        line(entryPrice, '#d4a017', 'Entry', chartApi.LineStyle.Solid);
+        line(slPrice, '#b23b29', 'SL');
+        line(tpPrice, '#1f7a49', 'TP');
+
+        // Zone bands
+        if (data.support) {
+          const band = chart.addBaselineSeries({ baseValue: { type: 'price', price: data.support.lower }, topFillColor1: 'rgba(31,122,73,0.10)', topFillColor2: 'rgba(31,122,73,0.10)', topLineColor: 'transparent', bottomFillColor1: 'transparent', bottomFillColor2: 'transparent', bottomLineColor: 'transparent', lineWidth: 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+          const pad = 365*24*3600; const now = Math.floor(Date.now()/1000);
+          band.setData([{ time: now-pad, value: data.support.upper }, { time: now+pad, value: data.support.upper }]);
+        }
+        if (data.resistance) {
+          const band = chart.addBaselineSeries({ baseValue: { type: 'price', price: data.resistance.lower }, topFillColor1: 'rgba(178,59,41,0.10)', topFillColor2: 'rgba(178,59,41,0.10)', topLineColor: 'transparent', bottomFillColor1: 'transparent', bottomFillColor2: 'transparent', bottomLineColor: 'transparent', lineWidth: 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+          const pad = 365*24*3600; const now = Math.floor(Date.now()/1000);
+          band.setData([{ time: now-pad, value: data.resistance.upper }, { time: now+pad, value: data.resistance.upper }]);
+        }
+
+        chart.timeScale().scrollToRealTime();
+        setStatus('');
+
+        new ResizeObserver(() => {
+          chart.applyOptions({ width: container.clientWidth });
+        }).observe(container);
+      } catch {
+        if (active) setStatus('Failed to load chart');
+      }
+    }
+
+    void load();
+    return () => { active = false; if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; } };
+  }, [pair, entryPrice, slPrice, tpPrice]);
+
+  // Subscribe to WebSocket for live price updates
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+
+    ws.addEventListener('message', (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        let price: number | null = null;
+
+        if (msg.type === 'pair_update' && msg.row?.pair === pair) {
+          price = msg.row.price;
+        }
+        if ((msg.type === 'bootstrap' || msg.type === 'snapshot') && msg.state?.pairs?.[pair]) {
+          price = msg.state.pairs[pair].price;
+        }
+
+        if (price != null && price > 0 && seriesRef.current) {
+          const now = Math.floor(Date.now() / 1000);
+          const hourStart = now - (now % 3600);
+          const last = lastBarRef.current;
+
+          if (last && last.time === hourStart) {
+            last.high = Math.max(last.high, price);
+            last.low = Math.min(last.low, price);
+            last.close = price;
+            seriesRef.current.update(last);
+          } else {
+            const bar = { time: hourStart, open: price, high: price, low: price, close: price };
+            lastBarRef.current = bar;
+            seriesRef.current.update(bar);
+          }
+        }
+      } catch {}
+    });
+
+    return () => ws.close();
+  }, [pair]);
+
+  return (
+    <div className="mini-detail-wide">
+      {status ? <div className="chart-status">{status}</div> : null}
+      <div ref={containerRef} style={{ width: '100%', marginTop: '8px' }} />
+    </div>
+  );
+});
+
 export function DashboardPage() {
   const [viewState, setViewState] = useState<DashboardState>(INITIAL_STATE);
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'disconnected' | 'error'>('connecting');
   const [executionTogglePending, setExecutionTogglePending] = useState(false);
   const [selectedExecutionKey, setSelectedExecutionKey] = useState<string | null>(null);
+  const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -638,9 +790,13 @@ export function DashboardPage() {
     return 'Resolving';
   }, [summary.account_currency, summary.balance, summary.mode, summary.risk_pct]);
 
+  const executionModeLabel = summary.execution_mode_label
+    || (summary.execution_mode === 'intrabar' ? 'Intrabar (minute bars)' : 'Next-bar (completed hourly)');
   const executionModeText = summary.execution_available
-    ? (summary.execution_paused ? 'Execution paused' : 'Live execution enabled')
-    : 'Scan only';
+    ? (summary.execution_paused
+      ? `${executionModeLabel} · Execution paused`
+      : `${executionModeLabel} · ${summary.execution_enabled ? 'Live execution enabled' : 'Scan only'}`)
+    : `${executionModeLabel} · Scan only`;
 
   const toggleExecution = useCallback(async () => {
     if (!summary.execution_available || executionTogglePending) {
@@ -695,6 +851,31 @@ export function DashboardPage() {
     }
   }, [pushLog]);
 
+  const rebuildUI = useCallback(async () => {
+    pushLog({ level: 'info', message: 'Rebuilding React UI...' });
+    try {
+      const res = await fetch('/api/rebuild-ui', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        pushLog({ level: 'success', message: data.message || 'Build complete. Reloading...' });
+        setTimeout(() => { window.location.href = window.location.pathname + '?t=' + Date.now(); }, 500);
+      } else {
+        pushLog({ level: 'error', message: data.message || 'Build failed.' });
+      }
+    } catch (error: any) {
+      pushLog({ level: 'error', message: error?.message || 'Build request failed.' });
+    }
+  }, [pushLog]);
+
+  const restartServer = useCallback(async () => {
+    try {
+      await fetch('/api/restart', { method: 'POST' });
+      pushLog({ level: 'success', message: 'Restart sent.' });
+    } catch (_) {
+      // Expected — server dies before response completes
+    }
+  }, [pushLog]);
+
   const stopServer = useCallback(async () => {
     if (!window.confirm('Stop the live server?')) {
       return;
@@ -718,6 +899,47 @@ export function DashboardPage() {
 
   return (
     <div className="shell">
+      {(connectionState === 'disconnected' || connectionState === 'connecting' || summary.status === 'backfilling' || summary.status === 'starting') && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(26, 21, 16, 0.92)',
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          color: '#e8dcc8', fontFamily: 'inherit',
+        }}>
+          <div style={{fontSize: '1.4rem', fontWeight: 700, marginBottom: '12px'}}>
+            {connectionState === 'disconnected' ? 'Server disconnected'
+              : connectionState === 'connecting' ? 'Connecting to server...'
+              : 'Server warming up'}
+          </div>
+          {(summary.status === 'backfilling' || summary.status === 'starting') && summary.backfill ? (() => {
+            const bf = summary.backfill || {};
+            const completed = Number(bf.completed || 0);
+            const total = Number(bf.total || 0);
+            const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+            const phase = bf.phase || 'loading';
+            const currentPair = bf.current_pair || '';
+            return (
+              <>
+                <div style={{fontSize: '0.9rem', color: '#a69882', marginBottom: '16px'}}>
+                  {phase === 'bars' ? 'Fetching market data' : phase === 'zones' ? 'Computing zones' : phase === 'scan' ? 'Running initial scan' : 'Loading'}
+                  {currentPair ? ` — ${currentPair}` : ''}
+                </div>
+                <div style={{width: '300px', height: '6px', background: 'rgba(166, 152, 130, 0.2)', borderRadius: '3px', overflow: 'hidden', marginBottom: '8px'}}>
+                  <div style={{width: `${pct}%`, height: '100%', background: '#d4a017', borderRadius: '3px', transition: 'width 0.3s'}} />
+                </div>
+                <div style={{fontSize: '0.85rem', color: '#a69882'}}>{pct}% ({completed}/{total})</div>
+              </>
+            );
+          })() : (
+            <div style={{fontSize: '0.9rem', color: '#a69882'}}>
+              {connectionState === 'disconnected' ? 'Reconnecting automatically — the server may be restarting' : 'Connecting...'}
+            </div>
+          )}
+          <div style={{marginTop: '20px', width: '40px', height: '40px', border: '3px solid #a69882', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite'}} />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
       <header className="hero">
         <div className="hero-title-row">
           <div>
@@ -737,15 +959,11 @@ export function DashboardPage() {
               </button>
             ) : null}
           </div>
-          <div><button id="fill-cache-btn" type="button" className="toolbar-btn" style={{ background: '#257aab', borderColor: '#257aab' }} onClick={() => void startFill()}>Fill</button></div>
           <div><button id="rerun-backtest-btn" type="button" className="toolbar-btn" style={{ background: '#3a6a8c', borderColor: '#3a6a8c' }} onClick={() => void rerunBacktest()} disabled={String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'}>{currentBacktestButtonText(summary.backtest || {})}</button></div>
-          <div><button id="stop-server-btn" type="button" className="toolbar-btn" style={{ color: '#fff', background: '#b23b29', borderColor: '#b23b29' }} onClick={() => void stopServer()}>Stop Server</button></div>
-          <div className="hero-actions hero-actions-vertical hero-links-column">
-            <a href="/trade-log" target="_blank" rel="noreferrer" className="hero-action">Trade Log</a>
-            <a href="/replay" target="_blank" rel="noreferrer" className="hero-action">Strategy Replay</a>
-            <a href="/backtest-trades" target="_blank" rel="noreferrer" className="hero-action">All Backtest Trades</a>
-            <a href="/backtest-diary" target="_blank" rel="noreferrer" className="hero-action">Trade Diary</a>
-          </div>
+          <div><button type="button" className="toolbar-btn" style={{ background: '#257aab', borderColor: '#257aab' }} onClick={() => void rebuildUI()}>Rebuild UI</button></div>
+          <div><button type="button" className="toolbar-btn" style={{ background: '#7a6430', borderColor: '#7a6430' }} onClick={() => void restartServer()}>Restart</button></div>
+          <div><button id="stop-server-btn" type="button" className="toolbar-btn" style={{ color: '#fff', background: '#b23b29', borderColor: '#b23b29' }} onClick={() => void stopServer()}>Stop</button></div>
+          <NavLinks current="/" />
         </div>
       </header>
 
@@ -763,18 +981,12 @@ export function DashboardPage() {
         <article className="metric-card">
           <span className="meta-label">Tracked positions</span>
           <strong id="position-count">{viewState.positions.length || summary.position_count || 0}</strong>
-          <span id="execution-mode" className="metric-detail">{executionModeText}</span>
-        </article>
-        <article className="metric-card">
-          <span className="meta-label">Next transaction</span>
-          <strong id="next-transaction-timer">{nextTransaction.timer}</strong>
-          <span id="next-transaction-at" className="metric-detail">{nextTransaction.at}</span>
+          <span id="execution-mode" className="metric-detail">{summary.execution_enabled ? 'Live execution enabled' : summary.execution_paused ? 'Execution paused' : 'Scan only'}</span>
         </article>
       </section>
 
       <main className="board live-marketboard">
         <section className="panel panel-watchlist">
-          <p className="panel-note" style={{ maxWidth: 'none', textAlign: 'left' }}>Signals and tracked pairs float to the top while updates stream in per pair.</p>
           <div className="table-wrap">
             <table className="data-table">
               <thead>
@@ -815,12 +1027,15 @@ export function DashboardPage() {
                 const plan = signal.size_plan || {};
                 return (
                   <article key={`${signal.pair}:${signal.direction}`} className="signal-card">
-                    <div className="signal-head">
-                      <div>
+                    <div className="signal-head" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                      <div className="mini-head-copy">
                         <strong>{signal.pair}</strong>
+                        {' '}
+                        <span className={badgeClass(signal.direction)}>{signal.direction}</span>
+                        {' '}
                         <span className="pair-sub">{signal.zone_type || 'setup'} · {signal.zone_strength || '–'}</span>
                       </div>
-                      <span className={badgeClass(signal.direction)}>{signal.direction}</span>
+                      <span className={badgeClass('signal')}>SIGNAL</span>
                     </div>
                     <div className="signal-meta">
                       <div><span className="value-label">Entry</span><span className="value">{formatNumber(signal.entry_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
@@ -841,25 +1056,48 @@ export function DashboardPage() {
           </section>
 
           <section className="panel">
-            <div id="positions-list" className="stack-list">
+            <div className="panel-subhead" style={{ marginBottom: '0.5rem' }}>Tracked Positions</div>
+            <div id="positions-list" className="stack-list compact-list">
               {!viewState.positions.length ? <div className="empty-card">No tracked positions.</div> : viewState.positions.map((position) => {
+                const posKey = `${position.pair}:${position.direction}`;
                 const pnlUp = Number(position.pnl_pips || 0) >= 0;
-                const badge = position.status === 'OK' ? position.direction : position.status || 'OK';
+                const posSelected = posKey === selectedPositionKey;
+                const dec = position.decimals ?? PRICE_DISPLAY_DECIMALS;
                 return (
-                  <article key={`${position.pair}:${position.direction}:${position.entry_price ?? ''}`} className="position-card">
-                    <div className="position-head">
-                      <div>
+                  <article
+                    key={posKey}
+                    className={`mini-card mini-card-clickable ${posSelected ? 'mini-card-selected' : ''}`}
+                    onClick={() => setSelectedPositionKey((c) => c === posKey ? null : posKey)}
+                  >
+                    <div className="mini-head" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                      <div className="mini-head-copy">
                         <strong>{position.pair}</strong>
+                        {' '}
+                        <span className={badgeClass(position.direction)}>{position.direction}</span>
+                        {' '}
                         <span className="pair-sub">{Number(position.size || 0).toLocaleString()} units</span>
                       </div>
-                      <span className={badgeClass(badge)}>{badge}</span>
+                      {position.status !== 'OK' ? <span className={badgeClass(position.status)}>{position.status}</span> : null}
                     </div>
-                    <div className="position-meta">
-                      <div><span className="value-label">Entry</span><span className="value">{formatNumber(position.entry_price, position.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Current</span><span className="value">{formatNumber(position.current_price, position.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Direction</span><span className="value">{position.direction}</span></div>
-                      <div><span className="value-label">P/L</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{formatSigned(position.pnl_pips, 1, ' pips')}</span></div>
+                    <div className="mini-meta" style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px 12px'}}>
+                      <div><span className="value-label">Entry</span><span className="value">{formatNumber(position.entry_price, dec)}</span></div>
+                      <div><span className="value-label">SL</span><span className="value">{formatNumber(position.sl_price, dec)}</span></div>
+                      <div><span className="value-label">TP</span><span className="value">{formatNumber(position.tp_price, dec)}</span></div>
+                      <div><span className="value-label">Current</span><span className="value">{formatNumber(position.current_price, dec)}</span></div>
+                      <div><span className="value-label">P/L pips</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{formatSigned(position.pnl_pips, 1, ' pips')}</span></div>
+                      <div><span className="value-label">P/L</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{position.pnl_amount != null ? `${position.pnl_amount >= 0 ? '+' : ''}${position.account_currency || '\u00a3'}${Number(position.pnl_amount).toFixed(2)}` : '\u2013'}</span></div>
                     </div>
+                    {posSelected ? (
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <button type="button" onClick={() => setSelectedPositionKey(null)} style={{float:'right',background:'none',border:'1px solid var(--line)',borderRadius:'4px',padding:'2px 8px',cursor:'pointer',fontSize:'0.75rem',color:'var(--muted)',marginBottom:'4px'}}>Close</button>
+                        <PositionMiniChart
+                          pair={position.pair}
+                          entryPrice={position.entry_price}
+                          slPrice={position.sl_price}
+                          tpPrice={position.tp_price}
+                        />
+                      </div>
+                    ) : null}
                   </article>
                 );
               })}
@@ -895,6 +1133,8 @@ export function DashboardPage() {
                 {!viewState.executions.length ? <div className="empty-card">No execution activity.</div> : [...viewState.executions].reverse().map((execution) => {
                   const key = executionKey(execution);
                   const selected = key === selectedExecutionKey;
+                  const pnlSummary = executionPnlROrPips(execution);
+                  const isClosed = execution.closed_at !== null && execution.closed_at !== undefined;
                   return (
                     <article
                       key={key}
@@ -902,19 +1142,37 @@ export function DashboardPage() {
                       data-execution-key={key}
                       onClick={() => setSelectedExecutionKey((current) => current === key ? null : key)}
                     >
-                      <div className="mini-head">
+                      <div className="mini-head" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                         <div className="mini-head-copy">
                           <strong>{execution.pair}</strong>
-                          <span className="pair-sub">{execution.direction} - {Number(execution.units || 0).toLocaleString()} units</span>
+                          {' '}
+                          <span className={badgeClass(execution.direction)}>{execution.direction}</span>
+                          {' '}
+                          <span className="pair-sub">{Number(execution.units || 0).toLocaleString()} units</span>
                         </div>
-                        <span className={badgeClass(execution.status)}>{execution.status}</span>
+                        <span className={execution.status === 'OPEN' ? 'pill pill-live' : badgeClass(execution.status)} style={execution.status === 'OPEN' ? {background:'#1f7a49',color:'#fff'} : undefined}>{execution.status}</span>
                       </div>
-                      <div className="mini-meta mini-meta-single">
-                        <div><span className="value-label">When / Order</span><span className="value">{formatTimestamp(execution.time)} - #{execution.order_id || '-'}</span></div>
+                      <div className="mini-meta" style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px 12px'}}>
+                        <div><span className="value-label">Entry</span><span className="value">{formatExecutionPrice(execution.submitted_entry_price ?? execution.opened_price, execution)}</span></div>
+                        <div><span className="value-label">SL</span><span className="value">{formatExecutionPrice(execution.submitted_sl_price, execution)}</span></div>
+                        <div><span className="value-label">TP</span><span className="value">{formatExecutionPrice(execution.submitted_tp_price, execution)}</span></div>
+                        {pnlSummary.value !== '\u2013' ? (
+                          <div><span className="value-label">P/L</span><span className={`value ${pnlSummary.isUp ? 'up' : 'down'}`}>{pnlSummary.value}</span></div>
+                        ) : null}
+                        {execution.pnl_amount != null ? (
+                          <div><span className="value-label">P/L £</span><span className={`value ${Number(execution.pnl_amount) >= 0 ? 'up' : 'down'}`}>{Number(execution.pnl_amount) >= 0 ? '+' : ''}{execution.account_currency || '\u00a3'}{Number(execution.pnl_amount).toFixed(2)}</span></div>
+                        ) : null}
+                        {isClosed && execution.closed_price !== null && execution.closed_price !== undefined ? (
+                          <div><span className="value-label">Close</span><span className="value">{formatExecutionPrice(execution.closed_price, execution)}</span></div>
+                        ) : null}
+                        {isClosed && execution.close_reason ? (
+                          <div><span className="value-label">Reason</span><span className="value">{execution.close_reason}</span></div>
+                        ) : null}
+                        <div style={{gridColumn:'1 / -1'}}><span className="value-label">When</span><span className="value">{formatTimestamp(execution.time)} · #{execution.order_id || '-'}</span></div>
                       </div>
-                      <div className="mini-note">{execution.note || '-'}</div>
                       {selected ? (
-                        <div className="mini-detail">
+                        <div className="mini-detail" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" onClick={() => setSelectedExecutionKey(null)} style={{float:'right',background:'none',border:'1px solid var(--line)',borderRadius:'4px',padding:'2px 8px',cursor:'pointer',fontSize:'0.75rem',color:'var(--muted)',marginBottom:'4px'}}>Close</button>
                           <div><span className="value-label">Ticker</span><span className="value">{execution.pair || '–'}</span></div>
                           <div><span className="value-label">Date</span><span className="value">{formatDateOnly(execution.time)}</span></div>
                           <div><span className="value-label">Entry</span><span className="value">{formatExecutionPrice(execution.submitted_entry_price, execution)}</span></div>

@@ -66,6 +66,15 @@ body::before {
   background: rgba(185, 87, 40, 0.05);
 }
 
+.trade-log-page .trade-log-row {
+  cursor: pointer;
+}
+
+.trade-log-page .trade-log-row-selected,
+.trade-log-page .trade-log-row-selected td {
+  background: rgba(185, 87, 40, 0.15);
+}
+
 .trade-log-page .status-SUBMITTED,
 .trade-log-page .status-OPEN {
   color: #58a6ff;
@@ -105,4 +114,30 @@ body::before {
 
 .trade-log-page .empty {
   padding: 18px 0 6px;
+}
+
+.trade-log-chart-panel {
+  margin-top: 16px;
+}
+
+.trade-log-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.trade-log-chart-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.trade-log-chart-frame {
+  width: 100%;
+  min-height: 640px;
+  height: 640px;
+  border: 1px solid #ddd0c5;
+  border-radius: 8px;
+  background: #fff;
 }

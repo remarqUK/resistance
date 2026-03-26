@@ -481,6 +481,7 @@ def run_live_dashboard(
     execute_orders: bool,
     strategy_label: Optional[str],
     client_id: Optional[int],
+    execution_mode: str = 'next_bar',
 ) -> None:
     """Run the in-place Rich dashboard loop without alternate-screen flicker."""
 
@@ -540,6 +541,7 @@ def run_live_dashboard(
                             account_currency=account_currency,
                             execute_orders=execute_orders,
                             capture_output=True,
+                            execution_mode=execution_mode,
                         )
                         _append_cycle_events(activity_log, snapshot, new_snapshot)
                         snapshot = new_snapshot

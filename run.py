@@ -76,6 +76,36 @@ def _requested_profile_name(args) -> str | None:
     return getattr(args, 'profile', None) or getattr(args, 'preset', None)
 
 
+def _build_backtest_run_config(
+    params: StrategyParams,
+    *,
+    hourly_days: int,
+    zone_history_days: int,
+    execution_mode: str = 'next_bar',
+    requested_profile: str | None = None,
+    starting_balance: float | None = None,
+    risk_pct: float | None = None,
+    selection_label: str | None = None,
+) -> str:
+    """Build a stable backtest cache signature, omitting default execution mode."""
+
+    run_config_kwargs = {
+        'requested_profile': requested_profile,
+        'starting_balance': starting_balance,
+        'risk_pct': risk_pct,
+        'selection_label': selection_label,
+    }
+    if execution_mode != 'next_bar':
+        run_config_kwargs['execution_mode'] = execution_mode
+
+    return build_backtest_run_config_json(
+        params,
+        hourly_days=hourly_days,
+        zone_history_days=zone_history_days,
+        **run_config_kwargs,
+    )
+
+
 def _add_ibkr_args(parser):
     parser.add_argument(
         '--ibkr-client-id',
@@ -281,6 +311,7 @@ def _run_backtests_until_target(
     zone_days: int,
     active_client_id: int,
     hourly_days: int,
+    execution_mode: str = 'next_bar',
     fetch_workers: int | None = None,
 ) -> tuple[
     dict[str, object],
@@ -319,11 +350,12 @@ def _run_backtests_until_target(
         print(f'    Active params: {_format_param_summary(attempt_params)}')
 
         t0 = time.time()
-        run_config_json = build_backtest_run_config_json(
+        run_config_json = _build_backtest_run_config(
             attempt_params,
             hourly_days=hourly_days,
             zone_history_days=zone_days,
             requested_profile=_requested_profile_name(args),
+            execution_mode=execution_mode,
             starting_balance=starting_balance,
             risk_pct=risk_pct,
             selection_label=label,
@@ -337,6 +369,7 @@ def _run_backtests_until_target(
             base_client_id=active_client_id,
             run_config_json=run_config_json,
             debug=bool(getattr(args, 'backtest_debug', False)),
+            execution_mode=execution_mode,
             fetch_workers=fetch_workers,
         )
         elapsed = time.time() - t0
@@ -677,8 +710,12 @@ def cmd_backtest(args):
     profile = get_profile(profile_name)
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
-    # Use last calendar year as the default zone history, unless explicitly overridden.
-    zone_days = 365 if args.zone_history is None else args.zone_history
+    # Use profile zone-history by default, unless explicitly overridden on CLI.
+    zone_days = (
+        profile.get('zone_history_days', DEFAULT_ZONE_HISTORY_DAYS)
+        if args.zone_history is None
+        else args.zone_history
+    )
     if args.days is None:
         args.days = profile.get('hourly_days', 30)
     # Use profile defaults for balance/risk-pct if not overridden on CLI
@@ -686,6 +723,7 @@ def cmd_backtest(args):
         args.balance = profile.get('starting_balance', None)
     if args.risk_pct is None:
         args.risk_pct = profile.get('risk_pct', 5.0)
+    execution_mode = getattr(args, 'execution_mode', 'next_bar')
 
     profile_name = _requested_profile_name(args)
     print(f"\n  IBKR client ID: {active_client_id}")
@@ -717,14 +755,16 @@ def cmd_backtest(args):
             zone_days=zone_days,
             active_client_id=active_client_id,
             hourly_days=args.days,
+            execution_mode=execution_mode,
             fetch_workers=getattr(args, 'fetch_workers', None),
         )
     else:
-        run_config_json = build_backtest_run_config_json(
+        run_config_json = _build_backtest_run_config(
             params,
             hourly_days=args.days,
             zone_history_days=zone_days,
             requested_profile=profile_name,
+            execution_mode=execution_mode,
             starting_balance=args.balance,
             risk_pct=args.risk_pct,
             selection_label='baseline',
@@ -737,6 +777,7 @@ def cmd_backtest(args):
             force_refresh=args.no_cache,
             base_client_id=active_client_id,
             run_config_json=run_config_json,
+            execution_mode=execution_mode,
             debug=bool(getattr(args, 'backtest_debug', False)),
             fetch_workers=getattr(args, 'fetch_workers', None),
         )
@@ -1360,6 +1401,7 @@ def cmd_live(args):
     pairs = _resolve_pairs(args.pair)
     zone_days = args.zone_history
     profile_name = _requested_profile_name(args)
+    execution_mode = getattr(args, 'execution_mode', 'next_bar')
     if args.risk_pct is None:
         args.risk_pct = get_profile(profile_name).get('risk_pct', 5.0)
 
@@ -1371,6 +1413,7 @@ def cmd_live(args):
     print(f"\n  IBKR client ID: {active_client_id}")
     print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
+    print(f"  Signal timing: {execution_mode}")
     live_balance, live_currency = _resolve_live_sizing(args)
     # Release the main-thread IBKR connection so worker threads in the web
     # app can reuse the same client_id without TWS rejecting them (Error 326).
@@ -1420,6 +1463,7 @@ def cmd_live(args):
             daily_data_cache=daily_data_cache,
             zone_cache=zone_cache,
             hourly_data_cache=hourly_data_cache,
+            execution_mode=execution_mode,
             portfolio_state=portfolio_state,
         )
         size_plans = build_live_size_plans(
@@ -1459,6 +1503,7 @@ def cmd_live(args):
                 account_currency=live_currency,
                 price_cache=market_prices,
                 hourly_data_cache=hourly_data_cache,
+                execution_mode=execution_mode,
             )
             record_execution_results(
                 signals, size_plans, execution_results,
@@ -1484,6 +1529,7 @@ def cmd_live(args):
         client_id=active_client_id,
         port=args.port,
         open_browser=not args.no_browser,
+        execution_mode=execution_mode,
     )
 
 
@@ -1562,7 +1608,7 @@ def main():
         '--zone-history',
         type=int,
         default=None,
-        help='Days of daily data for zone detection (default: 365)',
+        help='Days of daily data for zone detection (default: profile value, fallback 365)',
     )
     _add_ibkr_args(bt)
     _add_strategy_args(bt)
@@ -1571,6 +1617,12 @@ def main():
         '--no-cache',
         action='store_true',
         help='Compatibility flag only; backtests always run from cache and will fail fast if data is missing',
+    )
+    bt.add_argument(
+        '--execution-mode',
+        choices=('next_bar', 'intrabar'),
+        default='next_bar',
+        help='Execution timing mode for backtests: next_bar (default) or intrabar',
     )
     bt.add_argument(
         '--target-trades',
@@ -1672,6 +1724,12 @@ def main():
         '--no-browser',
         action='store_true',
         help='Start the live dashboard server without opening a browser',
+    )
+    lv.add_argument(
+        '--execution-mode',
+        choices=('next_bar', 'intrabar'),
+        default='next_bar',
+        help='Signal timing mode for live monitoring: next_bar or intrabar',
     )
 
     l2p = subparsers.add_parser('l2', help='Capture and inspect IBKR L2 market depth')

@@ -113,6 +113,7 @@ def _result(pair: str, trades: list[Trade]) -> BacktestResult:
         max_loss_pips=min((trade.pnl_pips for trade in trades), default=0.0),
         profit_factor=float('inf'),
         trades=trades,
+        pending_trades=[],
         zones=[],
     )
 

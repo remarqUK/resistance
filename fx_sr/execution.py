@@ -76,7 +76,10 @@ def quote_age_seconds(
         current_time = current_time.tz_localize('UTC')
     else:
         current_time = current_time.tz_convert('UTC')
-    return max((current_time - captured_at).total_seconds(), 0.0)
+    age_seconds = (current_time - captured_at).total_seconds()
+    if age_seconds < 0:
+        return float('inf')
+    return age_seconds
 
 
 def signal_zone_still_tradeable(signal: Signal, mid_price: float) -> bool:
@@ -204,7 +207,12 @@ def historical_execution_quote(
         submit_ts = submit_ts.tz_convert('UTC')
 
     if l2_snapshots is not None and not l2_snapshots.empty:
-        snapshots = l2_snapshots[l2_snapshots.index >= submit_ts]
+        max_l2_delay = max(float(params.max_submit_quote_age_seconds), 0.0)
+        latest_allowed_ts = submit_ts + pd.Timedelta(seconds=max_l2_delay)
+        snapshots = l2_snapshots[
+            (l2_snapshots.index >= submit_ts)
+            & (l2_snapshots.index <= latest_allowed_ts)
+        ]
         if not snapshots.empty:
             snapshot = snapshots.iloc[0]
             quote = ExecutionQuote(

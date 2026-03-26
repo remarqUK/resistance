@@ -55,6 +55,18 @@ EXECUTION_LIMIT = 200
 _BACKTEST_PROGRESS_RE = re.compile(r'^\s*\[(\d+)\s*/\s*(\d+)\]\s+([A-Za-z0-9]+)')
 
 
+def _normalize_execution_mode(mode: str | None) -> str:
+    return mode if mode in {'next_bar', 'intrabar'} else 'next_bar'
+
+
+def _execution_mode_label(mode: str) -> str:
+    return (
+        'Intrabar (minute bars)'
+        if mode == 'intrabar'
+        else 'Next-bar (completed hourly)'
+    )
+
+
 def _configure_windows_event_loop_policy() -> None:
     """Use the selector loop for aiohttp on Windows to avoid Proactor reset noise."""
 
@@ -87,6 +99,7 @@ class LiveDashboardHub:
         strategy_label: str | None,
         client_id: int | None,
         port: int,
+        execution_mode: str = 'next_bar',
     ) -> None:
         self.pairs = pairs
         self.params = params
@@ -101,6 +114,7 @@ class LiveDashboardHub:
         self.strategy_label = strategy_label
         self.client_id = client_id
         self.port = port
+        self.execution_mode = _normalize_execution_mode(execution_mode)
 
         self._pair_rows: dict[str, PairScanRow] = {}
         self._tracked: dict[str, dict] = {}
@@ -187,6 +201,8 @@ class LiveDashboardHub:
             'execution_enabled': self._execution_enabled(),
             'execution_available': self._execution_available,
             'execution_paused': self._execution_paused,
+            'execution_mode': self.execution_mode,
+            'execution_mode_label': _execution_mode_label(self.execution_mode),
             'strategy_label': self.strategy_label or 'Strategy',
             'mode': 'scanner + positions' if self.track_positions else 'scanner',
             'url': self._ws_url(),
@@ -283,6 +299,7 @@ class LiveDashboardHub:
             blocked_pairs=blocked_pairs,
             price_cache={pair: price},
             hourly_data_cache={self.pairs[pair]['ticker']: hourly_df},
+            execution_mode=self.execution_mode,
             portfolio_state=self._portfolio_state,
         )
         return (
@@ -1036,6 +1053,20 @@ class LiveDashboardHub:
             f"{alert['pair']}:{alert['direction']}": alert['exit_reason']
             for alert in self._alerts
         }
+        from .sizing import split_pair, convert_currency
+        account_currency = (self.account_currency or 'GBP').upper()
+
+        def _price_lookup(pair_id: str):
+            # Try live quotes first, then fall back to last known bar close
+            price = self._last_quotes.get(pair_id)
+            if price is not None:
+                return price
+            # Fallback: last hourly bar close from accumulator
+            df = self._accumulator.get_hourly_df(pair_id, tail_n=1)
+            if df is not None and not df.empty:
+                return float(df['Close'].iloc[-1])
+            return None
+
         rows: list[dict] = []
         for key in sorted(self._tracked):
             info = self._tracked[key]
@@ -1045,14 +1076,35 @@ class LiveDashboardHub:
             status = alert_lookup.get(key)
             if status is None:
                 status = 'PARTIAL' if info.get('signal_status') == 'PARTIAL' else 'OK'
+
+            size = int(abs(info.get('ibkr_size') or 0))
+            current_price = snap.get('current_price')
+            pnl_amount = None
+            if current_price is not None and size > 0:
+                _, quote = split_pair(pair)
+                if trade.direction == 'LONG':
+                    pnl_quote = (float(current_price) - float(trade.entry_price)) * size
+                else:
+                    pnl_quote = (float(trade.entry_price) - float(current_price)) * size
+                pnl_account = convert_currency(
+                    abs(pnl_quote), from_currency=quote,
+                    to_currency=account_currency, price_lookup=_price_lookup,
+                )
+                if pnl_account is not None:
+                    pnl_amount = round(pnl_account if pnl_quote >= 0 else -pnl_account, 2)
+
             rows.append(
                 {
                     'pair': pair,
                     'direction': trade.direction,
-                    'size': int(abs(info.get('ibkr_size') or 0)),
+                    'size': size,
                     'entry_price': trade.entry_price,
-                    'current_price': snap.get('current_price'),
+                    'sl_price': trade.sl_price,
+                    'tp_price': trade.tp_price,
+                    'current_price': current_price,
                     'pnl_pips': snap.get('pnl_pips'),
+                    'pnl_amount': pnl_amount,
+                    'account_currency': account_currency,
                     'status': status,
                     'decimals': self.pairs.get(pair, {}).get('decimals', 5),
                 }
@@ -1075,25 +1127,55 @@ class LiveDashboardHub:
     def _serialize_executions(self) -> list[dict]:
         """Serialize execution results."""
 
-        return [
-            {
-                'pair': result.pair,
-                'direction': result.direction,
-                'units': result.units,
-                'status': result.status,
-                'order_id': result.order_id,
-                'submitted_entry_price': result.submitted_entry_price,
-                'submitted_tp_price': result.submitted_tp_price,
-                'submitted_sl_price': result.submitted_sl_price,
-                'time': (
-                    pd.Timestamp(result.quote_time).isoformat()
-                    if result.quote_time is not None
-                    else None
-                ),
-                'note': result.note,
-            }
-            for result in self._execution_results
-        ]
+        rows = []
+        for result in self._execution_results:
+            risk_pips = None
+            if (
+                result.submitted_entry_price is not None
+                and result.submitted_sl_price is not None
+            ):
+                pip = pair_pip(result.pair)
+                if pip > 0:
+                    risk_pips = abs(result.submitted_entry_price - result.submitted_sl_price) / pip
+
+            pnl_r = None
+            if risk_pips and risk_pips > 0 and result.pnl_pips is not None:
+                try:
+                    pnl_r = float(result.pnl_pips) / risk_pips
+                except (TypeError, ValueError):
+                    pnl_r = None
+
+            rows.append(
+                {
+                    'pair': result.pair,
+                    'direction': result.direction,
+                    'units': result.units,
+                    'status': result.status,
+                    'order_id': result.order_id,
+                    'submitted_entry_price': result.submitted_entry_price,
+                    'submitted_tp_price': result.submitted_tp_price,
+                    'submitted_sl_price': result.submitted_sl_price,
+                    'time': (
+                        pd.Timestamp(result.quote_time).isoformat()
+                        if result.quote_time is not None
+                        else None
+                    ),
+                    'note': result.note,
+                    'pnl_pips': result.pnl_pips,
+                    'pnl_r': pnl_r,
+                    'pnl_amount': round(float(getattr(result, 'risk_amount', 0) or 0) * pnl_r, 2) if pnl_r is not None and getattr(result, 'risk_amount', None) else None,
+                    'risk_amount': getattr(result, 'risk_amount', None),
+                    'account_currency': getattr(result, 'account_currency', None) or self.account_currency or 'GBP',
+                    'closed_price': result.closed_price,
+                    'closed_at': (
+                        pd.Timestamp(result.closed_at).isoformat()
+                        if result.closed_at is not None
+                        else None
+                    ),
+                    'close_reason': result.close_reason,
+                }
+            )
+        return rows
 
     def _hydrate_execution_activity(self) -> None:
         """Restore recent execution activity from the detected-signal history table."""
@@ -1179,9 +1261,29 @@ class LiveDashboardHub:
                         if row.get('submit_spread') is not None
                         else None
                     ),
+                    pnl_pips=(
+                        float(row['pnl_pips'])
+                        if row.get('pnl_pips') is not None
+                        else None
+                    ),
+                    closed_price=(
+                        float(row['closed_price'])
+                        if row.get('closed_price') is not None
+                        else None
+                    ),
                     quote_source=(
                         str(row.get('quote_source'))
                         if row.get('quote_source') is not None
+                        else None
+                    ),
+                    close_reason=(
+                        str(row.get('close_reason'))
+                        if row.get('close_reason') is not None
+                        else None
+                    ),
+                    closed_at=(
+                        pd.Timestamp(row['closed_at'])
+                        if row.get('closed_at') is not None
                         else None
                     ),
                     quote_time=(
@@ -1448,6 +1550,7 @@ class LiveDashboardHub:
                     risk_pct=risk_pct,
                     account_currency=account_currency,
                     price_cache=price_cache,
+                    execution_mode=self.execution_mode,
                 )
                 record_execution_results(
                     [signal], size_plans, execution_results,
@@ -1746,6 +1849,7 @@ class LiveDashboardHub:
             params=self.params,
             zone_history_days=self.zone_history_days,
             hourly_data_cache=hourly_cache,
+            execution_mode=self.execution_mode,
             portfolio_state=portfolio_state,
         )
         return signals, pair_rows, closed_trades
@@ -1993,6 +2097,17 @@ async def _chart_page(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(WEB_DIR / 'chart_live.html')
 
 
+
+async def _live_diary_api(_request: web.Request) -> web.Response:
+    """Return live trades for the diary calendar."""
+
+    from .live_history import load_live_diary_trades
+
+    trades = load_live_diary_trades()
+    return web.json_response({'trades': trades})
+
+
+
 def _spa_index_response() -> web.StreamResponse:
     """Serve the built React shell or fail with a clear build instruction."""
 
@@ -2186,6 +2301,32 @@ def _register_fill_route(app: web.Application, handler: object) -> None:
         app.router.add_route('POST', route, handler)
 
 
+async def _rebuild_ui(request: web.Request) -> web.Response:
+    """Run npm build to rebuild the React frontend."""
+
+    import subprocess
+    _validate_dashboard_request(request)
+
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        result = subprocess.run(
+            ['npm', 'run', 'build'],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            shell=True,
+        )
+        if result.returncode != 0:
+            return web.json_response({
+                'status': 'error',
+                'message': result.stderr or result.stdout or 'Build failed',
+            }, status=500)
+        return web.json_response({'status': 'ok', 'message': 'React build complete. Hard-refresh your browser.'})
+    except Exception as e:
+        return web.json_response({'status': 'error', 'message': str(e)}, status=500)
+
+
 async def _shutdown(request: web.Request) -> web.Response:
     """Gracefully shut down the live dashboard server."""
 
@@ -2204,6 +2345,34 @@ async def _shutdown(request: web.Request) -> web.Response:
 
     asyncio.ensure_future(_do_shutdown())
     return web.json_response({'status': 'shutting down'})
+
+
+async def _restart(request: web.Request) -> web.Response:
+    """Restart the live dashboard server process."""
+
+    import os
+    import sys
+    _validate_dashboard_request(request)
+
+    hub: LiveDashboardHub = request.app["hub"]
+
+    async def _do_restart():
+        await asyncio.sleep(0.5)
+        try:
+            await hub.stop()
+        except Exception:
+            pass
+        # On Windows, os.execv spawns a new process rather than replacing,
+        # so use subprocess + _exit to avoid port conflicts.
+        if sys.platform == 'win32':
+            import subprocess
+            subprocess.Popen([sys.executable] + sys.argv)
+            os._exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    asyncio.ensure_future(_do_restart())
+    return web.json_response({'status': 'restarting'})
 
 
 async def _websocket(request: web.Request) -> web.StreamResponse:
@@ -2226,12 +2395,28 @@ async def _websocket(request: web.Request) -> web.StreamResponse:
 async def _startup(app: web.Application) -> None:
     """Start background services when aiohttp comes up."""
 
-    await app["hub"].start()
+    # Launch hub startup (backfill + streaming) as a background task so the
+    # web server can serve pages immediately while data loads.
+    async def _hub_start_with_logging():
+        try:
+            await app["hub"].start()
+        except Exception as exc:
+            import traceback
+            print(f"  Hub startup failed: {exc}")
+            traceback.print_exc()
+    app["_hub_task"] = asyncio.create_task(_hub_start_with_logging())
 
 
 async def _cleanup(app: web.Application) -> None:
     """Stop background services during shutdown."""
 
+    hub_task = app.get("_hub_task")
+    if hub_task and not hub_task.done():
+        hub_task.cancel()
+        try:
+            await hub_task
+        except (asyncio.CancelledError, Exception):
+            pass
     await app["hub"].stop()
 
 
@@ -2250,6 +2435,7 @@ def run_live_web_app(
     client_id: int | None,
     port: int,
     open_browser: bool,
+    execution_mode: str,
 ) -> None:
     """Run the browser-based live dashboard server."""
 
@@ -2268,6 +2454,7 @@ def run_live_web_app(
         strategy_label=strategy_label,
         client_id=client_id,
         port=port,
+        execution_mode=execution_mode,
     )
     from .replay import handle_replay, handle_replay_bars, handle_replay_dates, handle_replay_refresh, handle_replay_presets
     from .replay import (
@@ -2278,6 +2465,7 @@ def run_live_web_app(
         handle_trade_log_api,
     )
 
+    app.router.add_post('/api/rebuild-ui', _rebuild_ui)
     app.router.add_get('/', _index)
     app.router.add_get('/ws', _websocket)
     app.router.add_get('/chart', _chart_page)
@@ -2285,15 +2473,19 @@ def run_live_web_app(
     app.router.add_post('/api/execution-mode', _set_execution_mode)
     _register_fill_route(app, _fill_cache)
     app.router.add_post('/api/shutdown', _shutdown)
+    app.router.add_post('/api/restart', _restart)
     app.router.add_post('/api/backtest-rerun', _rerun_backtest)
     app.router.add_post('/backtest-rerun', _rerun_backtest)
     app.router.add_post('/api/backtest-rerun/', _rerun_backtest)
     app.router.add_post('/backtest-rerun/', _rerun_backtest)
     app.router.add_get('/replay', _index)
-    app.router.add_get('/backtest-trades', handle_backtest_trades_page)
+    app.router.add_get('/backtest-trades', _index)
     app.router.add_get('/api/backtest/trades', handle_backtest_trades_api)
-    app.router.add_get('/backtest-diary', handle_backtest_diary_page)
+    app.router.add_get('/backtest-diary', _index)
     app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)
+    app.router.add_get('/live-diary', _index)
+    app.router.add_get('/live-trade', _index)
+    app.router.add_get('/api/live-diary', _live_diary_api)
     app.router.add_get('/trade-log', _index)
     app.router.add_get('/api/trade-log', handle_trade_log_api)
     app.router.add_get('/api/replay', handle_replay)

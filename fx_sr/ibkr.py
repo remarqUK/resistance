@@ -1720,8 +1720,32 @@ def submit_fx_market_bracket_order(
             parent_trade = ib.placeOrder(contract, parent)
             tp_trade = ib.placeOrder(contract, take_profit)
             sl_trade = ib.placeOrder(contract, stop_loss)
-            if hasattr(ib, 'sleep'):
-                ib.sleep(1)
+
+            # Wait up to 5 seconds for the market order to fill
+            fill_timeout = 5
+            for _ in range(fill_timeout):
+                if hasattr(ib, 'sleep'):
+                    ib.sleep(1)
+                parent_status = getattr(parent_trade, 'orderStatus', None)
+                status_str = getattr(parent_status, 'status', '') or ''
+                if status_str in ('Filled', 'Cancelled', 'Inactive', 'ApiCancelled'):
+                    break
+
+            # If the market order didn't fill, cancel the entire bracket
+            parent_status = getattr(parent_trade, 'orderStatus', None)
+            status_str = getattr(parent_status, 'status', '') or ''
+            filled = float(getattr(parent_status, 'filled', 0) or 0)
+            if status_str not in ('Filled',) and filled <= 0:
+                print(f"    Warning: {pair} market order not filled after {fill_timeout}s "
+                      f"(status={status_str}), cancelling bracket")
+                try:
+                    for _trade_obj in (parent_trade, tp_trade, sl_trade):
+                        ib.cancelOrder(getattr(_trade_obj, 'order', _trade_obj))
+                    if hasattr(ib, 'sleep'):
+                        ib.sleep(1)
+                except Exception:
+                    pass
+                return None
 
             parent_live_order = getattr(parent_trade, 'order', None)
             parent_status = getattr(parent_trade, 'orderStatus', None)

@@ -56,17 +56,17 @@
       const container = document.getElementById('chart-container');
       chart = LightweightCharts.createChart(container, {
         layout: {
-          background: { type: 'solid', color: '#1a1510' },
-          textColor: '#a69882',
+          background: { type: 'solid', color: '#fffaf2' },
+          textColor: '#5b4b3a',
         },
         grid: {
-          vertLines: { color: 'rgba(166, 152, 130, 0.08)' },
-          horzLines: { color: 'rgba(166, 152, 130, 0.08)' },
+          vertLines: { color: 'rgba(91, 75, 58, 0.08)' },
+          horzLines: { color: 'rgba(91, 75, 58, 0.08)' },
         },
         crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: 'rgba(166, 152, 130, 0.2)' },
+        rightPriceScale: { borderColor: 'rgba(91, 75, 58, 0.18)' },
         timeScale: {
-          borderColor: 'rgba(166, 152, 130, 0.2)',
+          borderColor: 'rgba(91, 75, 58, 0.18)',
           timeVisible: true,
           secondsVisible: false,
         },
@@ -363,6 +363,108 @@
       }
     }
 
+    // Trade overlay from URL params (linked from live diary)
+    const tradeOverlay = {
+      entryPrice: parseFloat(params.get('entry_price')) || null,
+      entryTime: params.get('entry_time') || null,
+      exitPrice: parseFloat(params.get('exit_price')) || null,
+      exitTime: params.get('exit_time') || null,
+      sl: parseFloat(params.get('sl')) || null,
+      tp: parseFloat(params.get('tp')) || null,
+      direction: params.get('direction') || null,
+    };
+
+    function addTradeOverlay() {
+      if (!tradeOverlay.entryPrice || !candleSeries) return;
+      const dir = (tradeOverlay.direction || '').toUpperCase();
+      const isLong = dir === 'LONG';
+
+      // Entry marker
+      const markers = [];
+      if (tradeOverlay.entryTime) {
+        const entryTs = Math.floor(new Date(tradeOverlay.entryTime).getTime() / 1000);
+        markers.push({
+          time: entryTs,
+          position: isLong ? 'belowBar' : 'aboveBar',
+          color: isLong ? '#1f7a49' : '#b23b29',
+          shape: isLong ? 'arrowUp' : 'arrowDown',
+          text: `${dir} @ ${tradeOverlay.entryPrice.toFixed(decimals)}`,
+        });
+      }
+
+      // Exit marker
+      if (tradeOverlay.exitTime && tradeOverlay.exitPrice) {
+        const exitTs = Math.floor(new Date(tradeOverlay.exitTime).getTime() / 1000);
+        markers.push({
+          time: exitTs,
+          position: isLong ? 'aboveBar' : 'belowBar',
+          color: '#d4a017',
+          shape: 'circle',
+          text: `Exit @ ${tradeOverlay.exitPrice.toFixed(decimals)}`,
+        });
+      }
+
+      if (markers.length) {
+        markers.sort((a, b) => a.time - b.time);
+        candleSeries.setMarkers(markers);
+      }
+
+      // SL / TP price lines
+      if (tradeOverlay.sl) {
+        candleSeries.createPriceLine({
+          price: tradeOverlay.sl,
+          color: '#b23b29',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'SL',
+        });
+      }
+      if (tradeOverlay.tp) {
+        candleSeries.createPriceLine({
+          price: tradeOverlay.tp,
+          color: '#1f7a49',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: 'TP',
+        });
+      }
+      // Entry price line
+      candleSeries.createPriceLine({
+        price: tradeOverlay.entryPrice,
+        color: '#d4a017',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: 'Entry',
+      });
+
+      // Update header with trade info
+      const pnlText = tradeOverlay.exitPrice
+        ? (() => {
+            const dist = isLong
+              ? tradeOverlay.exitPrice - tradeOverlay.entryPrice
+              : tradeOverlay.entryPrice - tradeOverlay.exitPrice;
+            const risk = Math.abs(tradeOverlay.entryPrice - (tradeOverlay.sl || tradeOverlay.entryPrice));
+            const r = risk > 0 ? (dist / risk).toFixed(2) : '?';
+            return ` | ${dist > 0 ? '+' : ''}${r}R`;
+          })()
+        : '';
+      document.getElementById('zone-info').innerHTML +=
+        ` <span style="color:#d4a017;font-weight:600">${dir} @ ${tradeOverlay.entryPrice.toFixed(decimals)}${pnlText}</span>`;
+
+      // Scroll chart to entry time
+      if (tradeOverlay.entryTime) {
+        const entryTs = Math.floor(new Date(tradeOverlay.entryTime).getTime() / 1000);
+        const padding = 12 * 3600;
+        chart.timeScale().setVisibleRange({
+          from: entryTs - padding,
+          to: entryTs + padding,
+        });
+      }
+    }
+
     // Init
     initChart();
     loadChartData().then(() => {
@@ -372,6 +474,7 @@
         lastBarTime = last.time;
         currentBar = { open: last.open, high: last.high, low: last.low, close: last.close };
       }
+      addTradeOverlay();
     });
     connectWs();
   </script>

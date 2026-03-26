@@ -1622,8 +1622,8 @@ def main():
     bt.add_argument(
         '--execution-mode',
         choices=('next_bar', 'intrabar'),
-        default='next_bar',
-        help='Execution timing mode for backtests: intrabar (default) or next_bar',
+        default=None,
+        help='Execution timing mode for backtests (default: from profile, typically intrabar)',
     )
     bt.add_argument(
         '--target-trades',
@@ -1729,8 +1729,8 @@ def main():
     lv.add_argument(
         '--execution-mode',
         choices=('next_bar', 'intrabar'),
-        default='next_bar',
-        help='Signal timing mode for live monitoring: next_bar or intrabar',
+        default=None,
+        help='Signal timing mode (default: from profile, typically intrabar)',
     )
 
     l2p = subparsers.add_parser('l2', help='Capture and inspect IBKR L2 market depth')

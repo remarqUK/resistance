@@ -22,6 +22,7 @@ from .live_history import (
     reconcile_detected_signal_orders,
     record_detected_signals,
     record_execution_results,
+    record_pair_scan_log,
 )
 from .portfolio import (
     CorrelationExposure,
@@ -1757,6 +1758,8 @@ def run_monitor_cycle(
             execution_mode=execution_mode,
             portfolio_state=portfolio_state,
         )
+
+        record_pair_scan_log(pair_rows)
 
         size_plans = build_live_size_plans(
             signals,

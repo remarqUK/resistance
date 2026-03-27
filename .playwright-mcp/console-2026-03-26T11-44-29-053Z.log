@@ -1,0 +1,8 @@
+[  474125ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[  750972ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[  754507ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[ 1250899ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[ 1254436ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[ 1257962ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[ 1261497ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71
+[ 1265043ms] [ERROR] WebSocket connection to 'ws://127.0.0.1:8765/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:8765/static/react/assets/index-sb-3QSJ3.js:71

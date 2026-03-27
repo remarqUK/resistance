@@ -1,0 +1,68 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.8.2
+2 info using node@v20.19.1
+3 silly config load:file:C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\npmrc
+4 silly config load:file:H:\source\repos\Resistance\.npmrc
+5 silly config load:file:C:\Users\mouse\.npmrc
+6 silly config load:file:C:\Program Files\nodejs\etc\npmrc
+7 verbose title npm exec playwright-cli --help
+8 verbose argv "exec" "--yes" "--package" "@playwright/cli" "--" "playwright-cli" "--help"
+9 verbose logfile logs-max:10 dir:H:\source\repos\Resistance\tmp\npm-cache\_logs\2026-03-26T07_56_51_372Z-
+10 verbose logfile H:\source\repos\Resistance\tmp\npm-cache\_logs\2026-03-26T07_56_51_372Z-debug-0.log
+11 silly packumentCache heap:4345298944 maxSize:1086324736 maxEntrySize:543162368
+12 silly logfile done cleaning log files
+13 http fetch GET 200 https://registry.npmjs.org/npm 208ms
+14 http fetch GET 200 https://registry.npmjs.org/@playwright%2fcli 221ms (cache miss)
+15 verbose type system
+16 verbose stack FetchError: Invalid response body while trying to fetch https://registry.npmjs.org/@playwright%2fcli: EPERM: operation not permitted, unlink 'H:\source\repos\Resistance\tmp\npm-cache\_cacache\tmp\0eebc1ba'
+16 verbose stack     at C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\minipass-fetch\lib\body.js:170:15
+16 verbose stack     at async Response.json (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\minipass-fetch\lib\body.js:75:17)
+16 verbose stack     at async RegistryFetcher.packument (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\pacote\lib\registry.js:98:25)
+16 verbose stack     at async RegistryFetcher.manifest (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\pacote\lib\registry.js:128:23)
+16 verbose stack     at async getManifest (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:27:22)
+16 verbose stack     at async missingFromTree (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:60:22)
+16 verbose stack     at async C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:182:32
+16 verbose stack     at async Promise.all (index 0)
+16 verbose stack     at async exec (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:180:3)
+16 verbose stack     at async Npm.exec (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\lib\npm.js:207:9)
+17 error code EPERM
+18 error syscall unlink
+19 error path H:\source\repos\Resistance\tmp\npm-cache\_cacache\tmp\0eebc1ba
+20 error errno EPERM
+21 error FetchError: Invalid response body while trying to fetch https://registry.npmjs.org/@playwright%2fcli: EPERM: operation not permitted, unlink 'H:\source\repos\Resistance\tmp\npm-cache\_cacache\tmp\0eebc1ba'
+21 error     at C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\minipass-fetch\lib\body.js:170:15
+21 error     at async Response.json (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\minipass-fetch\lib\body.js:75:17)
+21 error     at async RegistryFetcher.packument (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\pacote\lib\registry.js:98:25)
+21 error     at async RegistryFetcher.manifest (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\pacote\lib\registry.js:128:23)
+21 error     at async getManifest (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:27:22)
+21 error     at async missingFromTree (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:60:22)
+21 error     at async C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:182:32
+21 error     at async Promise.all (index 0)
+21 error     at async exec (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\node_modules\libnpmexec\lib\index.js:180:3)
+21 error     at async Npm.exec (C:\Users\mouse\AppData\Roaming\nvm\v20.19.1\node_modules\npm\lib\npm.js:207:9) {
+21 error   code: 'EPERM',
+21 error   errno: 'EPERM',
+21 error   syscall: 'unlink',
+21 error   path: 'H:\\source\\repos\\Resistance\\tmp\\npm-cache\\_cacache\\tmp\\0eebc1ba',
+21 error   type: 'system'
+21 error }
+22 error
+22 error The operation was rejected by your operating system.
+22 error It's possible that the file was already in use (by a text editor or antivirus),
+22 error or that you lack permissions to access it.
+22 error
+22 error If you believe this might be a permissions issue, please double-check the
+22 error permissions of the file and its containing directories, or try running
+22 error the command again as root/Administrator.
+23 verbose cwd H:\source\repos\Resistance
+24 verbose os Windows_NT 10.0.26100
+25 verbose node v20.19.1
+26 verbose npm  v10.8.2
+27 notice
+27 notice New major version of npm available! 10.8.2 -> 11.12.0
+27 notice Changelog: https://github.com/npm/cli/releases/tag/v11.12.0
+27 notice To update run: npm install -g npm@11.12.0
+27 notice  { force: true, [Symbol(proc-log.meta)]: true }
+28 verbose exit 1
+29 verbose code 1
+30 error A complete log of this run can be found in: H:\source\repos\Resistance\tmp\npm-cache\_logs\2026-03-26T07_56_51_372Z-debug-0.log

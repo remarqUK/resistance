@@ -32,6 +32,7 @@ from .live import (
 )
 from .live_history import (
     enqueue_write_async,
+    load_detected_signal,
     load_execution_activity,
     record_detected_signals,
     record_exit_signal,
@@ -1139,10 +1140,24 @@ class LiveDashboardHub:
                 if pip > 0:
                     risk_pips = abs(result.submitted_entry_price - result.submitted_sl_price) / pip
 
+            pnl_pips = result.pnl_pips
+            if pnl_pips is None and result.closed_price is not None:
+                direction = result.direction.upper()
+                if result.submitted_entry_price is not None:
+                    pip = pair_pip(result.pair)
+                    if pip > 0:
+                        try:
+                            if direction == 'LONG':
+                                pnl_pips = (float(result.closed_price) - float(result.submitted_entry_price)) / pip
+                            else:
+                                pnl_pips = (float(result.submitted_entry_price) - float(result.closed_price)) / pip
+                        except (TypeError, ValueError):
+                            pnl_pips = None
+
             pnl_r = None
-            if risk_pips and risk_pips > 0 and result.pnl_pips is not None:
+            if risk_pips and risk_pips > 0 and (pnl_pips is not None):
                 try:
-                    pnl_r = float(result.pnl_pips) / risk_pips
+                    pnl_r = float(pnl_pips) / risk_pips
                 except (TypeError, ValueError):
                     pnl_r = None
 
@@ -1162,7 +1177,7 @@ class LiveDashboardHub:
                         else None
                     ),
                     'note': result.note,
-                    'pnl_pips': result.pnl_pips,
+                    'pnl_pips': pnl_pips,
                     'pnl_r': pnl_r,
                     'pnl_amount': round(float(getattr(result, 'risk_amount', 0) or 0) * pnl_r, 2) if pnl_r is not None and getattr(result, 'risk_amount', None) else None,
                     'risk_amount': getattr(result, 'risk_amount', None),
@@ -1177,6 +1192,128 @@ class LiveDashboardHub:
                 }
             )
         return rows
+
+    @staticmethod
+    def _as_float(value) -> float | None:
+        if value is None or value == '':
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _as_int(value) -> int | None:
+        if value is None or value == '':
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _build_closed_execution_result(self, closed_row: dict) -> ExecutionResult | None:
+        pair = str(closed_row.get('pair') or '').upper()
+        direction = str(closed_row.get('direction') or '').upper()
+        if not pair or direction not in {'LONG', 'SHORT'}:
+            return None
+
+        units = self._as_int(closed_row.get('open_units'))
+        if units is None:
+            units = self._as_int(closed_row.get('planned_units')) or 0
+        if units < 0:
+            units = abs(units)
+
+        return ExecutionResult(
+            pair=pair,
+            direction=direction,
+            units=units,
+            status='CLOSED',
+            order_id=self._as_int(closed_row.get('order_id')),
+            take_profit_order_id=self._as_int(closed_row.get('take_profit_order_id')),
+            stop_loss_order_id=self._as_int(closed_row.get('stop_loss_order_id')),
+            avg_fill_price=self._as_float(closed_row.get('opened_price')),
+            remaining_units=0,
+            broker_status=closed_row.get('broker_order_status'),
+            submitted_entry_price=self._as_float(
+                closed_row.get('submitted_entry_price')
+                if closed_row.get('submitted_entry_price') is not None
+                else closed_row.get('entry_price'),
+            ),
+            submitted_tp_price=self._as_float(closed_row.get('submitted_tp_price')),
+            submitted_sl_price=self._as_float(
+                closed_row.get('submitted_sl_price')
+                if closed_row.get('submitted_sl_price') is not None
+                else closed_row.get('sl_price'),
+            ),
+            quote_time=(
+                pd.Timestamp(closed_row['closed_at'])
+                if closed_row.get('closed_at') is not None
+                else pd.Timestamp.now('UTC')
+            ),
+            pnl_pips=self._as_float(closed_row.get('pnl_pips')),
+            closed_price=self._as_float(closed_row.get('closed_price')),
+            closed_at=(
+                pd.Timestamp(closed_row['closed_at'])
+                if closed_row.get('closed_at') is not None
+                else None
+            ),
+            close_reason=str(closed_row.get('close_reason') or closed_row.get('close_source') or ''),
+            note=str(closed_row.get('note') or ''),
+        )
+
+    def _append_or_merge_execution_result(self, result: ExecutionResult) -> None:
+        open_statuses = {'SUBMITTED', 'PRESUBMITTED', 'PARTIAL', 'OPEN', 'FILLED'}
+        for idx in range(len(self._execution_results) - 1, -1, -1):
+            existing = self._execution_results[idx]
+            if existing.pair != result.pair or existing.direction != result.direction:
+                continue
+            if existing.status in open_statuses or existing.status == 'EXIT_SIGNAL':
+                if result.status == 'CLOSED':
+                    self._execution_results[idx] = replace(
+                        existing,
+                        status=result.status,
+                        order_id=result.order_id or existing.order_id,
+                        take_profit_order_id=result.take_profit_order_id or existing.take_profit_order_id,
+                        stop_loss_order_id=result.stop_loss_order_id or existing.stop_loss_order_id,
+                        avg_fill_price=result.avg_fill_price or existing.avg_fill_price,
+                        broker_status=result.broker_status or existing.broker_status,
+                        submitted_entry_price=result.submitted_entry_price or existing.submitted_entry_price,
+                        submitted_tp_price=result.submitted_tp_price or existing.submitted_tp_price,
+                        submitted_sl_price=result.submitted_sl_price or existing.submitted_sl_price,
+                        quote_time=result.quote_time or existing.quote_time,
+                        pnl_pips=result.pnl_pips if result.pnl_pips is not None else existing.pnl_pips,
+                        closed_price=result.closed_price if result.closed_price is not None else existing.closed_price,
+                        closed_at=result.closed_at or existing.closed_at,
+                        close_reason=result.close_reason or existing.close_reason,
+                        note=result.note or existing.note,
+                    )
+                    return
+            if result.order_id is not None and existing.order_id == result.order_id:
+                self._execution_results[idx] = replace(
+                    existing,
+                    status=result.status,
+                    order_id=result.order_id,
+                    take_profit_order_id=result.take_profit_order_id or existing.take_profit_order_id,
+                    stop_loss_order_id=result.stop_loss_order_id or existing.stop_loss_order_id,
+                    avg_fill_price=result.avg_fill_price or existing.avg_fill_price,
+                    remaining_units=result.remaining_units or existing.remaining_units,
+                    broker_status=result.broker_status or existing.broker_status,
+                    submitted_entry_price=result.submitted_entry_price or existing.submitted_entry_price,
+                    submitted_tp_price=result.submitted_tp_price or existing.submitted_tp_price,
+                    submitted_sl_price=result.submitted_sl_price or existing.submitted_sl_price,
+                    quote_time=result.quote_time or existing.quote_time,
+                    pnl_pips=result.pnl_pips if result.pnl_pips is not None else existing.pnl_pips,
+                    closed_price=result.closed_price if result.closed_price is not None else existing.closed_price,
+                    closed_at=result.closed_at or existing.closed_at,
+                    close_reason=result.close_reason or existing.close_reason,
+                    note=result.note or existing.note,
+                )
+                return
+
+            if existing.status == 'CLOSED':
+                break
+
+        self._execution_results.append(result)
 
     def _hydrate_execution_activity(self) -> None:
         """Restore recent execution activity from the detected-signal history table."""
@@ -1360,6 +1497,170 @@ class LiveDashboardHub:
 
         for ws in stale:
             self._clients.discard(ws)
+
+    async def close_tracked_position(self, *, pair: str, direction: str) -> dict:
+        """Submit a closing market order for a tracked position."""
+
+        pair = str(pair).strip().upper()
+        direction = str(direction).strip().upper()
+        if direction not in {'LONG', 'SHORT'}:
+            raise ValueError('Direction must be LONG or SHORT.')
+
+        position_key = f'{pair}:{direction}'
+        async with self._lock:
+            if not self._execution_available:
+                raise RuntimeError('Execution is unavailable in scan-only mode.')
+            if not self._execution_enabled():
+                raise RuntimeError('Execution is currently paused.')
+            if self._loop is None:
+                raise RuntimeError('Dashboard loop not initialized.')
+            info = self._tracked.get(position_key)
+            if info is None:
+                raise LookupError(f'No tracked position found for {pair} {direction}.')
+            size = int(abs(float(info.get('ibkr_size') or 0.0)))
+            if size <= 0:
+                raise RuntimeError('Tracked position has no executable size.')
+
+            close_direction = 'SHORT' if direction == 'LONG' else 'LONG'
+            trade = info['trade']
+            order_ref = f'fxsr:close:{pair}:{direction}:{int(datetime.now().timestamp() * 1000)}'
+
+            # Collect bracket child order IDs so we can cancel them after the close
+            bracket_child_ids: set[int] = set()
+            signal_id = info.get('signal_id')
+            if signal_id:
+                signal_row = load_detected_signal(signal_id)
+                if signal_row is not None:
+                    for key in ('take_profit_order_id', 'stop_loss_order_id'):
+                        raw = signal_row.get(key)
+                        if raw is not None:
+                            bracket_child_ids.add(int(raw))
+
+        # Cancel bracket TP/SL children first so they can't fire on a flat book
+        if bracket_child_ids:
+            await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda: ibkr.cancel_orders(bracket_child_ids),
+            )
+
+        order = await self._loop.run_in_executor(
+            self._scan_executor,
+            lambda: ibkr.submit_fx_market_order(
+                pair=pair,
+                direction=close_direction,
+                quantity=size,
+                order_ref=order_ref,
+            ),
+        )
+
+        if order is None:
+            status = 'FAILED'
+            order_id = None
+            avg_fill_price = None
+            broker_status = None
+            note = 'manual close request rejected by broker'
+        else:
+            status = str(order.get('status') or 'SUBMITTED').upper()
+            order_id = order.get('order_id')
+            avg_fill_price = order.get('avg_fill_price')
+            broker_status = order.get('status')
+            if status == 'FILLED':
+                status = 'CLOSED'
+            note = f'Manual close submitted for {pair} ({direction} -> {close_direction}).'
+            if status == 'CLOSED':
+                note = f'Manual close filled for {pair} ({direction} -> {close_direction}).'
+
+        result = ExecutionResult(
+            pair=pair,
+            direction=direction,
+            units=size,
+            status=status,
+            order_id=order_id,
+            avg_fill_price=avg_fill_price,
+            remaining_units=0,
+            broker_status=broker_status,
+            submitted_entry_price=float(getattr(trade, 'entry_price')),
+            submitted_sl_price=float(getattr(trade, 'sl_price', 0.0)),
+            submitted_tp_price=float(getattr(trade, 'tp_price', 0.0)),
+            pnl_pips=(
+                calc_pnl_pips(trade, avg_fill_price, pair_pip(pair), self.params)
+                if avg_fill_price is not None
+                else None
+            ),
+            closed_price=self._as_float(avg_fill_price),
+            closed_at=pd.Timestamp.now('UTC') if status == 'CLOSED' else None,
+            close_reason='MANUAL',
+            quote_time=pd.Timestamp.now('UTC'),
+            note=note,
+        )
+
+        refreshed_tracked = None
+        sync_error = None
+        if status != 'FAILED':
+            try:
+                refreshed_tracked = await self._loop.run_in_executor(
+                    self._scan_executor,
+                    lambda: sync_positions(self.params, self.zone_history_days),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                sync_error = str(exc)
+
+        async with self._lock:
+            if status == 'CLOSED':
+                self._append_or_merge_execution_result(result)
+            else:
+                self._execution_results.append(result)
+            level = 'warning'
+            if status == 'FAILED':
+                level = 'error'
+            elif status == 'PARTIAL' or status == 'OPEN':
+                level = 'success'
+            self._append_log(
+                level,
+                (
+                    f'Close request {status}: {pair} {direction} '
+                    f'{size:,} units (order {order_id or "n/a"})'
+                ),
+            )
+
+            if status == 'FAILED':
+                self._tick_pending_pairs.discard(pair)
+            elif order_id is not None:
+                self._tick_pending_pairs.add(pair)
+
+            if refreshed_tracked is not None:
+                self._tracked = refreshed_tracked
+                self._apply_live_quotes()
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+            state = self._export_state()
+
+        await self._broadcast({'type': 'snapshot', 'state': state})
+
+        if sync_error is not None:
+            return {
+                'result': {
+                    'status': status,
+                    'pair': pair,
+                    'direction': direction,
+                    'order_id': order_id,
+                    'size': size,
+                },
+                'state': state,
+                'message': note,
+                'warning': sync_error,
+            }
+
+        return {
+            'result': {
+                'status': status,
+                'pair': pair,
+                'direction': direction,
+                'order_id': order_id,
+                'size': size,
+            },
+            'state': state,
+            'message': note,
+        }
 
     def _apply_live_quotes(self) -> None:
         """Overlay the latest subscribed quotes onto the current snapshot-derived state."""
@@ -1601,7 +1902,11 @@ class LiveDashboardHub:
                     level = 'success'
                 if result.status == 'FAILED':
                     level = 'error'
-                self._append_log(level, f'{source.title()} {result.status}: {result.pair} {result.direction}')
+                note_suffix = f' — {result.note}' if result.note else ''
+                self._append_log(
+                    level,
+                    f'{source.title()} {result.status}: {result.pair} {result.direction}{note_suffix}',
+                )
                 if result.status == 'OPEN':
                     self._tick_pending_pairs.discard(result.pair)
                 elif result.order_id is not None:
@@ -1996,6 +2301,9 @@ class LiveDashboardHub:
                 summary = closed_trade_summary_from_row(row)
                 if summary is not None:
                     self._portfolio_state.record_closed_trade(summary)
+                closed_execution = self._build_closed_execution_result(row)
+                if closed_execution is not None:
+                    self._append_or_merge_execution_result(closed_execution)
             self._portfolio_state.sync_balance(self.balance)
             self._tick_pending_pairs = set()
             self._tick_exit_alerted = set()
@@ -2061,6 +2369,9 @@ class LiveDashboardHub:
                             summary = closed_trade_summary_from_row(row)
                             if summary is not None:
                                 self._portfolio_state.record_closed_trade(summary)
+                            closed_execution = self._build_closed_execution_result(row)
+                            if closed_execution is not None:
+                                self._append_or_merge_execution_result(closed_execution)
                     self._portfolio_state.sync_balance(self.balance)
                     self._tick_pending_pairs = set()
                     self._tick_exit_alerted = set()
@@ -2338,6 +2649,42 @@ async def _rerun_backtest(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def _close_tracked_position(request: web.Request) -> web.Response:
+    """Close a tracked position by submitting an opposite market order."""
+
+    _validate_dashboard_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({'error': 'Invalid JSON body'}, status=400)
+
+    pair = payload.get('pair')
+    direction = payload.get('direction')
+    if not pair or not isinstance(direction, str):
+        return web.json_response(
+            {'error': 'Expected JSON body with "pair" and "direction".'},
+            status=400,
+        )
+
+    hub: LiveDashboardHub = request.app["hub"]
+    try:
+        result = await hub.close_tracked_position(pair=pair, direction=direction)
+        if result.get('result', {}).get('status') == 'FAILED':
+            return web.json_response(
+                {'error': result.get('message', 'Failed to submit close order.'), 'result': result},
+                status=502,
+            )
+        return web.json_response(result)
+    except ValueError as exc:
+        return web.json_response({'error': str(exc)}, status=400)
+    except LookupError as exc:
+        return web.json_response({'error': str(exc)}, status=404)
+    except RuntimeError as exc:
+        return web.json_response({'error': str(exc)}, status=409)
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
+
+
 def _register_fill_route(app: web.Application, handler: object) -> None:
     """Register all known dashboard fill routes for compatibility."""
 
@@ -2523,6 +2870,8 @@ def run_live_web_app(
     app.router.add_get('/ws', _websocket)
     app.router.add_get('/chart', _chart_page)
     app.router.add_get('/api/chart-data', _chart_data)
+    app.router.add_post('/api/position-close', _close_tracked_position)
+    app.router.add_post('/position-close', _close_tracked_position)
     app.router.add_post('/api/execution-mode', _set_execution_mode)
     _register_fill_route(app, _fill_cache)
     app.router.add_post('/api/shutdown', _shutdown)

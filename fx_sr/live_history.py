@@ -338,6 +338,32 @@ def _ensure_table(db_path: str | None = None) -> str:
             ON detected_signal_fill (order_id, fill_time DESC)
             """
         )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS pair_scan_log (
+                id         BIGSERIAL PRIMARY KEY,
+                scan_time  {ts_type} NOT NULL,
+                pair       TEXT NOT NULL,
+                state      TEXT NOT NULL,
+                note       TEXT,
+                price      {real_type},
+                signal_generated BOOLEAN NOT NULL DEFAULT FALSE,
+                direction  TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pair_scan_log_pair_time
+            ON pair_scan_log (pair, scan_time DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_pair_scan_log_time
+            ON pair_scan_log (scan_time DESC)
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -786,12 +812,29 @@ def _derive_signal_execution_status(
     planned_units = _normalize_units(existing.get('planned_units'))
     normalized_broker = _normalize_status(broker_order_status or existing.get('status') or 'SUBMITTED')
 
-    # Order vanished from IBKR with no fills — it was rejected/cancelled
-    if not order_found and open_units <= 0:
+    # Order vanished from IBKR with no fills in this session.
+    # Only mark CANCELLED if the signal was never filled — if we already
+    # have evidence of a fill (opened_price or prior open_units), the order
+    # DID execute and the fill data is just missing from this Gateway session.
+    previously_filled = (
+        existing.get('opened_price') is not None
+        or _normalize_units(existing.get('open_units')) > 0
+    )
+    if not order_found and open_units <= 0 and not previously_filled:
         return 'CANCELLED'
 
-    if open_units <= 0:
+    if open_units <= 0 and not previously_filled:
         return normalized_broker
+
+    # Previously filled but no fills visible in this Gateway session —
+    # preserve the existing status rather than downgrading based on
+    # stale fill data.
+    if open_units <= 0 and previously_filled:
+        existing_status = (existing.get('status') or '').upper()
+        if existing_status in ('OPEN', 'PARTIAL', 'EXIT_SIGNAL', 'FILLED'):
+            return existing_status
+        return 'OPEN'
+
     if planned_units > 0 and open_units < planned_units:
         return 'PARTIAL'
     return 'OPEN'
@@ -915,11 +958,15 @@ def reconcile_detected_signal_orders(
                 order_found=order_found,
             )
 
+            previously_filled = (
+                existing.get('opened_price') is not None
+                or _normalize_units(existing.get('open_units')) > 0
+            )
             if open_units > 0 and planned_units > 0 and open_units < planned_units:
                 note = f"partial fill {open_units:,}/{planned_units:,}"
             elif open_units > 0 and planned_units > 0:
                 note = f"filled {open_units:,}/{planned_units:,}"
-            elif not order_found and open_units <= 0:
+            elif not order_found and open_units <= 0 and not previously_filled:
                 note = 'order not found in broker (rejected/cancelled)'
             elif broker_order_status:
                 note = f"broker status {broker_order_status}"
@@ -1085,6 +1132,48 @@ def reconcile_detected_signal_orders(
 
         conn.commit()
         return updated_rows
+    finally:
+        conn.close()
+
+
+def record_pair_scan_log(
+    pair_rows: Iterable,
+    scan_time: pd.Timestamp | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Persist every pair's scan state so early-filtered pairs are visible.
+
+    Records one row per pair per scan cycle — including pairs that never
+    reached the execution engine (tracked, pending, entry-blocked, no data,
+    or simply watching with no signal).
+    """
+    db_path = _ensure_table(db_path)
+    rows = list(pair_rows)
+    if not rows:
+        return
+
+    ts = _normalize_ts(scan_time if scan_time is not None else pd.Timestamp.now("UTC"))
+    conn = _connect(db_path)
+    try:
+        for row in rows:
+            signal = getattr(row, "signal", None)
+            conn.execute(
+                """
+                INSERT INTO pair_scan_log
+                    (scan_time, pair, state, note, price, signal_generated, direction)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    ts,
+                    row.pair,
+                    row.state,
+                    row.note,
+                    row.price,
+                    signal is not None,
+                    signal.direction if signal is not None else None,
+                ),
+            )
+        conn.commit()
     finally:
         conn.close()
 

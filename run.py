@@ -1694,6 +1694,7 @@ def main():
         help=f'Days of daily data for zones (default: {DEFAULT_ZONE_HISTORY_DAYS})',
     )
     _add_ibkr_args(lv)
+    lv.set_defaults(ibkr_client_id=99)
     _add_strategy_args(lv)
     _add_risk_sizing_args(lv, include_balance=True, include_account_currency=True)
     lv.add_argument('--once', action='store_true', help='Single scan then exit')

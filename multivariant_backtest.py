@@ -11,14 +11,21 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures import ThreadPoolExecutor
 
+import sys
+
 from fx_sr.profiles import PAIRS, PROFILES
 from fx_sr.backtest import (
+    _load_cached_backtest_data,
     calculate_execution_aware_compounding_pnl,
     precompute_zone_cache_parallel,
     run_backtest_fast,
 )
-from fx_sr.data import fetch_daily_data, fetch_hourly_data
 from fx_sr.strategy import params_from_profile
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
+    sys.stdout.flush()
 
 
 _WORKER_HOURLY_DATA = None
@@ -28,11 +35,15 @@ _WORKER_PROFILE = None
 _WORKER_PAIR_ORDER = None
 _WORKER_STARTING_BALANCE = 1000.0
 _WORKER_RISK_PCT = 0.05
+_WORKER_MINUTE_DATA = None
+_WORKER_EXECUTION_MODE = 'next_bar'
 
 
-def _init_worker(hourly_data, zone_cache, pips, base_profile, pair_order, starting_balance, risk_pct):
+def _init_worker(hourly_data, zone_cache, pips, base_profile, pair_order,
+                 starting_balance, risk_pct, minute_data, execution_mode):
     global _WORKER_HOURLY_DATA, _WORKER_ZONE_CACHE, _WORKER_PIPS, _WORKER_PROFILE
     global _WORKER_PAIR_ORDER, _WORKER_STARTING_BALANCE, _WORKER_RISK_PCT
+    global _WORKER_MINUTE_DATA, _WORKER_EXECUTION_MODE
 
     _WORKER_HOURLY_DATA = hourly_data
     _WORKER_ZONE_CACHE = zone_cache
@@ -41,6 +52,8 @@ def _init_worker(hourly_data, zone_cache, pips, base_profile, pair_order, starti
     _WORKER_PAIR_ORDER = list(pair_order)
     _WORKER_STARTING_BALANCE = float(starting_balance)
     _WORKER_RISK_PCT = float(risk_pct)
+    _WORKER_MINUTE_DATA = minute_data
+    _WORKER_EXECUTION_MODE = execution_mode
 
 
 def _score_candidate(overrides: dict) -> dict:
@@ -49,10 +62,18 @@ def _score_candidate(overrides: dict) -> dict:
     params = params_from_profile(merged)
 
     pair_results = {}
-    for pair in _WORKER_PAIR_ORDER:
+    is_baseline = not overrides
+    for i, pair in enumerate(_WORKER_PAIR_ORDER, 1):
+        if is_baseline:
+            _log(f'  Baseline: [{i}/{len(_WORKER_PAIR_ORDER)}] {pair}...')
         hourly_df = _WORKER_HOURLY_DATA[pair]
         pip = _WORKER_PIPS[pair]
-        pair_results[pair] = run_backtest_fast(hourly_df, pair, params, _WORKER_ZONE_CACHE, pip)
+        minute_df = _WORKER_MINUTE_DATA.get(pair) if _WORKER_MINUTE_DATA else None
+        pair_results[pair] = run_backtest_fast(
+            hourly_df, pair, params, _WORKER_ZONE_CACHE, pip,
+            minute_df=minute_df,
+            execution_mode=_WORKER_EXECUTION_MODE,
+        )
 
     if not pair_results:
         return {
@@ -127,6 +148,7 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
     rng = random.Random(seed)
 
     param_space = {
+        # Entry parameters
         'rr_ratio': [1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
         'early_exit_r': [0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55],
         'sl_buffer_pct': [0.10, 0.12, 0.15, 0.18, 0.20],
@@ -137,6 +159,18 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
         'momentum_threshold': [0.5, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85],
         'cooldown_bars': [0, 1, 2, 3],
         'max_correlated_trades': [2, 3, 4, 5, 6, 7],
+        # Exit / hold parameters (interact differently with intrabar entries)
+        'max_hold_bars': [36, 48, 60, 72, 96, 120],
+        'sideways_bars': [10, 12, 15, 18, 20],
+        'sideways_threshold': [0.2, 0.25, 0.3, 0.35, 0.4],
+        'friday_tp_pct': [0.50, 0.60, 0.70, 0.80],
+        # Quality sizing
+        'quality_risk_min': [0.3, 0.4, 0.5, 0.6, 0.7],
+        'quality_risk_max': [1.2, 1.4, 1.6, 1.8, 2.0],
+        # Dynamic risk
+        'dd_risk_start': [3.0, 4.0, 5.0, 6.0, 7.0],
+        'dd_risk_full': [14.0, 16.0, 18.0, 20.0],
+        'dd_risk_floor': [0.3, 0.4, 0.5, 0.6],
     }
 
     variants = [{}]
@@ -152,6 +186,9 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
         ('zone_penetration_pct', ('min_entry_candle_body_pct', 'min_zone_touches', 'momentum_lookback')),
         ('min_entry_candle_body_pct', ('zone_penetration_pct', 'momentum_threshold')),
         ('max_correlated_trades', ('cooldown_bars', 'rr_ratio')),
+        ('max_hold_bars', ('rr_ratio', 'early_exit_r')),
+        ('quality_risk_max', ('quality_risk_min', 'rr_ratio')),
+        ('dd_risk_start', ('dd_risk_full', 'dd_risk_floor')),
     ]
 
     for anchor_key, extra_keys in entry_grid:
@@ -183,29 +220,73 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
     return variants
 
 
-def _fetch_data(profile: dict) -> tuple[dict, dict]:
+def _fill_cache_gaps(profile: dict) -> None:
+    """Run the same gap-check and fill as `run.py fill`."""
+    from fx_sr.data import download_single_interval
+    from fx_sr.db import init_db
+
+    init_db()
     hourly_days = int(profile['hourly_days'])
     zone_history_days = int(profile['zone_history_days'])
+
+    import importlib
+    run_mod = importlib.import_module('run')
+    gaps = run_mod._find_cache_gaps(hourly_days, daily_extra_days=zone_history_days)
+    if not gaps:
+        _log('  Cache is up to date, no gaps to fill.')
+        return
+
+    daily_target_days = hourly_days + zone_history_days
+    total = len(gaps)
+    _log(f'  Filling {total} cache gap(s) from IBKR...')
+    for i, (pair_id, ticker, iv) in enumerate(gaps, 1):
+        item_days = daily_target_days if iv == '1d' else hourly_days
+        _log(f'    [{i}/{total}] {pair_id} {iv} ({item_days}d)...')
+        try:
+            rows = download_single_interval(
+                pair_id, PAIRS[pair_id], iv, item_days, verbose=False,
+            )
+            _log(f'      {pair_id} {iv}: {rows} rows downloaded')
+        except Exception as exc:
+            _log(f'      {pair_id} {iv}: FAILED ({exc})')
+
+
+def _fetch_data(profile: dict, execution_mode: str = 'next_bar') -> tuple[dict, dict, dict]:
+    """Fill any cache gaps (same as run.py fill), then load data sequentially."""
+    _fill_cache_gaps(profile)
+
+    hourly_days = int(profile['hourly_days'])
+    zone_history_days = int(profile['zone_history_days'])
+    pairs_list = list(PAIRS.items())
     data = {}
     hourly_data = {}
-    for pair, info in PAIRS.items():
-        daily_df = fetch_daily_data(
-            info['ticker'],
-            days=hourly_days + zone_history_days,
-            allow_stale_cache=True,
-        )
-        hourly_df = fetch_hourly_data(
-            info['ticker'],
-            days=hourly_days,
-            allow_stale_cache=True,
-        )
+    minute_data = {}
+    _log('  Loading data from cache...')
+    for i, (pair, info) in enumerate(pairs_list, 1):
+        _log(f'  [{i}/{len(pairs_list)}] Loading {pair}...')
+        try:
+            daily_df, hourly_df, minute_df = _load_cached_backtest_data(
+                info['ticker'], hourly_days, zone_history_days,
+            )
+        except Exception as exc:
+            _log(f'    {pair}: failed ({exc})')
+            continue
         if daily_df.empty or hourly_df.empty:
+            _log(f'    {pair}: skipped (empty data)')
             continue
         data[pair] = (daily_df, hourly_df)
         hourly_data[pair] = hourly_df
+        minute_rows = 0
+        if execution_mode == 'intrabar' and not minute_df.empty:
+            minute_data[pair] = minute_df
+            minute_rows = len(minute_df)
+        _log(f'    {pair}: daily={len(daily_df)} hourly={len(hourly_df)} minute={minute_rows}')
     if not data:
         raise RuntimeError('No usable pair data found in cache')
-    return data, hourly_data
+    _log(f'Data loading complete: {len(hourly_data)} pairs')
+    if execution_mode == 'intrabar':
+        _log(f'  Minute data loaded for {len(minute_data)}/{len(hourly_data)} pairs')
+    return data, hourly_data, minute_data
 
 
 def _evaluate_in_parallel(
@@ -217,11 +298,14 @@ def _evaluate_in_parallel(
     starting_balance: float,
     risk_pct: float,
     max_workers: int,
+    minute_data: dict | None = None,
+    execution_mode: str = 'next_bar',
 ) -> list[dict]:
     pips = {pair: PAIRS[pair].get('pip', 0.0001) for pair in pair_order}
     tasks = list(enumerate(variants))
     results = []
-    init_args = (hourly_data, zone_cache, pips, profile, pair_order, starting_balance, risk_pct)
+    init_args = (hourly_data, zone_cache, pips, profile, pair_order,
+                 starting_balance, risk_pct, minute_data, execution_mode)
     try:
         with ProcessPoolExecutor(
             max_workers=max_workers,
@@ -380,6 +464,12 @@ def _parse_args():
         default=None,
         help='Override risk %% used for compounding',
     )
+    parser.add_argument(
+        '--execution-mode',
+        choices=['next_bar', 'intrabar'],
+        default=None,
+        help='Override execution mode (default: use profile setting)',
+    )
     return parser.parse_args()
 
 
@@ -396,32 +486,38 @@ def main():
     starting_balance = float(args.starting_balance) if args.starting_balance is not None else float(profile.get('starting_balance', 1000.0))
     risk_pct = float(args.risk_pct) / 100.0 if args.risk_pct is not None else float(profile.get('risk_pct', 5.0)) / 100.0
 
-    print(f'Loading cached data for profile: {_label_profile(args.profile)}')
-    data, hourly_data = _fetch_data(profile)
+    execution_mode = args.execution_mode or profile.get('execution_mode', 'next_bar')
+
+    _log(f'Loading cached data for profile: {_label_profile(args.profile)} [execution_mode={execution_mode}]')
+    data, hourly_data, minute_data = _fetch_data(profile, execution_mode=execution_mode)
     pair_order = sorted(hourly_data.keys())
-    print(f'Loaded {len(pair_order)} pairs')
+    _log(f'Loaded {len(pair_order)} pairs')
 
     t0 = time.time()
+    _log('Building zone cache...')
     zone_workers = max(1, min(max_workers, args.zone_cache_workers or max_workers))
     zone_cache = precompute_zone_cache_parallel(data, profile['zone_history_days'], max_workers=zone_workers)
-    print(f'Zone cache built: {len(zone_cache)} entries in {time.time() - t0:.1f}s')
+    _log(f'Zone cache built: {len(zone_cache)} entries in {time.time() - t0:.1f}s')
 
     variants = _build_variant_space(seed=args.seed, max_variants=args.max_variants, base_profile=profile)
-    print(f'Generated {len(variants)} candidate variants')
+    _log(f'Generated {len(variants)} candidate variants')
 
     # Score baseline in-process for normalization. We share the same evaluator path
     # by priming worker globals once.
+    _log('Scoring baseline...')
     pips = {pair: PAIRS[pair].get('pip', 0.0001) for pair in pair_order}
-    _init_worker(hourly_data, zone_cache, pips, profile, pair_order, starting_balance, risk_pct)
+    _init_worker(hourly_data, zone_cache, pips, profile, pair_order,
+                 starting_balance, risk_pct, minute_data, execution_mode)
     baseline_result = _score_candidate({})
     if baseline_result['status'] != 'ok':
         raise RuntimeError(f'Could not evaluate baseline: {baseline_result["status"]}')
-    print(
+    _log(
         f'Baseline: trades={baseline_result["trades"]}, return={baseline_result["return_pct"]:.1f}%, '
         f'dd={baseline_result["max_dd"]:.2f}%, wr={baseline_result["wr"]:.1f}%'
     )
 
     t1 = time.time()
+    _log(f'Starting parallel evaluation of {len(variants)} variants with {max_workers} workers...')
     results = _evaluate_in_parallel(
         variants,
         hourly_data,
@@ -431,8 +527,10 @@ def main():
         starting_balance,
         risk_pct,
         max_workers=max_workers,
+        minute_data=minute_data,
+        execution_mode=execution_mode,
     )
-    print(f'Finished {len(results)} variants in {time.time() - t1:.1f}s')
+    _log(f'Finished {len(results)} variants in {time.time() - t1:.1f}s')
 
     for r in results:
         r['score'] = 0.6 * (r['return_pct'] / baseline_result['return_pct'] if baseline_result['return_pct'] else 0.0) + \
@@ -478,6 +576,7 @@ def main():
     if args.output_json:
         payload = {
             'profile': args.profile,
+            'execution_mode': execution_mode,
             'profile_overrides': {
                 k: profile[k] for k in (
                     'hourly_days',

@@ -81,6 +81,24 @@ function badgeClass(value: any) {
   return `pill pill-${token}`;
 }
 
+function executionBadgeLabel(status?: string, note?: string | null) {
+  const normalizedStatus = String(status || '').toUpperCase();
+  const normalizedNote = String(note || '').toLowerCase();
+  const isFundsIssue = normalizedStatus === 'SKIPPED'
+    && (
+      normalizedNote.includes('whatif: margin exceeded')
+      || normalizedNote.includes('would risk liquidation')
+      || normalizedNote.includes('insufficient funds')
+      || normalizedNote.includes('insufficient margin')
+      || normalizedNote.includes('funds')
+    );
+
+  if (isFundsIssue) {
+    return { label: 'FUNDS', className: 'pill pill-funds' };
+  }
+  return { label: normalizedStatus || 'â€“', className: badgeClass(status) };
+}
+
 function levelTone(level?: string) {
   const token = String(level || 'info').toLowerCase();
   if (token === 'success') return 'tone-success';
@@ -644,6 +662,7 @@ export function DashboardPage() {
   const [executionTogglePending, setExecutionTogglePending] = useState(false);
   const [selectedExecutionKey, setSelectedExecutionKey] = useState<string | null>(null);
   const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
+  const [closingPositionKey, setClosingPositionKey] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -837,6 +856,38 @@ export function DashboardPage() {
     }
   }, [pushLog]);
 
+  const closeTrackedPosition = useCallback(async (position: PositionRow) => {
+    const positionKey = `${position.pair}:${position.direction}`;
+    if (closingPositionKey === positionKey) {
+      return;
+    }
+    if (!window.confirm(`Close ${position.direction} ${position.pair} now?`)) {
+      return;
+    }
+
+    setClosingPositionKey(positionKey);
+    try {
+      const res = await fetch('/api/position-close', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ pair: position.pair, direction: position.direction }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Unable to close position.');
+      }
+      pushLog({ level: 'success', message: payload?.message || `Close request sent for ${position.pair}.` });
+    } catch (error: any) {
+      const message = error?.message || 'Unable to close position.';
+      pushLog({ level: 'error', message });
+      window.alert(`Unable to close position: ${message}`);
+    } finally {
+      setClosingPositionKey(null);
+    }
+  }, [closingPositionKey, pushLog]);
+
   const rerunBacktest = useCallback(async () => {
     if (!window.confirm('Re-run full backtest now?')) {
       return;
@@ -851,18 +902,23 @@ export function DashboardPage() {
     }
   }, [pushLog]);
 
+  const [rebuildState, setRebuildState] = useState<'idle' | 'building' | 'done' | 'error'>('idle');
   const rebuildUI = useCallback(async () => {
+    setRebuildState('building');
     pushLog({ level: 'info', message: 'Rebuilding React UI...' });
     try {
       const res = await fetch('/api/rebuild-ui', { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
+        setRebuildState('done');
         pushLog({ level: 'success', message: data.message || 'Build complete. Reloading...' });
         setTimeout(() => { window.location.href = window.location.pathname + '?t=' + Date.now(); }, 500);
       } else {
+        setRebuildState('error');
         pushLog({ level: 'error', message: data.message || 'Build failed.' });
       }
     } catch (error: any) {
+      setRebuildState('error');
       pushLog({ level: 'error', message: error?.message || 'Build request failed.' });
     }
   }, [pushLog]);
@@ -960,7 +1016,7 @@ export function DashboardPage() {
             ) : null}
           </div>
           <div><button id="rerun-backtest-btn" type="button" className="toolbar-btn" style={{ background: '#3a6a8c', borderColor: '#3a6a8c' }} onClick={() => void rerunBacktest()} disabled={String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'}>{currentBacktestButtonText(summary.backtest || {})}</button></div>
-          <div><button type="button" className="toolbar-btn" style={{ background: '#257aab', borderColor: '#257aab' }} onClick={() => void rebuildUI()}>Rebuild UI</button></div>
+          <div><button type="button" className="toolbar-btn" style={{ background: '#257aab', borderColor: '#257aab', minWidth: '90px' }} onClick={() => void rebuildUI()} disabled={rebuildState === 'building'}>{rebuildState === 'building' ? (<span className="spinner" style={{display:'inline-block',width:14,height:14,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin 0.6s linear infinite',verticalAlign:'middle'}} />) : rebuildState === 'done' ? 'Built!' : rebuildState === 'error' ? 'Failed' : 'Rebuild UI'}</button></div>
           <div><button type="button" className="toolbar-btn" style={{ background: '#7a6430', borderColor: '#7a6430' }} onClick={() => void restartServer()}>Restart</button></div>
           <div><button id="stop-server-btn" type="button" className="toolbar-btn" style={{ color: '#fff', background: '#b23b29', borderColor: '#b23b29' }} onClick={() => void stopServer()}>Stop</button></div>
           <NavLinks current="/" />
@@ -1098,7 +1154,31 @@ export function DashboardPage() {
                     </div>
                     {posSelected ? (
                       <div onClick={(e) => e.stopPropagation()}>
-                        <button type="button" onClick={() => setSelectedPositionKey(null)} style={{float:'right',background:'none',border:'1px solid var(--line)',borderRadius:'4px',padding:'2px 8px',cursor:'pointer',fontSize:'0.75rem',color:'var(--muted)',marginBottom:'4px'}}>Close</button>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px', marginBottom: '4px' }}>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPositionKey(null)}
+                            style={{ background: 'none', border: '1px solid var(--line)', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--muted)' }}
+                          >
+                            Hide
+                          </button>
+                          <button
+                            type="button"
+                            disabled={closingPositionKey === posKey}
+                            onClick={() => void closeTrackedPosition(position)}
+                            style={{
+                              background: 'rgba(178, 59, 41, 0.12)',
+                              border: '1px solid #b23b29',
+                              borderRadius: '4px',
+                              padding: '2px 8px',
+                              cursor: closingPositionKey === posKey ? 'not-allowed' : 'pointer',
+                              fontSize: '0.75rem',
+                              color: '#b23b29',
+                            }}
+                          >
+                            {closingPositionKey === posKey ? 'Closing...' : 'Close Trade'}
+                          </button>
+                        </div>
                         <PositionMiniChart
                           pair={position.pair}
                           entryPrice={position.entry_price}
@@ -1159,7 +1239,17 @@ export function DashboardPage() {
                           {' '}
                           <span className="pair-sub">{Number(execution.units || 0).toLocaleString()} units</span>
                         </div>
-                        <span className={execution.status === 'OPEN' ? 'pill pill-live' : badgeClass(execution.status)} style={execution.status === 'OPEN' ? {background:'#1f7a49',color:'#fff'} : undefined}>{execution.status}</span>
+                        {(() => {
+                          const badge = executionBadgeLabel(execution.status, execution.note);
+                          return (
+                            <span
+                              className={execution.status === 'OPEN' ? 'pill pill-live' : badge.className}
+                              style={execution.status === 'OPEN' ? { background: '#1f7a49', color: '#fff' } : undefined}
+                            >
+                              {execution.status === 'OPEN' ? 'OPEN' : badge.label}
+                            </span>
+                          );
+                        })()}
                       </div>
                       <div className="mini-meta" style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px 12px'}}>
                         <div><span className="value-label">Entry</span><span className="value">{formatExecutionPrice(execution.submitted_entry_price ?? execution.opened_price, execution)}</span></div>
@@ -1177,7 +1267,14 @@ export function DashboardPage() {
                         {isClosed && execution.close_reason ? (
                           <div><span className="value-label">Reason</span><span className="value">{execution.close_reason}</span></div>
                         ) : null}
-                        <div style={{gridColumn:'1 / -1'}}><span className="value-label">When</span><span className="value">{formatTimestamp(execution.time)} · #{execution.order_id || '-'}</span></div>
+                        {execution.note ? (
+                          <div style={{gridColumn:'1 / -1', display:'flex', justifyContent:'space-between', gap:'0.5rem'}}>
+                            <div style={{overflow:'hidden'}}><span className="value-label">Note</span><span className="value" style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{execution.note}</span></div>
+                            <div style={{flexShrink:0}}><span className="value-label">When</span><span className="value">{formatTimestamp(execution.time)} · #{execution.order_id || '-'}</span></div>
+                          </div>
+                        ) : (
+                          <div style={{gridColumn:'1 / -1'}}><span className="value-label">When</span><span className="value">{formatTimestamp(execution.time)} · #{execution.order_id || '-'}</span></div>
+                        )}
                       </div>
                       {selected ? (
                         <div className="mini-detail" onClick={(e) => e.stopPropagation()}>

@@ -789,6 +789,11 @@ body::before {
   color: var(--warning);
 }
 
+.pill-funds {
+  background: rgba(188, 120, 24, 0.16);
+  color: #b47f18;
+}
+
 .pill-near {
   background: rgba(210, 140, 20, 0.22);
   color: #e5a812;
@@ -798,6 +803,9 @@ body::before {
 @keyframes near-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 td.zone-near {

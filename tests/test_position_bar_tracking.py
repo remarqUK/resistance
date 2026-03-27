@@ -4,7 +4,11 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from fx_sr.positions import check_position_exits, sync_positions
+from fx_sr.positions import (
+    _resolve_closed_position_details,
+    check_position_exits,
+    sync_positions,
+)
 from fx_sr.strategy import StrategyParams, Trade
 
 
@@ -251,6 +255,39 @@ class PositionBarTrackingTests(unittest.TestCase):
         )
         remove_mock.assert_called_once_with(conn, 'EURUSD', 'LONG')
 
+    def test_resolve_closed_position_prefers_manual_fill_when_child_orders_exist(self):
+        info = {
+            'pair': 'EURUSD',
+            'trade': _trade(),
+            'signal_id': 'sig-1',
+        }
+        signal_row = {
+            'signal_id': 'sig-1',
+            'pair': 'EURUSD',
+            'direction': 'LONG',
+            'signal_time': '2026-02-03 10:00:00+00:00',
+            'opened_at': '2026-02-03 10:00:05+00:00',
+            'order_id': 101,
+            'take_profit_order_id': 102,
+            'stop_loss_order_id': 103,
+        }
+        manual_fill = {
+            'order_id': 999,
+            'price': 1.1102,
+            'avg_price': 1.1102,
+            'side': 'SELL',
+        }
+
+        with patch('fx_sr.positions.load_detected_signal', return_value=signal_row), \
+                patch('fx_sr.positions.ibkr.fetch_fx_fills', side_effect=[ [], [manual_fill] ]) as fill_mock, \
+                patch('fx_sr.positions.ibkr.fetch_completed_fx_orders', return_value=[]):
+            close_reason, close_price, close_source = _resolve_closed_position_details(info)
+
+        self.assertEqual(close_reason, 'MANUAL')
+        self.assertAlmostEqual(close_price, 1.1102)
+        self.assertEqual(close_source, 'broker_fill')
+        self.assertEqual(fill_mock.call_count, 2)
+
     def test_sync_positions_updates_existing_trade_after_partial_fill_grows(self):
         tracked = {
             'EURUSD:LONG': {
@@ -378,6 +415,7 @@ class PositionBarTrackingTests(unittest.TestCase):
                 patch('fx_sr.positions.load_detected_signal', return_value=signal_row), \
                 patch('fx_sr.positions.ibkr.fetch_fx_fills', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_completed_fx_orders', return_value=[]), \
+                patch('fx_sr.positions.ibkr.fetch_latest_price', return_value=1.1045), \
                 patch('fx_sr.positions._tracking_db_transaction', return_value=_tracking_transaction(conn)), \
                 patch('fx_sr.positions.record_closed_signal_conn') as close_mock, \
                 patch('fx_sr.positions._remove_trade_conn') as remove_mock:
@@ -389,7 +427,7 @@ class PositionBarTrackingTests(unittest.TestCase):
             'sig-1',
             close_reason='REVERSAL',
             close_price=1.1045,
-            close_source='position_sync',
+            close_source='market_price',
         )
         remove_mock.assert_called_once_with(conn, 'EURUSD', 'LONG')
 

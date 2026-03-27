@@ -575,12 +575,14 @@ def _resolve_closed_position_details(info: dict) -> tuple[str, float | None, str
         if sl_order_id is not None and order_id == sl_order_id:
             return 'SL', completed.get('avg_fill_price') or None, 'broker_sl'
 
-    if not child_order_ids:
-        all_fills = ibkr.fetch_fx_fills(pair=info['pair'], since=opened_at)
     expected_close_side = 'SELL' if info['trade'].direction == 'LONG' else 'BUY'
+    all_fills_for_manual = (
+        all_fills
+        if not child_order_ids
+        else ibkr.fetch_fx_fills(pair=info['pair'], since=opened_at)
+    )
     manual_fills = [
-        fill
-        for fill in all_fills
+        fill for fill in all_fills_for_manual
         if (fill.get('side') or '').upper() == expected_close_side
         and fill.get('order_id') != parent_order_id
         and (not child_order_ids or fill.get('order_id') not in child_order_ids)
@@ -589,6 +591,42 @@ def _resolve_closed_position_details(info: dict) -> tuple[str, float | None, str
         latest_fill = manual_fills[-1]
         return 'MANUAL', latest_fill.get('price') or latest_fill.get('avg_price'), 'broker_fill'
 
+    # Broker fill data unavailable (session expired / gateway restarted).
+    # IBKR is the source of truth — if the position is gone, use current
+    # market price as the close price so we always record P&L.
+    ticker = pair_ticker(info['pair'])
+    current_price = None
+    if ticker:
+        try:
+            current_price = ibkr.fetch_latest_price(ticker)
+        except Exception:
+            pass
+
+    if current_price is not None:
+        # Check if price has clearly passed a bracket level
+        if child_order_ids and signal_row.get('opened_price') is not None:
+            tp_price_raw = signal_row.get('submitted_tp_price') or signal_row.get('tp_price')
+            sl_price_raw = signal_row.get('submitted_sl_price') or signal_row.get('sl_price')
+            tp_price = float(tp_price_raw) if tp_price_raw is not None else None
+            sl_price = float(sl_price_raw) if sl_price_raw is not None else None
+            direction = info['trade'].direction
+
+            if tp_price is not None and sl_price is not None:
+                if direction == 'LONG':
+                    if current_price >= tp_price:
+                        return 'TP', tp_price, 'inferred_bracket'
+                    if current_price <= sl_price:
+                        return 'SL', sl_price, 'inferred_bracket'
+                else:
+                    if current_price <= tp_price:
+                        return 'TP', tp_price, 'inferred_bracket'
+                    if current_price >= sl_price:
+                        return 'SL', sl_price, 'inferred_bracket'
+
+        # Position gone, no bracket match — use market price as best estimate
+        return pending_reason or 'EXTERNAL_CLOSE', current_price, 'market_price'
+
+    # Broker unreachable and no fill data — use pending exit price if available
     return pending_reason or 'EXTERNAL_CLOSE', pending_price, 'position_sync'
 
 
@@ -613,6 +651,11 @@ def sync_positions(
     reconcile_detected_signal_orders()
     db_trades = _load_trades()
     ibkr_positions = ibkr.fetch_positions()
+
+    # None means broker connection failed — don't touch tracked trades
+    if ibkr_positions is None:
+        print("    Warning: broker unavailable, skipping position sync")
+        return db_trades
 
     if not ibkr_positions and not db_trades:
         return {}

@@ -1,0 +1,14 @@
+[  226560ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)
+[  231773ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)
+[  233101ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)
+[  234176ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)
+[  235752ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)
+[  240230ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)
+[  241281ms] ReferenceError: switchReplayPair is not defined
+    at HTMLDivElement.onclick (http://127.0.0.1:8765/replay?pair=EURAUD&date=2026-03-25&entry=2026-03-25T08%3A00%3A00%2B00%3A00&preset=high_volume&tf=1m:1:1)

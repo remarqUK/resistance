@@ -10,6 +10,9 @@ from contextlib import contextmanager
 import os
 import threading
 import time
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 from typing import Callable, Optional
@@ -635,7 +638,7 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def fetch_positions() -> list:
+def fetch_positions() -> list | None:
     """Read current FX positions from TWS.
 
     Returns list of dicts:
@@ -643,11 +646,13 @@ def fetch_positions() -> list:
         size: float (positive=long base ccy, negative=short)
         avg_cost: float (average entry price)
     Only returns FX positions matching our tracked pairs.
+    Returns None when the broker connection is unavailable (distinct from
+    an empty list which means "connected, no open positions").
     """
     with _IBKR_LOCK:
         ib, connected = _get_connection()
         if not connected:
-            return []
+            return None
 
         try:
             positions = ib.positions()
@@ -664,7 +669,7 @@ def fetch_positions() -> list:
             return result
         except Exception as e:
             print(f"    Warning: failed to read IBKR positions: {e}")
-            return []
+            return None
 
 
 def fetch_latest_price(ticker_symbol: str) -> Optional[float]:
@@ -1419,6 +1424,16 @@ def fetch_fx_fills(
                 if since_ts is not None and fill_ts is not None and fill_ts < since_ts:
                     continue
 
+                commission_report = getattr(fill, 'commissionReport', None)
+                commission = float(getattr(commission_report, 'commission', 0.0) or 0.0) if commission_report else 0.0
+                commission_currency = getattr(commission_report, 'currency', '') or '' if commission_report else ''
+                realized_pnl = getattr(commission_report, 'realizedPNL', None) if commission_report else None
+                if realized_pnl is not None:
+                    try:
+                        realized_pnl = float(realized_pnl)
+                    except (TypeError, ValueError):
+                        realized_pnl = None
+
                 results.append(
                     {
                         'pair': pair_id,
@@ -1431,6 +1446,9 @@ def fetch_fx_fills(
                         'order_ref': getattr(execution, 'orderRef', '') or '',
                         'time': fill_ts,
                         'exec_id': getattr(execution, 'execId', '') or '',
+                        'commission': commission,
+                        'commission_currency': commission_currency,
+                        'realized_pnl': realized_pnl,
                     }
                 )
 
@@ -1777,5 +1795,143 @@ def submit_fx_market_bracket_order(
         except Exception as e:
             print(f"    Warning: failed to submit FX bracket order for {pair}: {e}")
             return None
+
+
+def cancel_orders(order_ids: set[int]) -> list[int]:
+    """Cancel one or more orders by ID. Returns the IDs that were successfully sent."""
+
+    if not order_ids:
+        return []
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return []
+
+        cancelled: list[int] = []
+        try:
+            from ib_async import Order
+
+            for oid in order_ids:
+                try:
+                    order = Order(orderId=int(oid))
+                    ib.cancelOrder(order)
+                    cancelled.append(int(oid))
+                except Exception as e:
+                    print(f"    Warning: failed to cancel order {oid}: {e}")
+            if cancelled and hasattr(ib, 'sleep'):
+                ib.sleep(1)
+        except Exception as e:
+            print(f"    Warning: cancel_orders failed: {e}")
+        return cancelled
+
+
+# ---------------------------------------------------------------------------
+# Flex Query — historical commission data
+# ---------------------------------------------------------------------------
+
+_FLEX_BASE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService"
+_FLEX_QUERY_ID = 1449104
+
+
+def fetch_flex_commissions(
+    token: str = None,
+    query_id: int = None,
+    *,
+    max_wait: int = 30,
+) -> list[dict]:
+    """Fetch historical FX trade commissions via IBKR Flex Query.
+
+    Returns a list of dicts (one per execution leg) with keys:
+        pair, trade_date, side, quantity, price, commission,
+        commission_currency, net_cash, realized_pnl, order_id, exec_id
+
+    Credentials fall back to env vars IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID.
+    """
+    token = token or os.environ.get("IBKR_FLEX_TOKEN", "")
+    query_id = query_id or int(os.environ.get("IBKR_FLEX_QUERY_ID", _FLEX_QUERY_ID))
+
+    if not token:
+        raise ValueError("IBKR Flex token required — pass token= or set IBKR_FLEX_TOKEN")
+
+    # Step 1: request the report
+    send_url = f"{_FLEX_BASE_URL}.SendRequest?t={token}&q={query_id}&v=3"
+    with urllib.request.urlopen(send_url, timeout=15) as resp:
+        send_xml = ET.fromstring(resp.read())
+
+    status = send_xml.findtext("Status", "")
+    if status != "Success":
+        error_msg = send_xml.findtext("ErrorMessage", "unknown error")
+        raise RuntimeError(f"Flex SendRequest failed: {status} — {error_msg}")
+
+    reference_code = send_xml.findtext("ReferenceCode", "")
+    stmt_url = send_xml.findtext("Url", _FLEX_BASE_URL.replace("FlexStatementService", "FlexStatementService.GetStatement"))
+
+    # Step 2: poll until the report is ready
+    get_url = f"{stmt_url}?t={token}&q={reference_code}&v=3"
+    deadline = time.time() + max_wait
+    while True:
+        with urllib.request.urlopen(get_url, timeout=15) as resp:
+            raw = resp.read()
+
+        root = ET.fromstring(raw)
+        # If still generating, IBKR returns a FlexStatementResponse with Status
+        if root.tag == "FlexStatementResponse":
+            poll_status = root.findtext("Status", "")
+            if poll_status == "Statement generation in progress":
+                if time.time() > deadline:
+                    raise TimeoutError("Flex statement not ready after %ds" % max_wait)
+                time.sleep(2)
+                continue
+            raise RuntimeError(f"Flex GetStatement failed: {poll_status} — {root.findtext('ErrorMessage', '')}")
+        break  # got the actual report
+
+    # Parse Trade elements
+    results: list[dict] = []
+    for trade in root.iter("Trade"):
+        symbol = trade.get("symbol", "")
+        # Normalise IBKR symbol to our pair ID (e.g. "EUR.USD" -> "EURUSD")
+        pair_id = symbol.replace(".", "")
+
+        raw_commission = trade.get("ibCommission", "0") or "0"
+        try:
+            commission = abs(float(raw_commission))  # IBKR reports as negative
+        except ValueError:
+            commission = 0.0
+
+        raw_pnl = trade.get("fifoPnlRealized", None)
+        try:
+            realized_pnl = float(raw_pnl) if raw_pnl is not None else None
+        except ValueError:
+            realized_pnl = None
+
+        trade_date_str = trade.get("tradeDate", "") or trade.get("reportDate", "")
+        trade_time_str = trade.get("tradeTime", "")
+        if trade_date_str and trade_time_str:
+            try:
+                trade_ts = pd.Timestamp(f"{trade_date_str} {trade_time_str}")
+            except Exception:
+                trade_ts = pd.Timestamp(trade_date_str) if trade_date_str else None
+        elif trade_date_str:
+            trade_ts = pd.Timestamp(trade_date_str) if trade_date_str else None
+        else:
+            trade_ts = None
+
+        results.append({
+            "pair": pair_id,
+            "trade_date": trade_ts,
+            "side": trade.get("buySell", ""),
+            "quantity": float(trade.get("quantity", 0) or 0),
+            "price": float(trade.get("tradePrice", 0) or 0),
+            "commission": commission,
+            "commission_currency": trade.get("ibCommissionCurrency", ""),
+            "net_cash": float(trade.get("netCash", 0) or 0),
+            "realized_pnl": realized_pnl,
+            "order_id": trade.get("ibOrderID", ""),
+            "exec_id": trade.get("ibExecID", ""),
+        })
+
+    results.sort(key=lambda r: r["trade_date"] or pd.Timestamp.min)
+    return results
 
 

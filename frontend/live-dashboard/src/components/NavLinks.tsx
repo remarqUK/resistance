@@ -14,16 +14,29 @@ const ALL_LINKS = [
 
 interface NavLinksProps {
   current?: string;
+  orientation?: 'horizontal' | 'vertical';
 }
 
-export function NavLinks({ current }: NavLinksProps) {
+export function NavLinks({ current, orientation = 'horizontal' }: NavLinksProps) {
+  const isVertical = orientation === 'vertical';
+
   return (
-    <div className="hero-actions hero-actions-vertical hero-links-column">
+    <div className={`hero-actions${isVertical ? ' hero-actions-vertical hero-links-column' : ''}`}>
       {ALL_LINKS.filter((link) => link.href !== current).map((link) => (
         <a
           key={link.href}
           href={link.href}
-          className="hero-action"
+          className={`hero-action${
+            link.href === '/trade-log' || link.href === '/live-diary'
+              ? ' hero-action-pill hero-action-blue'
+              : link.href === '/replay' ||
+                  link.href === '/backtest-trades' ||
+                  link.href === '/backtest-diary'
+                  ? ' hero-action-pill hero-action-restart'
+                  : link.href === '/'
+                    ? ' hero-action-pill hero-action-home'
+                  : ''
+          }`}
           target={link.href === '/' ? undefined : '_blank'}
           rel={link.href === '/' ? undefined : 'noreferrer'}
         >

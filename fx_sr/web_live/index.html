@@ -6,6 +6,7 @@
   <title>FX S/R Live Dashboard</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/chart-core.js"></script>
 </head>
 <body>
   <div class="shell">
@@ -13,67 +14,69 @@
       <div class="hero-title-row">
         <div>
           <h1><span class="eyebrow">FX support / resistance scanner</span>Live Market Board</h1>
-          <p class="subtitle" id="hero-sizing"><span id="sizing-summary">Resolving</span> · <span id="strategy-label">Strategy preset</span></p>
         </div>
         <div><span id="connection-pill" class="pill pill-muted">Connecting</span></div>
-        <div><button id="trade-toggle-btn" type="button" class="toolbar-btn hero-toggle-btn" hidden>Pause Entries</button></div>
-        <div><button id="fill-cache-btn" type="button" class="toolbar-btn" style="background:#257aab;border-color:#257aab">Fill</button></div>
-        <div><button id="rerun-backtest-btn" type="button" class="toolbar-btn" style="background:#3a6a8c;border-color:#3a6a8c">Re-run Backtest</button></div>
-        <div><button id="stop-server-btn" type="button" class="toolbar-btn" style="color:#fff;background:#b23b29;border-color:#b23b29">Stop Server</button></div>
-        <div class="hero-actions hero-actions-vertical hero-links-column">
-          <a href="/trade-log" target="_blank" class="hero-action">Trade Log</a>
-          <a href="/replay" target="_blank" class="hero-action">Strategy Replay</a>
-          <a href="/backtest-trades" target="_blank" class="hero-action">All Backtest Trades</a>
-          <a href="/backtest-diary" target="_blank" class="hero-action">Backtest Diary</a>
-          <a href="/live-diary" target="_blank" class="hero-action">Live Diary</a>
+        <div class="hero-actions">
+          <a href="/trade-log" target="_blank" class="hero-action hero-action-pill hero-action-blue">Trade Log</a>
+          <a href="/replay" target="_blank" class="hero-action hero-action-pill hero-action-restart">Strategy Replay</a>
+          <a href="/backtest-trades" target="_blank" class="hero-action hero-action-pill hero-action-restart">All Backtest Trades</a>
+          <a href="/backtest-diary" target="_blank" class="hero-action hero-action-pill hero-action-restart">Backtest Diary</a>
+          <a href="/live-diary" target="_blank" class="hero-action hero-action-pill hero-action-blue">Live Diary</a>
+        </div>
+        <div class="hero-middle-actions">
+          <div><button id="trade-toggle-btn" type="button" class="toolbar-btn hero-top-action-link hero-toggle-btn" hidden title="Pause entries" aria-label="Pause entries">&#x23F8;</button></div>
+          <div><button id="fill-cache-btn" type="button" class="toolbar-btn hero-top-action-link blue" title="Fill" aria-label="Fill">Fill</button></div>
+          <div><button id="rerun-backtest-btn" type="button" class="toolbar-btn hero-top-action-link cobalt" title="Re-run Backtest" aria-label="Re-run Backtest">&#x21A9;</button></div>
+          <div><button id="stop-server-btn" type="button" class="toolbar-btn hero-top-action-link red" title="Stop" aria-label="Stop">&#x23F9;</button></div>
         </div>
       </div>
     </header>
 
-    <section class="metrics-grid" id="metrics-grid">
-      <article class="metric-card">
-        <span class="meta-label">Scan state</span>
-        <strong id="scan-status">Starting</strong>
-        <span id="scan-progress" class="metric-detail">0 / 0 pairs</span>
-      </article>
-      <article class="metric-card">
-        <span class="meta-label">Signals</span>
-        <strong id="signal-count">0</strong>
-        <span id="pending-count" class="metric-detail">0 pending blockers</span>
-      </article>
-      <article class="metric-card">
-        <span class="meta-label">Tracked positions</span>
-        <strong id="position-count">0</strong>
-        <span id="execution-mode" class="metric-detail">Next-bar (completed hourly) · Scan only</span>
-      </article>
-      <article class="metric-card">
-        <span class="meta-label">Next transaction</span>
-        <strong id="next-transaction-timer">--:--</strong>
-        <span id="next-transaction-at" class="metric-detail">Waiting for next top of hour</span>
-      </article>
-    </section>
-
     <main class="board live-marketboard">
-      <section class="panel panel-watchlist">
-        <p class="panel-note" style="max-width:none;text-align:left">Signals and tracked pairs float to the top while updates stream in per pair.</p>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Pair</th>
-                <th>State</th>
-                <th>Price</th>
-                <th>Support</th>
-                <th>Resistance</th>
-                <th>Setup</th>
-                <th>Signal</th>
-              </tr>
-            </thead>
-            <tbody id="watchlist-body">
-              <tr><td colspan="7" class="empty">Waiting for first scan.</td></tr>
-            </tbody>
-          </table>
-        </div>
+      <section class="left-side-section">
+        <section class="metrics-grid" id="metrics-grid">
+          <article class="metric-card">
+            <span class="meta-label">Scan state</span>
+            <strong id="scan-status">Starting</strong>
+            <span id="scan-progress" class="metric-detail">0 / 0 pairs</span>
+          </article>
+          <article class="metric-card">
+            <span class="meta-label">Signals</span>
+            <strong id="signal-count">0</strong>
+            <span id="pending-count" class="metric-detail">0 pending blockers</span>
+          </article>
+          <article class="metric-card">
+            <span class="meta-label">Tracked positions</span>
+            <strong id="position-count">0</strong>
+            <span id="execution-mode" class="metric-detail">Next-bar (completed hourly) Â· Scan only</span>
+          </article>
+          <article class="metric-card">
+            <span class="meta-label">Next transaction</span>
+            <strong id="next-transaction-timer">--:--</strong>
+            <span id="next-transaction-at" class="metric-detail">Waiting for next top of hour</span>
+          </article>
+        </section>
+        <section class="panel panel-watchlist">
+          <p class="panel-note" style="max-width:none;text-align:left">Signals and tracked pairs float to the top while updates stream in per pair.</p>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Pair</th>
+                  <th>State</th>
+                  <th>Price</th>
+                  <th>Support</th>
+                  <th>Resistance</th>
+                  <th>Setup</th>
+                  <th>Signal</th>
+                </tr>
+              </thead>
+              <tbody id="watchlist-body">
+                <tr><td colspan="7" class="empty">Waiting for first scan.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section class="side-column">
@@ -92,12 +95,6 @@
 
       <section class="panel">
         <div class="split-panel">
-          <div class="split-panel-section">
-            <div class="panel-subhead">Exit alerts</div>
-            <div id="alerts-list" class="stack-list compact-list">
-              <div class="empty-card">No exit alerts.</div>
-            </div>
-          </div>
           <div class="split-panel-section">
             <div class="panel-subhead">Transactions</div>
             <div id="executions-list" class="stack-list compact-list">
@@ -124,3 +121,5 @@
   <script src="/static/app.js"></script>
 </body>
 </html>
+
+

@@ -101,6 +101,7 @@ class LiveDashboardHub:
         client_id: int | None,
         port: int,
         execution_mode: str = 'next_bar',
+        chart_tf: str = '1h',
     ) -> None:
         self.pairs = pairs
         self.params = params
@@ -116,11 +117,13 @@ class LiveDashboardHub:
         self.client_id = client_id
         self.port = port
         self.execution_mode = _normalize_execution_mode(execution_mode)
+        self.chart_tf = chart_tf
 
         self._pair_rows: dict[str, PairScanRow] = {}
         self._tracked: dict[str, dict] = {}
         self._position_snapshots: dict[str, dict] = {}
         self._alerts: deque[dict] = deque(maxlen=ALERT_LIMIT)
+        self._early_exit_active: dict[str, dict] = {}  # pair:direction -> alert dict, cleared when price recovers
         self._execution_results = deque(maxlen=EXECUTION_LIMIT)
         self._last_quotes: dict[str, float] = {}
         self._log: deque[dict] = deque(maxlen=LOG_LIMIT)
@@ -1114,16 +1117,18 @@ class LiveDashboardHub:
         return rows
 
     def _serialize_alerts(self) -> list[dict]:
-        """Serialize exit alerts."""
+        """Serialize exit alerts.
+
+        Early exits are dynamic (present/absent based on live price).
+        TP/SL are historical events kept in the deque.
+        """
 
         rows = []
+        # Dynamic early exits first so they appear at the top
+        for alert in self._early_exit_active.values():
+            rows.append({**alert, 'decimals': self.pairs.get(alert['pair'], {}).get('decimals', 5)})
         for alert in self._alerts:
-            rows.append(
-                {
-                    **alert,
-                    'decimals': self.pairs.get(alert['pair'], {}).get('decimals', 5),
-                }
-            )
+            rows.append({**alert, 'decimals': self.pairs.get(alert['pair'], {}).get('decimals', 5)})
         return rows
 
     def _serialize_executions(self) -> list[dict]:
@@ -1723,23 +1728,43 @@ class LiveDashboardHub:
         async with self._lock:
             # --- Tick exit checks (inline — pure float math, no I/O) ---
             tick_alerts = self._scanner.check_tick_exits(pair, price, self._tracked)
+            alerted_keys = {f"{a['pair']}:{a['direction']}" for a in tick_alerts}
+
             for alert in tick_alerts:
                 alert_key = f"{alert['pair']}:{alert['direction']}"
-                if alert_key in self._tick_exit_alerted:
-                    continue
-                self._tick_exit_alerted.add(alert_key)
-                self._alerts.append(alert)
-                self._append_log(
-                    'warning',
-                    f"Tick exit: {alert['pair']} {alert['direction']} "
-                    f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
-                )
-                info = self._tracked.get(alert_key)
-                if info and info.get('signal_id'):
-                    exit_signal_writes.append(
-                        (info['signal_id'], alert['exit_reason'], alert['exit_price'])
+                if alert['exit_reason'] == 'EARLY_EXIT':
+                    # Dynamic: show while price is at/past threshold, clear when it recovers
+                    if alert_key not in self._early_exit_active:
+                        self._early_exit_active[alert_key] = alert
+                        self._append_log(
+                            'warning',
+                            f"Tick exit: {alert['pair']} {alert['direction']} "
+                            f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
+                        )
+                        positions_changed = True
+                else:
+                    # TP/SL: historical, one-time
+                    if alert_key in self._tick_exit_alerted:
+                        continue
+                    self._tick_exit_alerted.add(alert_key)
+                    self._alerts.append(alert)
+                    self._append_log(
+                        'warning',
+                        f"Tick exit: {alert['pair']} {alert['direction']} "
+                        f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
                     )
-                positions_changed = True
+                    info = self._tracked.get(alert_key)
+                    if info and info.get('signal_id'):
+                        exit_signal_writes.append(
+                            (info['signal_id'], alert['exit_reason'], alert['exit_price'])
+                        )
+                    positions_changed = True
+
+            # Clear early exit alerts for tracked positions on this pair that have recovered
+            for key in list(self._early_exit_active):
+                if key.startswith(f"{pair}:") and key not in alerted_keys:
+                    del self._early_exit_active[key]
+                    positions_changed = True
 
             summary = dict(self.summary)
             row_payload = self._serialize_pair_row(updated_row)
@@ -2143,7 +2168,7 @@ class LiveDashboardHub:
     def _backfill_data(self) -> None:
         """Fetch historical daily + hourly data for all pairs (runs in executor)."""
 
-        from .data import fetch_daily_data, fetch_hourly_data
+        from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
         from .levels import detect_zones
         from .strategy import get_tradeable_zones as _get_tz
 
@@ -2187,6 +2212,11 @@ class LiveDashboardHub:
             try:
                 hourly_df = fetch_hourly_data(ticker, days=7)
                 self._accumulator.seed(pair_id, hourly_df)
+                try:
+                    minute_df = fetch_minute_data_cached(ticker, days=2, allow_stale_cache=True)
+                    self._accumulator.seed_minutes(pair_id, minute_df)
+                except Exception:
+                    pass
                 pair_status[pair_id] = 'ready'
             except Exception:
                 pair_status[pair_id] = 'hourly failed'
@@ -2307,6 +2337,7 @@ class LiveDashboardHub:
             self._portfolio_state.sync_balance(self.balance)
             self._tick_pending_pairs = set()
             self._tick_exit_alerted = set()
+            self._early_exit_active = {}
             self._backfill_done = True
             self._append_log('success', f'Backfill complete: {len(pair_rows)} pairs, {len(signals)} signals')
             self.summary = self._build_summary(status='live')
@@ -2375,6 +2406,7 @@ class LiveDashboardHub:
                     self._portfolio_state.sync_balance(self.balance)
                     self._tick_pending_pairs = set()
                     self._tick_exit_alerted = set()
+                    self._early_exit_active = {}
                     self._apply_live_quotes()
                     self.summary = self._build_summary(status='live')
                     state = self._export_state()
@@ -2471,6 +2503,20 @@ async def _live_diary_api(_request: web.Request) -> web.Response:
     return web.json_response({'trades': trades})
 
 
+async def _live_trade_api(request: web.Request) -> web.Response:
+    """Load a single live trade payload by signal id."""
+
+    signal_id = (request.query.get('signal_id') or '').strip()
+    if not signal_id:
+        return web.json_response({'error': 'Missing signal_id query parameter'}, status=400)
+
+    trade = load_detected_signal(signal_id)
+    if trade is None:
+        return web.json_response({'error': 'Trade not found'}, status=404)
+
+    return web.json_response({'trade': trade})
+
+
 
 def _spa_index_response() -> web.StreamResponse:
     """Serve the built React shell or fail with a clear build instruction."""
@@ -2496,7 +2542,11 @@ async def _chart_data(request: web.Request) -> web.StreamResponse:
     if not pair or pair not in hub.pairs:
         return web.json_response({'error': 'unknown pair'}, status=400)
 
-    df = hub._accumulator.get_hourly_df(pair, tail_n=500)
+    tf = hub.chart_tf
+    if tf == '1m':
+        df = hub._accumulator.get_minute_df(pair, tail_n=1000)
+    else:
+        df = hub._accumulator.get_hourly_df(pair, tail_n=500)
     bars = []
     if not df.empty:
         for ts, row in df.iterrows():
@@ -2836,6 +2886,7 @@ def run_live_web_app(
     port: int,
     open_browser: bool,
     execution_mode: str,
+    chart_tf: str = '1h',
 ) -> None:
     """Run the browser-based live dashboard server."""
 
@@ -2855,6 +2906,7 @@ def run_live_web_app(
         client_id=client_id,
         port=port,
         execution_mode=execution_mode,
+        chart_tf=chart_tf,
     )
     from .replay import handle_replay, handle_replay_bars, handle_replay_dates, handle_replay_refresh, handle_replay_presets
     from .replay import (
@@ -2888,6 +2940,7 @@ def run_live_web_app(
     app.router.add_get('/live-diary', _index)
     app.router.add_get('/live-trade', _index)
     app.router.add_get('/api/live-diary', _live_diary_api)
+    app.router.add_get('/api/live-trade', _live_trade_api)
     app.router.add_get('/trade-log', _index)
     app.router.add_get('/api/trade-log', handle_trade_log_api)
     app.router.add_get('/api/replay', handle_replay)

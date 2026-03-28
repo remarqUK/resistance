@@ -1,4 +1,4 @@
-/* Strategy Replay — progressive chart playback with TradingView Lightweight Charts */
+﻿/* Strategy Replay â€” progressive chart playback with TradingView Lightweight Charts */
 
 const PAIRS = [
   'AUDCAD','AUDJPY','AUDNZD','AUDUSD',
@@ -52,7 +52,7 @@ const prevTradeBtn = document.getElementById('prev-trade-btn');
 const nextTradeBtn = document.getElementById('next-trade-btn');
 const tradeNavLabel = document.getElementById('trade-nav-label');
 
-// ── Init ──
+// â”€â”€ Init â”€â”€
 
 PAIRS.forEach(p => {
   const opt = document.createElement('option');
@@ -125,7 +125,7 @@ async function fetchPresets() {
   } catch (_) { /* keep hardcoded fallback */ }
 }
 
-// ── Date range ──
+// â”€â”€ Date range â”€â”€
 
 async function fetchDateRange() {
   const pair = pairSelect.value;
@@ -157,7 +157,7 @@ async function fetchDateRange() {
   } catch (_) { /* ignore */ }
 }
 
-// ── Switch pair in-place from sidebar ──
+// â”€â”€ Switch pair in-place from sidebar â”€â”€
 
 function switchReplayPair(newPair, newDate, entryTime) {
   pairSelect.value = newPair;
@@ -166,7 +166,7 @@ function switchReplayPair(newPair, newDate, entryTime) {
   loadReplay();
 }
 
-// ── Load replay data ──
+// â”€â”€ Load replay data â”€â”€
 
 async function loadReplay() {
   const pair = pairSelect.value;
@@ -244,7 +244,7 @@ async function loadReplay() {
         focusTradeOnChart(activeTrade, requestedTradeEntry);
       }
     } else {
-      // No target-day bars — still render context bars and trades
+      // No target-day bars â€” still render context bars and trades
       _renderAllBars();
       // Render trades panel with empty frame
       renderInfo(-1);
@@ -301,7 +301,7 @@ function escapeAttr(value) {
 
 function formatNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return '—';
+    return 'â€”';
   }
   return Number(value).toLocaleString(undefined, {
     minimumFractionDigits: digits,
@@ -311,14 +311,14 @@ function formatNumber(value, digits = 2) {
 
 function formatCurrency(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return '—';
+    return 'â€”';
   }
   return `${BACKTEST_CURRENCY} ${formatNumber(value, digits)}`;
 }
 
 function formatSignedCurrency(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return '—';
+    return 'â€”';
   }
   const number = Number(value);
   const prefix = number > 0 ? '+' : number < 0 ? '-' : '';
@@ -346,7 +346,7 @@ function buildAccountSummaryLabel(account) {
     summary = `assumed ${summary}`;
   }
   if (account.mixed_params) {
-    summary += ' · mixed cached parameter sets';
+    summary += ' Â· mixed cached parameter sets';
   }
   return summary;
 }
@@ -489,7 +489,7 @@ function formatTradeNavLabel(trade, index, total) {
     minute: '2-digit',
     hour12: false,
   });
-  return `Trade ${index + 1} / ${total} · ${entryText} · ${trade.direction}`;
+  return `Trade ${index + 1} / ${total} Â· ${entryText} Â· ${trade.direction}`;
 }
 
 function syncTradeNavigation(selectedDate, entryTime = '') {
@@ -593,7 +593,7 @@ async function refreshData() {
   }
 }
 
-// ── Chart ──
+// â”€â”€ Chart â”€â”€
 
 function initChart() {
   if (replay.chart) { replay.chart.remove(); }
@@ -605,50 +605,46 @@ function initChart() {
     minMove: Math.pow(10, -dec),
   };
 
-  replay.chart = LightweightCharts.createChart(chartEl, {
-    width: chartEl.clientWidth,
-    height: chartEl.clientHeight,
-    layout: {
-      background: { color: '#fffbf5' },
-      textColor: '#1f1a17',
-      fontFamily: '"Aptos", "Segoe UI Variable Text", sans-serif',
+  const chartState = window.fxChartCore.createStandardChart(chartEl, {
+    decimals: dec,
+    chartOptions: {
+      width: chartEl.clientWidth,
+      height: chartEl.clientHeight,
+      layout: {
+        background: { color: '#fffbf5' },
+        textColor: '#1f1a17',
+        fontFamily: '"Aptos", "Segoe UI Variable Text", sans-serif',
+      },
+      grid: {
+        vertLines: { color: 'rgba(53,43,34,0.06)' },
+        horzLines: { color: 'rgba(53,43,34,0.06)' },
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(53,43,34,0.12)',
+      },
+      timeScale: {
+        borderColor: 'rgba(53,43,34,0.12)',
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 12,
+      },
     },
-    grid: {
-      vertLines: { color: 'rgba(53,43,34,0.06)' },
-      horzLines: { color: 'rgba(53,43,34,0.06)' },
-    },
+  });
+  replay.chart = chartState.chart;
+  replay.candleSeries = chartState.candleSeries;
+  replay.chart.applyOptions({
     localization: {
       priceFormatter: (value) => Number(value).toFixed(dec),
     },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    rightPriceScale: {
-      borderColor: 'rgba(53,43,34,0.12)',
-    },
-    timeScale: {
-      borderColor: 'rgba(53,43,34,0.12)',
-      timeVisible: true,
-      secondsVisible: false,
-      rightOffset: 12,
-    },
   });
 
-  // Invisible line series added first — zone price lines attach here (renders behind candles)
+  // Invisible line series added first - zone price lines attach here (renders behind candles)
   replay.zoneSeries = replay.chart.addLineSeries({
     color: 'transparent',
     lineWidth: 0,
     lastValueVisible: false,
     priceLineVisible: false,
     crosshairMarkerVisible: false,
-    priceFormat,
-  });
-
-  replay.candleSeries = replay.chart.addCandlestickSeries({
-    upColor: '#1f7a49',
-    downColor: '#b23b29',
-    borderUpColor: '#1f7a49',
-    borderDownColor: '#b23b29',
-    wickUpColor: '#1f7a49',
-    wickDownColor: '#b23b29',
     priceFormat,
   });
 
@@ -662,14 +658,14 @@ function initChart() {
   ro.observe(chartEl);
 }
 
-// ── Scroll streaming ──
+// â”€â”€ Scroll streaming â”€â”€
 
 let _streamDebounceTimer = null;
 
 function onVisibleRangeChange(logicalRange) {
   if (!logicalRange || replay.streamLoading) return;
 
-  // Debounce — wait 200ms after last scroll event
+  // Debounce â€” wait 200ms after last scroll event
   if (_streamDebounceTimer) clearTimeout(_streamDebounceTimer);
   _streamDebounceTimer = setTimeout(() => _checkStreamEdges(logicalRange), 200);
 }
@@ -734,7 +730,7 @@ async function _streamBars(direction) {
     const data = await res.json();
     const newBars = data.bars || [];
     if (!newBars.length) {
-      // No more bars in this direction — stop trying
+      // No more bars in this direction â€” stop trying
       if (direction === 'backward') replay.streamEarliestIso = null;
       else replay.streamLatestIso = null;
       return;
@@ -828,7 +824,7 @@ function _renderAllBars() {
     close: b.close,
   }));
 
-  // Rebuild markers — cached trade markers go on ALL bars (context + frames)
+  // Rebuild markers â€” cached trade markers go on ALL bars (context + frames)
   const markers = [];
   const selectedDate = replay.summary?.date || '';
   const allBarTimes = new Set(allBars.map(b => b.time));
@@ -888,7 +884,7 @@ function _renderAllBars() {
 
   replay.candleSeries.setData(candles);
   replay.zoneSeries.setData(candles.map(c => ({ time: c.time, value: c.close })));
-  // Deduplicate markers — keep one per (time, text) pair
+  // Deduplicate markers â€” keep one per (time, text) pair
   markers.sort((a, b) => a.time - b.time);
   const seenMarkers = new Set();
   const unique = markers.filter(m => {
@@ -1000,7 +996,7 @@ function removeTradeLevels() {
   if (replay._entryLine) { replay.candleSeries.removePriceLine(replay._entryLine); replay._entryLine = null; }
 }
 
-// ── Playback ──
+// â”€â”€ Playback â”€â”€
 
 function jumpToTradeEntry(entryTime) {
   const dt = parseTimestamp(entryTime);
@@ -1016,7 +1012,7 @@ function jumpToTradeEntry(entryTime) {
   updateTradeNavigation();
 
   if (tradeDate !== currentDate) {
-    // Different day — update date picker and reload
+    // Different day â€” update date picker and reload
     dateInput.value = tradeDate;
     loadReplay();
   } else {
@@ -1061,7 +1057,7 @@ function stopPlay() {
   if (replay.playTimer) { clearInterval(replay.playTimer); replay.playTimer = null; }
 }
 
-// ── Info panels ──
+// â”€â”€ Info panels â”€â”€
 
 function _infoRow(label, value) {
   return `<div class="info-row"><span class="info-label">${label}</span><span>${value}</span></div>`;
@@ -1072,7 +1068,7 @@ function renderInfo(index) {
   const dec = REPLAY_DECIMALS;
 
   if (!f) {
-    // No frames for target day — clear bar/trade panels but still show trades list
+    // No frames for target day â€” clear bar/trade panels but still show trades list
     document.getElementById('bar-details').innerHTML = '<div class="info-row" style="color:var(--muted)">No bars for selected date</div>';
     document.getElementById('trade-details').innerHTML = '<div class="info-row" style="color:var(--muted)">No data</div>';
     _renderTradeList(dec);
@@ -1150,7 +1146,7 @@ function _renderTradeList(dec) {
       amountParts.push(`<span class="${cls}">P&L ${pnlSign}${BACKTEST_CURRENCY} ${t.pnl_amount.toFixed(2)}</span>`);
     }
     const amountLine = amountParts.length > 0
-      ? `<span style="width:100%;font-size:0.76rem">${amountParts.join(' · ')}</span>`
+      ? `<span style="width:100%;font-size:0.76rem">${amountParts.join(' Â· ')}</span>`
       : '';
     return `<div class="trade-row" style="flex-wrap:wrap;gap:2px;cursor:pointer" onclick="jumpToTradeEntry('${escapeAttr(t.entry_time)}')">
       <span><span class="pill pill-${t.direction.toLowerCase()}" style="font-size:0.68rem;padding:2px 6px;min-width:auto">${t.direction}</span> @ ${t.entry_price.toFixed(dec)}${t.exit_price ? ' \u2192 ' + t.exit_price.toFixed(dec) : ''}</span>
@@ -1272,7 +1268,7 @@ function renderSummary() {
   const selectedBars = s.selected_day_bars ?? s.total_bars;
   const replayBars = s.replay_bars ?? s.total_bars;
   const barLabel = replayBars > selectedBars
-    ? `${selectedBars} selected · ${replayBars} shown`
+    ? `${selectedBars} selected Â· ${replayBars} shown`
     : `${selectedBars}`;
   html += _infoRow('Bars', `${barLabel}${s.incomplete ? ' (in progress)' : ''}`);
   if (s.continues_after_selected_day) {
@@ -1310,7 +1306,7 @@ function renderSummary() {
   document.getElementById('summary-details').innerHTML = html;
 }
 
-// ── Errors ──
+// â”€â”€ Errors â”€â”€
 
 function showError(msg) {
   errorBanner.textContent = msg;

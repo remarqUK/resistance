@@ -6,6 +6,7 @@
   <title>Live Chart</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/chart-core.js"></script>
   <style>
     body { margin: 0; background: var(--bg-page); }
     .chart-shell { display: flex; flex-direction: column; height: 100vh; }
@@ -38,53 +39,40 @@
 
   <script>
     const params = new URLSearchParams(window.location.search);
-    const pair = params.get('pair') || '';
-    if (!pair) {
-      document.getElementById('pair-name').textContent = 'No pair specified';
+    const signalId = params.get('signal_id') || '';
+    let pair = params.get('pair') || '';
+    let direction = params.get('direction') || null;
+    let entryPrice = parseFloat(params.get('entry_price')) || null;
+    let entryTime = params.get('entry_time') || null;
+    let exitPrice = parseFloat(params.get('exit_price')) || null;
+    let exitTime = params.get('exit_time') || null;
+    let sl = parseFloat(params.get('sl')) || null;
+    let tp = parseFloat(params.get('tp')) || null;
+
+    function updatePairHeader() {
+      if (pair) {
+        document.getElementById('pair-name').textContent = pair;
+        document.title = `${pair} - Live Chart`;
+      } else {
+        document.getElementById('pair-name').textContent = 'No pair specified';
+        document.title = 'Live Chart';
+      }
     }
-    document.getElementById('pair-name').textContent = pair;
-    document.title = `${pair} - Live Chart`;
+
+    updatePairHeader();
 
     let chart = null;
     let candleSeries = null;
-    let supportLine = null;
-    let resistanceLine = null;
     const CHART_DECIMALS = 5;
     let decimals = CHART_DECIMALS;
 
     function initChart() {
       const container = document.getElementById('chart-container');
-      chart = LightweightCharts.createChart(container, {
-        layout: {
-          background: { type: 'solid', color: '#fffaf2' },
-          textColor: '#5b4b3a',
-        },
-        grid: {
-          vertLines: { color: 'rgba(91, 75, 58, 0.08)' },
-          horzLines: { color: 'rgba(91, 75, 58, 0.08)' },
-        },
-        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: 'rgba(91, 75, 58, 0.18)' },
-        timeScale: {
-          borderColor: 'rgba(91, 75, 58, 0.18)',
-          timeVisible: true,
-          secondsVisible: false,
-        },
+      const chartState = window.fxChartCore.createStandardChart(container, {
+        decimals: CHART_DECIMALS,
       });
-
-      candleSeries = chart.addCandlestickSeries({
-        upColor: '#1f7a49',
-        downColor: '#b23b29',
-        borderUpColor: '#1f7a49',
-        borderDownColor: '#b23b29',
-        wickUpColor: '#1f7a49',
-        wickDownColor: '#b23b29',
-        priceFormat: {
-          type: 'price',
-          precision: CHART_DECIMALS,
-          minMove: 1 / Math.pow(10, CHART_DECIMALS),
-        },
-      });
+      chart = chartState.chart;
+      candleSeries = chartState.candleSeries;
 
       chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
 
@@ -93,85 +81,22 @@
       }).observe(container);
     }
 
-    let zoneBands = [];
-
-    function addZoneLines(support, resistance) {
+    function addZoneSummary(support, resistance) {
+      const zoneInfo = document.getElementById('zone-info');
+      if (!zoneInfo) return;
+      zoneInfo.textContent = '';
+      const parts = [];
       if (support) {
-        supportLine = candleSeries.createPriceLine({
-          price: support.lower,
-          color: '#1f7a49',
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: `S ${support.strength}`,
-        });
-        candleSeries.createPriceLine({
-          price: support.upper,
-          color: 'rgba(31, 122, 73, 0.4)',
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dotted,
-          axisLabelVisible: false,
-        });
-        document.getElementById('zone-info').innerHTML +=
-          `<span class="zone-label" style="color:#1f7a49">S:</span> ${support.lower.toFixed(decimals)}-${support.upper.toFixed(decimals)} `;
+        parts.push(`<span class="zone-label" style="color:#1f7a49">S:</span> ${support.lower.toFixed(decimals)}-${support.upper.toFixed(decimals)}`);
       }
       if (resistance) {
-        resistanceLine = candleSeries.createPriceLine({
-          price: resistance.upper,
-          color: '#b23b29',
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: `R ${resistance.strength}`,
-        });
-        candleSeries.createPriceLine({
-          price: resistance.lower,
-          color: 'rgba(178, 59, 41, 0.4)',
-          lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dotted,
-          axisLabelVisible: false,
-        });
-        document.getElementById('zone-info').innerHTML +=
-          `<span class="zone-label" style="color:#b23b29">R:</span> ${resistance.lower.toFixed(decimals)}-${resistance.upper.toFixed(decimals)}`;
+        parts.push(`<span class="zone-label" style="color:#b23b29">R:</span> ${resistance.lower.toFixed(decimals)}-${resistance.upper.toFixed(decimals)}`);
       }
+      zoneInfo.innerHTML = parts.join(' ');
     }
 
     function addZoneBands(support, resistance, bars) {
-      if (!bars || bars.length < 2) return;
-      const first = bars[0].time;
-      const last = bars[bars.length - 1].time;
-      // Extend well beyond visible range so scrolling still shows the band
-      const pad = 365 * 24 * 3600;
-      const t0 = first - pad;
-      const t1 = last + pad;
-
-      function createBand(lower, upper, fillColor) {
-        const series = chart.addBaselineSeries({
-          baseValue: { type: 'price', price: lower },
-          topFillColor1: fillColor,
-          topFillColor2: fillColor,
-          topLineColor: 'transparent',
-          bottomFillColor1: 'transparent',
-          bottomFillColor2: 'transparent',
-          bottomLineColor: 'transparent',
-          lineWidth: 0,
-          priceLineVisible: false,
-          lastValueVisible: false,
-          crosshairMarkerVisible: false,
-        });
-        series.setData([
-          { time: t0, value: upper },
-          { time: t1, value: upper },
-        ]);
-        zoneBands.push(series);
-      }
-
-      if (support) {
-        createBand(support.lower, support.upper, 'rgba(31, 122, 73, 0.10)');
-      }
-      if (resistance) {
-        createBand(resistance.lower, resistance.upper, 'rgba(178, 59, 41, 0.10)');
-      }
+      window.fxChartCore.addZoneBands(chart, support, resistance, bars);
     }
 
     async function loadChartData() {
@@ -182,7 +107,7 @@
         if (data.error) return;
 
         decimals = CHART_DECIMALS;
-        if (data.bars && data.bars.length) {
+      if (data.bars && data.bars.length) {
           loadedBars = data.bars;
           candleSeries.setData(data.bars);
           streamEarliest = data.bars[0].time;
@@ -190,8 +115,9 @@
           const last = data.bars[data.bars.length - 1];
           document.getElementById('live-price').textContent = last.close.toFixed(decimals);
         }
+        addZoneSummary(data.support, data.resistance);
         addZoneBands(data.support, data.resistance, data.bars);
-        addZoneLines(data.support, data.resistance);
+        window.fxChartCore.addZoneLines(candleSeries, data.support, data.resistance, decimals);
       } catch (e) {
         console.error('Failed to load chart data:', e);
       }
@@ -363,44 +289,84 @@
       }
     }
 
-    // Trade overlay from URL params (linked from live diary)
-    const tradeOverlay = {
-      entryPrice: parseFloat(params.get('entry_price')) || null,
-      entryTime: params.get('entry_time') || null,
-      exitPrice: parseFloat(params.get('exit_price')) || null,
-      exitTime: params.get('exit_time') || null,
-      sl: parseFloat(params.get('sl')) || null,
-      tp: parseFloat(params.get('tp')) || null,
-      direction: params.get('direction') || null,
-    };
+    function normalizeDecimal(value) {
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function loadTradeFromSignalId() {
+      if (!signalId) {
+        return Promise.resolve();
+      }
+
+      return fetch(`/api/live-trade?signal_id=${encodeURIComponent(signalId)}`)
+        .then((response) => {
+          if (!response.ok) {
+            return null;
+          }
+          return response.json();
+        })
+        .then((payload) => {
+          if (!payload || !payload.trade) {
+            return;
+          }
+
+          const trade = payload.trade;
+          if (trade.pair) {
+            pair = String(trade.pair).toUpperCase();
+          }
+          if (trade.direction) {
+            direction = String(trade.direction).toUpperCase();
+          }
+          entryPrice = normalizeDecimal(trade.opened_price);
+          if (entryPrice == null) {
+            entryPrice = normalizeDecimal(trade.entry_price);
+          }
+          if (entryPrice == null) {
+            entryPrice = normalizeDecimal(trade.submitted_entry_price);
+          }
+          entryTime = trade.opened_at || trade.signal_time || null;
+          exitPrice = normalizeDecimal(trade.closed_price);
+          exitTime = trade.closed_at || null;
+          sl = normalizeDecimal(trade.submitted_sl_price);
+          if (sl == null) {
+            sl = normalizeDecimal(trade.sl_price);
+          }
+          tp = normalizeDecimal(trade.submitted_tp_price);
+          if (tp == null) {
+            tp = normalizeDecimal(trade.tp_price);
+          }
+          updatePairHeader();
+        });
+    }
 
     function addTradeOverlay() {
-      if (!tradeOverlay.entryPrice || !candleSeries) return;
-      const dir = (tradeOverlay.direction || '').toUpperCase();
+      if (!entryPrice || !candleSeries) return;
+      const dir = (direction || '').toUpperCase();
       const isLong = dir === 'LONG';
 
       // Entry marker
       const markers = [];
-      if (tradeOverlay.entryTime) {
-        const entryTs = Math.floor(new Date(tradeOverlay.entryTime).getTime() / 1000);
+      if (entryTime) {
+        const entryTs = Math.floor(new Date(entryTime).getTime() / 1000);
         markers.push({
           time: entryTs,
           position: isLong ? 'belowBar' : 'aboveBar',
           color: isLong ? '#1f7a49' : '#b23b29',
           shape: isLong ? 'arrowUp' : 'arrowDown',
-          text: `${dir} @ ${tradeOverlay.entryPrice.toFixed(decimals)}`,
+          text: `${dir} @ ${entryPrice.toFixed(decimals)}`,
         });
       }
 
       // Exit marker
-      if (tradeOverlay.exitTime && tradeOverlay.exitPrice) {
-        const exitTs = Math.floor(new Date(tradeOverlay.exitTime).getTime() / 1000);
+      if (exitTime && exitPrice) {
+        const exitTs = Math.floor(new Date(exitTime).getTime() / 1000);
         markers.push({
           time: exitTs,
           position: isLong ? 'aboveBar' : 'belowBar',
           color: '#d4a017',
           shape: 'circle',
-          text: `Exit @ ${tradeOverlay.exitPrice.toFixed(decimals)}`,
+          text: `Exit @ ${exitPrice.toFixed(decimals)}`,
         });
       }
 
@@ -410,9 +376,9 @@
       }
 
       // SL / TP price lines
-      if (tradeOverlay.sl) {
+      if (sl) {
         candleSeries.createPriceLine({
-          price: tradeOverlay.sl,
+          price: sl,
           color: '#b23b29',
           lineWidth: 1,
           lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -420,9 +386,9 @@
           title: 'SL',
         });
       }
-      if (tradeOverlay.tp) {
+      if (tp) {
         candleSeries.createPriceLine({
-          price: tradeOverlay.tp,
+          price: tp,
           color: '#1f7a49',
           lineWidth: 1,
           lineStyle: LightweightCharts.LineStyle.Dashed,
@@ -432,7 +398,7 @@
       }
       // Entry price line
       candleSeries.createPriceLine({
-        price: tradeOverlay.entryPrice,
+        price: entryPrice,
         color: '#d4a017',
         lineWidth: 1,
         lineStyle: LightweightCharts.LineStyle.Solid,
@@ -441,22 +407,22 @@
       });
 
       // Update header with trade info
-      const pnlText = tradeOverlay.exitPrice
+      const pnlText = exitPrice
         ? (() => {
             const dist = isLong
-              ? tradeOverlay.exitPrice - tradeOverlay.entryPrice
-              : tradeOverlay.entryPrice - tradeOverlay.exitPrice;
-            const risk = Math.abs(tradeOverlay.entryPrice - (tradeOverlay.sl || tradeOverlay.entryPrice));
+              ? exitPrice - entryPrice
+              : entryPrice - exitPrice;
+            const risk = Math.abs(entryPrice - (sl || entryPrice));
             const r = risk > 0 ? (dist / risk).toFixed(2) : '?';
             return ` | ${dist > 0 ? '+' : ''}${r}R`;
           })()
         : '';
       document.getElementById('zone-info').innerHTML +=
-        ` <span style="color:#d4a017;font-weight:600">${dir} @ ${tradeOverlay.entryPrice.toFixed(decimals)}${pnlText}</span>`;
+        ` <span style="color:#d4a017;font-weight:600">${dir} @ ${entryPrice.toFixed(decimals)}${pnlText}</span>`;
 
       // Scroll chart to entry time
-      if (tradeOverlay.entryTime) {
-        const entryTs = Math.floor(new Date(tradeOverlay.entryTime).getTime() / 1000);
+      if (entryTime) {
+        const entryTs = Math.floor(new Date(entryTime).getTime() / 1000);
         const padding = 12 * 3600;
         chart.timeScale().setVisibleRange({
           from: entryTs - padding,
@@ -466,16 +432,20 @@
     }
 
     // Init
-    initChart();
-    loadChartData().then(() => {
-      // Seed currentBar from the last loaded bar (the in-progress bar from accumulator)
-      if (loadedBars.length > 0) {
-        const last = loadedBars[loadedBars.length - 1];
-        lastBarTime = last.time;
-        currentBar = { open: last.open, high: last.high, low: last.low, close: last.close };
-      }
-      addTradeOverlay();
-    });
+    (signalId ? loadTradeFromSignalId() : Promise.resolve())
+      .then(function () {
+        initChart();
+        return loadChartData();
+      })
+      .then(function () {
+        // Seed currentBar from the last loaded bar (the in-progress bar from accumulator)
+        if (loadedBars.length > 0) {
+          const last = loadedBars[loadedBars.length - 1];
+          lastBarTime = last.time;
+          currentBar = { open: last.open, high: last.high, low: last.low, close: last.close };
+        }
+        addTradeOverlay();
+      });
     connectWs();
   </script>
 </body>

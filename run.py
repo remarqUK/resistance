@@ -1403,6 +1403,7 @@ def cmd_live(args):
     profile_name = _requested_profile_name(args)
     profile = get_profile(profile_name)
     execution_mode = getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar')
+    chart_tf = profile.get('chart_tf', '1h')
     if args.risk_pct is None:
         args.risk_pct = profile.get('risk_pct', 5.0)
 
@@ -1531,6 +1532,7 @@ def cmd_live(args):
         port=args.port,
         open_browser=not args.no_browser,
         execution_mode=execution_mode,
+        chart_tf=chart_tf,
     )
 
 

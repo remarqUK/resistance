@@ -83,13 +83,17 @@ function buildRows(trades) {
 function openTradeChart(trade) {
   if (!trade || !trade.pair) return;
   const params = new URLSearchParams({ pair: String(trade.pair).toUpperCase() });
-  if (trade.opened_price != null) params.set("entry_price", trade.opened_price);
-  if (trade.opened_at || trade.signal_time) params.set("entry_time", trade.opened_at || trade.signal_time);
-  if (trade.closed_price != null) params.set("exit_price", trade.closed_price);
-  if (trade.closed_at) params.set("exit_time", trade.closed_at);
-  if (trade.submitted_sl_price != null) params.set("sl", trade.submitted_sl_price);
-  if (trade.submitted_tp_price != null) params.set("tp", trade.submitted_tp_price);
-  if (trade.direction) params.set("direction", trade.direction);
+  if (trade.signal_id != null) {
+    params.set("signal_id", trade.signal_id);
+  } else {
+    if (trade.opened_price != null) params.set("entry_price", trade.opened_price);
+    if (trade.opened_at || trade.signal_time) params.set("entry_time", trade.opened_at || trade.signal_time);
+    if (trade.closed_price != null) params.set("exit_price", trade.closed_price);
+    if (trade.closed_at) params.set("exit_time", trade.closed_at);
+    if (trade.submitted_sl_price != null) params.set("sl", trade.submitted_sl_price);
+    if (trade.submitted_tp_price != null) params.set("tp", trade.submitted_tp_price);
+    if (trade.direction) params.set("direction", trade.direction);
+  }
   window.location.href = `/live-trade?${params.toString()}`;
 }
 

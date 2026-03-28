@@ -247,7 +247,7 @@ class _MarginTracker:
         self.balance = new_balance
 
 
-BACKTEST_CACHE_VERSION = '13'
+BACKTEST_CACHE_VERSION = '14'
 
 
 def _serialize_timestamp(value: pd.Timestamp | None) -> str | None:

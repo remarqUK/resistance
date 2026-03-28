@@ -7,13 +7,30 @@ export function LiveTradePage() {
     if (window.__fxLiveTradeScriptLoaded) {
       return;
     }
-    const script = document.createElement('script');
-    script.src = '/static/live_trade.js';
-    script.async = false;
-    script.onload = () => {
-      window.__fxLiveTradeScriptLoaded = true;
+    const ensureScript = (src: string): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector<HTMLScriptElement>(`script[src="${src}"]`);
+        if (existing) {
+          resolve();
+          return;
+        }
+        const node = document.createElement('script');
+        node.src = src;
+        node.async = false;
+        node.onload = () => resolve();
+        node.onerror = () => reject(new Error(`Failed to load ${src}`));
+        document.body.appendChild(node);
+      });
     };
-    document.body.appendChild(script);
+
+    ensureScript('/static/chart-core.js')
+      .then(() => ensureScript('/static/live_trade.js'))
+      .then(() => {
+        window.__fxLiveTradeScriptLoaded = true;
+      })
+      .catch(() => {
+        window.__fxLiveTradeScriptLoaded = true;
+      });
   }, []);
 
   return (

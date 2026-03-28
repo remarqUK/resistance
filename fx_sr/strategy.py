@@ -80,6 +80,7 @@ class Trade:
     bars_held: int = 0      # 1H bars the trade was open
     quality_score: float = 0.0
     commission_cost: float = 0.0    # round-turn commission in account currency
+    best_favorable_price: Optional[float] = None  # best price reached in favorable direction
 
 
 from .profiles import BLOCKED_PAIR_DIRECTIONS
@@ -142,6 +143,13 @@ class StrategyParams:
     quality_sizing: bool = False               # enable quality-based risk scaling
     quality_risk_min: float = 0.5              # risk multiplier for lowest quality (0.5x base)
     quality_risk_max: float = 1.5              # risk multiplier for highest quality (1.5x base)
+    # Zone-to-zone TP capping
+    tp_zone_cap: bool = False                  # cap TP at nearest opposing zone
+    tp_zone_cap_min_rr: float = 0.6            # skip trade if capped RR falls below this
+    # Break-even stop
+    breakeven_r: float = 0.0                   # move SL to entry after reaching this R profit (0=off)
+    # Zone exhaustion quality decay
+    zone_exhaustion_quality_decay: bool = False # multiplicative quality penalty from zone visits
     # Correlation quality selection
     correlation_prefer_quality: bool = False    # prefer higher-quality trades in correlation filter
     # Submit-time live execution guards
@@ -215,6 +223,10 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         min_order_units=merged.get('min_order_units', 1000),
         commission_bps=merged.get('commission_bps', 0.20),
         commission_min_usd=merged.get('commission_min_usd', 2.00),
+        tp_zone_cap=merged.get('tp_zone_cap', False),
+        tp_zone_cap_min_rr=merged.get('tp_zone_cap_min_rr', 0.6),
+        breakeven_r=merged.get('breakeven_r', 0.0),
+        zone_exhaustion_quality_decay=merged.get('zone_exhaustion_quality_decay', False),
     )
 
 
@@ -261,6 +273,7 @@ def generate_signal(
     pair: str,
     time: pd.Timestamp,
     params: StrategyParams,
+    opposing_zone: Optional[SRZone] = None,
 ) -> Optional[Signal]:
     """Check if a 1-hour candle inside a zone produces an entry signal.
 
@@ -312,6 +325,15 @@ def generate_signal(
             return None
         tp = entry_price + risk * params.rr_ratio
 
+        # Cap TP at opposing resistance zone (minus small buffer)
+        if params.tp_zone_cap and opposing_zone is not None and opposing_zone.zone_type == 'resistance':
+            cap_price = opposing_zone.lower  # near edge of resistance
+            if cap_price < tp and cap_price > entry_price:
+                tp = cap_price
+                effective_rr = (tp - entry_price) / risk if risk > 0 else 0.0
+                if effective_rr < params.tp_zone_cap_min_rr:
+                    return None  # not enough room
+
         return Signal(
             time=time, pair=pair, direction='LONG',
             entry_price=entry_price, sl_price=sl, tp_price=tp,
@@ -330,6 +352,15 @@ def generate_signal(
         if risk <= 0:
             return None
         tp = entry_price - risk * params.rr_ratio
+
+        # Cap TP at opposing support zone (plus small buffer)
+        if params.tp_zone_cap and opposing_zone is not None and opposing_zone.zone_type == 'support':
+            cap_price = opposing_zone.upper  # near edge of support
+            if cap_price > tp and cap_price < entry_price:
+                tp = cap_price
+                effective_rr = (entry_price - tp) / risk if risk > 0 else 0.0
+                if effective_rr < params.tp_zone_cap_min_rr:
+                    return None  # not enough room
 
         return Signal(
             time=time, pair=pair, direction='SHORT',
@@ -473,6 +504,12 @@ def score_signal_quality(
     width_score = max(0.0, 1.0 - relative_width / 0.01)
 
     quality = 0.4 * touch_score + 0.3 * body_score + 0.2 * freshness_score + 0.1 * width_score
+
+    # Multiplicative exhaustion decay: zones weaken after repeated visits
+    if params.zone_exhaustion_quality_decay and visits > 0:
+        exhaustion_penalty = min(visits / 5.0, 0.6)
+        quality *= (1.0 - exhaustion_penalty)
+
     return max(0.0, min(1.0, quality))
 
 
@@ -566,7 +603,11 @@ def select_entry_signal(
         return None
 
     row = hourly_df.iloc[bar_idx]
-    for zone in (support_zone, resistance_zone):
+    zone_pairs = [
+        (support_zone, resistance_zone),   # LONG at support, resistance is opposing
+        (resistance_zone, support_zone),   # SHORT at resistance, support is opposing
+    ]
+    for zone, opposing in zone_pairs:
         if zone is None:
             continue
         if check_momentum_filter(hourly_df, bar_idx, zone, params):
@@ -585,6 +626,7 @@ def select_entry_signal(
             pair=pair,
             time=current_time,
             params=params,
+            opposing_zone=opposing,
         )
         if signal is None:
             continue
@@ -653,12 +695,24 @@ def check_price_exit(
     half_spread = get_half_spread_price(pip, params)
     market_exit = get_market_exit_price(close_price, trade.direction, pip, params)
 
+    # Break-even stop: if trade reached breakeven_r, use entry as effective SL
+    effective_sl = trade.sl_price
+    if params.breakeven_r > 0 and trade.best_favorable_price is not None and trade.risk > 0:
+        if trade.direction == 'LONG':
+            best_r = (trade.best_favorable_price - trade.entry_price) / trade.risk
+            if best_r >= params.breakeven_r:
+                effective_sl = max(trade.entry_price, trade.sl_price)
+        else:
+            best_r = (trade.entry_price - trade.best_favorable_price) / trade.risk
+            if best_r >= params.breakeven_r:
+                effective_sl = min(trade.entry_price, trade.sl_price)
+
     if trade.direction == 'LONG':
         tp_hit = high_price >= trade.tp_price + half_spread
-        sl_hit = low_price <= trade.sl_price + half_spread
+        sl_hit = low_price <= effective_sl + half_spread
 
         if tp_hit and sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+            return ('SL', get_stop_exit_price(effective_sl, trade.direction, pip, params))
         if tp_hit:
             return ('TP', trade.tp_price)
 
@@ -671,7 +725,7 @@ def check_price_exit(
                         return ('FRIDAY', market_exit)
 
         if sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+            return ('SL', get_stop_exit_price(effective_sl, trade.direction, pip, params))
 
         loss_r = ((trade.entry_price - market_exit) / trade.risk) if trade.risk > 0 else 0.0
         if close_price < trade.zone_lower or loss_r >= early_exit_r:
@@ -689,10 +743,10 @@ def check_price_exit(
 
     else:
         tp_hit = low_price <= trade.tp_price - half_spread
-        sl_hit = high_price >= trade.sl_price - half_spread
+        sl_hit = high_price >= effective_sl - half_spread
 
         if tp_hit and sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+            return ('SL', get_stop_exit_price(effective_sl, trade.direction, pip, params))
         if tp_hit:
             return ('TP', trade.tp_price)
 
@@ -705,7 +759,7 @@ def check_price_exit(
                         return ('FRIDAY', market_exit)
 
         if sl_hit:
-            return ('SL', get_stop_exit_price(trade.sl_price, trade.direction, pip, params))
+            return ('SL', get_stop_exit_price(effective_sl, trade.direction, pip, params))
 
         loss_r = ((market_exit - trade.entry_price) / trade.risk) if trade.risk > 0 else 0.0
         if close_price > trade.zone_upper or loss_r >= early_exit_r:

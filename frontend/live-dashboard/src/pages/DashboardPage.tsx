@@ -76,6 +76,14 @@ function formatDateOnly(isoString?: string | null) {
   });
 }
 
+const PAUSE_ICON = '\u23F8';
+const RESUME_ICON = '\u25B6';
+const BACKTEST_ICON = '\u21A9';
+const BACKTEST_SPINNER_ICON = '\u27F3';
+const REBUILD_ICON = '\u21BB';
+const RESTART_ICON = '\u21BA';
+const STOP_ICON = '\u23F9';
+
 function badgeClass(value: any) {
   const token = String(value || 'muted').toLowerCase().replaceAll(/[^a-z0-9]+/g, '-');
   return `pill pill-${token}`;
@@ -773,41 +781,8 @@ export function DashboardPage() {
   const signals = useMemo(() => viewState.signals || [], [viewState.signals]);
   const nextTransaction = useMemo(() => nextTransactionText(nowTick), [nowTick]);
 
-  const connectionPill = useMemo(() => {
-    if (connectionState === 'disconnected') {
-      return { className: 'pill pill-disconnected', label: 'Disconnected' };
-    }
-    if (connectionState === 'error') {
-      return { className: 'pill pill-disconnected', label: 'Error' };
-    }
-    if (summary.status === 'backfilling') {
-      return { className: 'pill pill-connecting', label: 'Backfilling' };
-    }
-    if (summary.status === 'live') {
-      return { className: 'pill pill-live', label: 'Live' };
-    }
-    if (summary.status === 'error') {
-      return { className: 'pill pill-disconnected', label: 'Error' };
-    }
-    if (connectionState === 'connecting') {
-      return { className: 'pill pill-muted', label: 'Connecting' };
-    }
-    return { className: 'pill pill-muted', label: summary.status || 'Starting' };
-  }, [connectionState, summary.status]);
-
-  const sizingSummary = useMemo(() => {
-    if (summary.balance !== null && summary.balance !== undefined) {
-      const currency = summary.account_currency ? ` ${summary.account_currency}` : '';
-      const risk = summary.risk_pct !== null && summary.risk_pct !== undefined
-        ? ` · Risk ${formatNumber(summary.risk_pct, 2)}%`
-        : '';
-      return `${formatNumber(summary.balance, 2)}${currency}${risk}`;
-    }
-    if (summary.mode) {
-      return summary.mode;
-    }
-    return 'Resolving';
-  }, [summary.account_currency, summary.balance, summary.mode, summary.risk_pct]);
+  const scanStatus = summary.status || 'Starting';
+  const isScanLive = scanStatus === 'live';
 
   const executionModeLabel = summary.execution_mode_label
     || (summary.execution_mode === 'intrabar' ? 'Intrabar (minute bars)' : 'Next-bar (completed hourly)');
@@ -1000,81 +975,127 @@ export function DashboardPage() {
         <div className="hero-title-row">
           <div>
             <h1><span className="eyebrow">FX support / resistance scanner</span>Live Market Board</h1>
-            <p className="subtitle" id="hero-sizing"><span id="sizing-summary">{sizingSummary}</span> · <span id="strategy-label">{summary.strategy_label || 'Strategy preset'}</span></p>
           </div>
-          <div><span id="connection-pill" className={connectionPill.className}>{connectionPill.label}</span></div>
-          <div>
+          <NavLinks current="/" orientation="horizontal" />
+          <div className="hero-actions hero-middle-actions">
             {summary.execution_available ? (
               <button
                 id="trade-toggle-btn"
                 type="button"
-                className="toolbar-btn hero-toggle-btn"
+                className={`toolbar-btn hero-top-action-link hero-toggle-btn ${summary.execution_paused ? 'is-paused' : ''}`}
                 onClick={() => void toggleExecution()}
+                title={executionTogglePending ? 'Updating execution state' : summary.execution_paused ? 'Resume entries' : 'Pause entries'}
+                aria-label={executionTogglePending ? 'Updating execution state' : summary.execution_paused ? 'Resume entries' : 'Pause entries'}
               >
-                {executionTogglePending ? 'Updating...' : summary.execution_paused ? 'Resume Entries' : 'Pause Entries'}
+                {executionTogglePending ? BACKTEST_SPINNER_ICON : summary.execution_paused ? RESUME_ICON : PAUSE_ICON}
               </button>
             ) : null}
+            <button
+              id="rerun-backtest-btn"
+              type="button"
+              className="toolbar-btn hero-top-action-link cobalt"
+              onClick={() => void rerunBacktest()}
+              disabled={String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'}
+              title={currentBacktestButtonText(summary.backtest || {})}
+              aria-label={currentBacktestButtonText(summary.backtest || {})}
+            >
+              {String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'
+                ? BACKTEST_SPINNER_ICON
+                : BACKTEST_ICON}
+            </button>
+            <button
+              type="button"
+              className="toolbar-btn hero-top-action-link blue"
+              onClick={() => void rebuildUI()}
+              disabled={rebuildState === 'building'}
+              title="Rebuild UI"
+              aria-label="Rebuild UI"
+            >
+              {rebuildState === 'building' ? BACKTEST_SPINNER_ICON : REBUILD_ICON}
+            </button>
+            <button
+              type="button"
+              className="toolbar-btn hero-top-action-link gold"
+              onClick={() => void restartServer()}
+              title="Restart"
+              aria-label="Restart"
+            >
+              {RESTART_ICON}
+            </button>
+            <button
+              id="stop-server-btn"
+              type="button"
+              className="toolbar-btn hero-top-action-link red"
+              onClick={() => void stopServer()}
+              title="Stop"
+              aria-label="Stop"
+            >
+              {STOP_ICON}
+            </button>
           </div>
-          <div><button id="rerun-backtest-btn" type="button" className="toolbar-btn" style={{ background: '#3a6a8c', borderColor: '#3a6a8c' }} onClick={() => void rerunBacktest()} disabled={String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'}>{currentBacktestButtonText(summary.backtest || {})}</button></div>
-          <div><button type="button" className="toolbar-btn" style={{ background: '#257aab', borderColor: '#257aab', minWidth: '90px' }} onClick={() => void rebuildUI()} disabled={rebuildState === 'building'}>{rebuildState === 'building' ? (<span className="spinner" style={{display:'inline-block',width:14,height:14,border:'2px solid rgba(255,255,255,0.3)',borderTopColor:'#fff',borderRadius:'50%',animation:'spin 0.6s linear infinite',verticalAlign:'middle'}} />) : rebuildState === 'done' ? 'Built!' : rebuildState === 'error' ? 'Failed' : 'Rebuild UI'}</button></div>
-          <div><button type="button" className="toolbar-btn" style={{ background: '#7a6430', borderColor: '#7a6430' }} onClick={() => void restartServer()}>Restart</button></div>
-          <div><button id="stop-server-btn" type="button" className="toolbar-btn" style={{ color: '#fff', background: '#b23b29', borderColor: '#b23b29' }} onClick={() => void stopServer()}>Stop</button></div>
-          <NavLinks current="/" />
         </div>
       </header>
 
-      <section className="metrics-grid" id="metrics-grid">
-        <article className="metric-card">
-          <span className="meta-label">Scan state</span>
-          <strong id="scan-status">{summary.status || 'Starting'}</strong>
-          <span id="scan-progress" className="metric-detail">{scanProgressText(summary)}</span>
-        </article>
-        <article className="metric-card">
-          <span className="meta-label">Signals</span>
-          <strong id="signal-count">{signals.length || summary.signal_count || 0}</strong>
-          <span id="pending-count" className="metric-detail">{summary.pending_count || 0} pending blockers</span>
-        </article>
-        <article className="metric-card">
-          <span className="meta-label">Tracked positions</span>
-          <strong id="position-count">{viewState.positions.length || summary.position_count || 0}</strong>
-          <span id="execution-mode" className="metric-detail">{summary.execution_enabled ? 'Live execution enabled' : summary.execution_paused ? 'Execution paused' : 'Scan only'}</span>
-        </article>
-      </section>
-
       <main className="board live-marketboard">
-        <section className="panel panel-watchlist">
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Pair</th>
-                  <th>State</th>
-                  <th>Price</th>
-                  <th>Support</th>
-                  <th>Resistance</th>
-                  <th>Setup</th>
-                  <th>Signal</th>
-                </tr>
-              </thead>
-              <tbody id="watchlist-body">
-                {!sortedRows.length && summary.status === 'backfilling' && backfillPairs.length ? backfillPairs.map((pair) => {
-                  const status = backfillPairStatus[pair] || 'pending';
-                  const label = status === 'ready' ? 'live' : status === 'pending' ? 'wait' : 'connecting';
-                  return (
-                    <tr key={pair}>
-                      <td><span className="pair-main">{pair}</span></td>
-                      <td><span className={badgeClass(label)}>{status}</span></td>
-                      <td colSpan={5} className="price" style={{ opacity: 0.5 }}>{status}</td>
-                    </tr>
-                  );
-                }) : null}
-                {!sortedRows.length && !(summary.status === 'backfilling' && backfillPairs.length) ? (
-                  <tr><td colSpan={7} className="empty">Waiting for first scan.</td></tr>
-                ) : null}
-                {sortedRows.map((row) => <WatchlistRow key={row.pair} row={row} />)}
-              </tbody>
-            </table>
-          </div>
+        <section className="left-side-section">
+          <section className="metrics-grid" id="metrics-grid">
+            <article className="metric-card">
+              <span className="meta-label">Scan state</span>
+              {isScanLive ? (
+                <div className="metric-detail">
+                  <span id="scan-status" className="pill pill-live">{scanStatus}</span>
+                </div>
+              ) : (
+                <strong id="scan-status">{scanStatus}</strong>
+              )}
+              <span id="scan-progress" className="metric-detail">{scanProgressText(summary)}</span>
+            </article>
+            <article className="metric-card">
+              <span className="meta-label">Signals</span>
+              <strong id="signal-count">{signals.length || summary.signal_count || 0}</strong>
+              <span id="pending-count" className="metric-detail">{summary.pending_count || 0} pending blockers</span>
+            </article>
+            <article className="metric-card">
+              <span className="meta-label">Tracked positions</span>
+              <strong id="position-count">{viewState.positions.length || summary.position_count || 0}</strong>
+              <span id="execution-mode" className="metric-detail">{summary.execution_enabled ? 'Live execution enabled' : summary.execution_paused ? 'Execution paused' : 'Scan only'}</span>
+            </article>
+          </section>
+
+          <section className="panel panel-watchlist">
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Pair</th>
+                    <th>State</th>
+                    <th>Price</th>
+                    <th>Support</th>
+                    <th>Resistance</th>
+                    <th>Setup</th>
+                    <th>Signal</th>
+                  </tr>
+                </thead>
+                <tbody id="watchlist-body">
+                  {!sortedRows.length && summary.status === 'backfilling' && backfillPairs.length ? backfillPairs.map((pair) => {
+                    const status = backfillPairStatus[pair] || 'pending';
+                    const label = status === 'ready' ? 'live' : status === 'pending' ? 'wait' : 'connecting';
+                    return (
+                      <tr key={pair}>
+                        <td><span className="pair-main">{pair}</span></td>
+                        <td><span className={badgeClass(label)}>{status}</span></td>
+                        <td colSpan={5} className="price" style={{ opacity: 0.5 }}>{status}</td>
+                      </tr>
+                    );
+                  }) : null}
+                  {!sortedRows.length && !(summary.status === 'backfilling' && backfillPairs.length) ? (
+                    <tr><td colSpan={7} className="empty">Waiting for first scan.</td></tr>
+                  ) : null}
+                  {sortedRows.map((row) => <WatchlistRow key={row.pair} row={row} />)}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
         <section className="side-column">
           <section className="panel">
@@ -1154,14 +1175,22 @@ export function DashboardPage() {
                     </div>
                     {posSelected ? (
                       <div onClick={(e) => e.stopPropagation()}>
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px', marginBottom: '4px' }}>
-                          <button
-                            type="button"
-                            onClick={() => setSelectedPositionKey(null)}
-                            style={{ background: 'none', border: '1px solid var(--line)', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--muted)' }}
-                          >
-                            Hide
-                          </button>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '6px', marginTop: '10px', marginBottom: '4px' }}>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedPositionKey(null)}
+                              style={{ background: 'none', border: '1px solid var(--line)', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--muted)' }}
+                            >
+                              Hide
+                            </button>
+                            <a
+                              href={`/live-trade?pair=${encodeURIComponent(position.pair)}`}
+                              style={{ background: 'none', border: '1px solid var(--line)', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--accent)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+                            >
+                              View Chart
+                            </a>
+                          </div>
                           <button
                             type="button"
                             disabled={closingPositionKey === posKey}
@@ -1194,28 +1223,8 @@ export function DashboardPage() {
           </section>
         </section>
 
-        <section className="panel">
+        <section className="panel transactions-panel">
           <div className="split-panel">
-            <div className="split-panel-section">
-              <div className="panel-subhead">Exit alerts</div>
-              <div id="alerts-list" className="stack-list compact-list">
-                {!viewState.alerts.length ? <div className="empty-card">No exit alerts.</div> : viewState.alerts.map((alert) => (
-                  <article key={`${alert.pair}:${alert.direction}:${alert.exit_reason}:${alert.current_price ?? ''}`} className="mini-card">
-                    <div className="mini-head">
-                      <div>
-                        <strong>{alert.pair}</strong>
-                        <span className="pair-sub">{alert.direction}</span>
-                      </div>
-                      <span className={badgeClass('exit')}>{alert.exit_reason}</span>
-                    </div>
-                    <div className="mini-meta">
-                      <div><span className="value-label">Current</span><span className="value">{formatNumber(alert.current_price, alert.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">P/L</span><span className={`value ${Number(alert.pnl_pips || 0) >= 0 ? 'up' : 'down'}`}>{formatSigned(alert.pnl_pips, 1, ' pips')}</span></div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </div>
             <div className="split-panel-section">
               <div className="panel-subhead">Transactions</div>
               <div id="executions-list" className="stack-list compact-list">
@@ -1314,3 +1323,8 @@ export function DashboardPage() {
     </div>
   );
 }
+
+
+
+
+

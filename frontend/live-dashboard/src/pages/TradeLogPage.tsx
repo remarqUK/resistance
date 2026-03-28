@@ -63,17 +63,16 @@ export function TradeLogPage() {
 
   const rows = useMemo(() => data.signals || [], [data.signals]);
   const chartUrl = useMemo(() => {
-    if (!selectedSignal?.pair) return '';
-    const targetDate = (selectedSignal.closed_at || selectedSignal.signal_time || '').slice(0, 10);
-    const entry = selectedSignal.signal_time || '';
-    const params = new URLSearchParams({ pair: String(selectedSignal.pair).toUpperCase() });
-    if (targetDate) {
-      params.set('date', targetDate);
+    if (!selectedSignal) return '';
+    const params = new URLSearchParams();
+    if (selectedSignal.pair) {
+      params.set('pair', String(selectedSignal.pair).toUpperCase());
     }
-    if (entry) {
-      params.set('entry', String(entry));
+    if (selectedSignal.signal_id) {
+      params.set('signal_id', String(selectedSignal.signal_id));
+      return `/chart?${params.toString()}`;
     }
-    return `/replay?${params.toString()}`;
+    return params.toString() ? `/chart?${params.toString()}` : '';
   }, [selectedSignal]);
 
   return (
@@ -157,31 +156,19 @@ export function TradeLogPage() {
                   const isClosed = String(row.status || '').toUpperCase() === 'CLOSED';
                   const closePrice = row.closed_price != null ? formatNumber(row.closed_price, 5) : '';
                   const closeReason = row.close_reason || '';
-                  const rowIsSelected = selectedSignal && row.signal_id
-                    ? row.signal_id === selectedSignal.signal_id
-                    : false;
+                  const rowKey = row.signal_id || `${row.pair}:${row.signal_time}:${row.direction}`;
+                  const selectedRowKey = selectedSignal
+                    ? (selectedSignal.signal_id || `${selectedSignal.pair}:${selectedSignal.signal_time}:${selectedSignal.direction}`)
+                    : '';
+                  const rowIsSelected = !!selectedSignal && rowKey === selectedRowKey;
                   return (
                     <tr
                       key={row.signal_id || `${row.pair}:${row.signal_time}:${row.direction}`}
                       className={`trade-log-row${rowIsSelected ? ' trade-log-row-selected' : ''}`}
                       style={{ cursor: 'pointer' }}
-                      onClick={() => {
-                        if (row.opened_price != null || row.closed_price != null) {
-                          const p = new URLSearchParams({ pair: row.pair });
-                          if (row.opened_price != null) p.set('entry_price', row.opened_price);
-                          if (row.opened_at || row.signal_time) p.set('entry_time', row.opened_at || row.signal_time);
-                          if (row.closed_price != null) p.set('exit_price', row.closed_price);
-                          if (row.closed_at) p.set('exit_time', row.closed_at);
-                          if (row.submitted_sl_price != null) p.set('sl', row.submitted_sl_price);
-                          else if (row.sl_price != null) p.set('sl', row.sl_price);
-                          if (row.submitted_tp_price != null) p.set('tp', row.submitted_tp_price);
-                          else if (row.tp_price != null) p.set('tp', row.tp_price);
-                          if (row.direction) p.set('direction', row.direction);
-                          window.location.href = `/live-trade?${p.toString()}`;
-                        } else {
+                        onClick={() => {
                           setSelectedSignal(rowIsSelected ? null : row);
-                        }
-                      }}
+                        }}
                       title="Click to review trade"
                     >
                       <td>{formatSignalTime(row.signal_time)}</td>
@@ -211,7 +198,7 @@ export function TradeLogPage() {
       {selectedSignal ? (
         <section className="panel trade-log-chart-panel">
           <div className="trade-log-chart-header">
-            <h2>Trade chart: {selectedSignal.pair}</h2>
+            <h2>Trade chart: {selectedSignal.pair || 'Signal'}</h2>
             <button
               className="toolbar-btn"
               type="button"
@@ -223,7 +210,7 @@ export function TradeLogPage() {
           <iframe
             className="trade-log-chart-frame"
             src={chartUrl}
-            title={`Replay for ${selectedSignal.pair}`}
+            title={`Trade chart for ${selectedSignal.pair || 'signal'}`}
           />
         </section>
       ) : null}

@@ -438,8 +438,8 @@ async function renderSelectedExecutionChart() {
   }
 
   statusEl.textContent = `Loading ${execution.pair} ${replayDate}…`;
-  const startIso = `${replayDate}T00:00:00Z`;
-  const endIso = `${replayDate}T23:59:59Z`;
+    const startIso = `${replayDate}T00:00:00Z`;
+    const endIso = `${replayDate}T23:59:59Z`;
 
   try {
     const params = new URLSearchParams({
@@ -467,34 +467,32 @@ async function renderSelectedExecutionChart() {
       return;
     }
 
-    selectedExecutionChart = LightweightCharts.createChart(chartEl, {
-      layout: {
-        background: { type: "solid", color: "#fffaf2" },
-        textColor: "#5b4b3a",
+    const executionDecimals = execution?.pair?.includes("JPY") ? 3 : PRICE_DISPLAY_DECIMALS;
+    const chartState = window.fxChartCore.createStandardChart(chartEl, {
+      decimals: executionDecimals,
+      chartOptions: {
+        width: chartEl.clientWidth || 520,
+        height: 220,
+        layout: {
+          background: { type: "solid", color: "#fffaf2" },
+          textColor: "#5b4b3a",
+        },
+        grid: {
+          vertLines: { color: "rgba(91, 75, 58, 0.08)" },
+          horzLines: { color: "rgba(91, 75, 58, 0.08)" },
+        },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: "rgba(91, 75, 58, 0.18)" },
+        timeScale: {
+          borderColor: "rgba(91, 75, 58, 0.18)",
+          timeVisible: true,
+          secondsVisible: false,
+        },
       },
-      grid: {
-        vertLines: { color: "rgba(91, 75, 58, 0.08)" },
-        horzLines: { color: "rgba(91, 75, 58, 0.08)" },
-      },
-      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      rightPriceScale: { borderColor: "rgba(91, 75, 58, 0.18)" },
-      timeScale: {
-        borderColor: "rgba(91, 75, 58, 0.18)",
-        timeVisible: true,
-        secondsVisible: false,
-      },
-      width: chartEl.clientWidth || 520,
-      height: 220,
     });
+    selectedExecutionChart = chartState.chart;
+    selectedExecutionSeries = chartState.candleSeries;
 
-    selectedExecutionSeries = selectedExecutionChart.addCandlestickSeries({
-      upColor: "#1f7a49",
-      downColor: "#b23b29",
-      borderUpColor: "#1f7a49",
-      borderDownColor: "#b23b29",
-      wickUpColor: "#1f7a49",
-      wickDownColor: "#b23b29",
-    });
     selectedExecutionSeries.setData(bars);
     selectedExecutionChart.timeScale().fitContent();
 
@@ -709,12 +707,18 @@ function renderSummary() {
   if (summary.balance != null && summary.account_currency) {
     const bal = Number(summary.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const risk = summary.risk_pct != null ? ` · ${Number(summary.risk_pct).toFixed(1)}% risk` : "";
-    els.sizingSummary.textContent = `${summary.account_currency} ${bal}${risk}`;
+    if (els.sizingSummary) {
+      els.sizingSummary.textContent = `${summary.account_currency} ${bal}${risk}`;
+    }
   } else {
-    els.sizingSummary.textContent = "Resolving";
+    if (els.sizingSummary) {
+      els.sizingSummary.textContent = "Resolving";
+    }
   }
 
-  els.strategyLabel.textContent = `${summary.strategy_label || "Strategy"} · ${summary.mode || "scanner"}`;
+  if (els.strategyLabel) {
+    els.strategyLabel.textContent = `${summary.strategy_label || "Strategy"} · ${summary.mode || "scanner"}`;
+  }
 
   // Connection pill
   if (isBackfilling) {
@@ -1215,5 +1219,8 @@ if (rerunBacktestBtn) {
 updateRerunBacktestButton();
 
 connect();
+
+
+
 
 

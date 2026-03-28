@@ -154,6 +154,16 @@ def run_walk_forward(
         exit_trade: Optional[Trade] = None
 
         if current_trade is not None:
+            # Track best favorable price for break-even stop logic
+            if current_trade.direction == 'LONG':
+                bar_best = float(row['High'])
+                if current_trade.best_favorable_price is None or bar_best > current_trade.best_favorable_price:
+                    current_trade.best_favorable_price = bar_best
+            else:
+                bar_best = float(row['Low'])
+                if current_trade.best_favorable_price is None or bar_best < current_trade.best_favorable_price:
+                    current_trade.best_favorable_price = bar_best
+
             bars_held = i - trade_entry_bar
             result = check_exit(
                 current_trade,

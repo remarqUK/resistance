@@ -5,6 +5,7 @@
   var DECIMALS = 5;
   var params = new URLSearchParams(window.location.search);
   var pair = params.get('pair') || '';
+  var signalId = params.get('signal_id') || '';
   var direction = (params.get('direction') || '').toUpperCase();
   var entryPrice = parseFloat(params.get('entry_price')) || null;
   var entryTime = params.get('entry_time') || null;
@@ -12,8 +13,6 @@
   var exitTime = params.get('exit_time') || null;
   var sl = parseFloat(params.get('sl')) || null;
   var tp = parseFloat(params.get('tp')) || null;
-
-  document.title = (pair && direction) ? pair + ' ' + direction + ' - Live Trade' : 'Live Trade Review';
 
   function _row(label, value) {
     return '<div class="info-row"><span class="info-label">' + label + '</span><span>' + value + '</span></div>';
@@ -24,6 +23,41 @@
     var d = new Date(iso);
     if (isNaN(d)) return '\u2014';
     return d.toLocaleString([], {year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+  }
+
+  function normalizeDecimal(value) {
+    var parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function applyTradePayload(trade) {
+    if (!trade) return;
+    if (trade.pair) pair = String(trade.pair).toUpperCase();
+    if (trade.direction) direction = String(trade.direction).toUpperCase();
+    entryPrice = normalizeDecimal(trade.opened_price);
+    if (entryPrice == null) {
+      entryPrice = normalizeDecimal(trade.entry_price);
+    }
+    if (entryPrice == null) {
+      entryPrice = normalizeDecimal(trade.submitted_entry_price);
+    }
+    entryTime = trade.opened_at || trade.signal_time || null;
+    exitPrice = normalizeDecimal(trade.closed_price);
+    exitTime = trade.closed_at || null;
+    sl = normalizeDecimal(trade.submitted_sl_price);
+    if (sl == null) {
+      sl = normalizeDecimal(trade.sl_price);
+    }
+    tp = normalizeDecimal(trade.submitted_tp_price);
+    if (tp == null) {
+      tp = normalizeDecimal(trade.tp_price);
+    }
+  }
+
+  function setPageTitle() {
+    document.title = (pair && direction)
+      ? pair + ' ' + direction + ' - Live Trade'
+      : (pair ? pair + ' - Live Trade Review' : 'Live Trade Review');
   }
 
   function formatPrice(v) {
@@ -85,35 +119,13 @@
 
   function initChart() {
     var container = document.getElementById('chart-container');
-    if (!container || typeof LightweightCharts === 'undefined') return;
+    if (!container) return;
 
-    chart = LightweightCharts.createChart(container, {
-      layout: {
-        background: { type: 'solid', color: '#fffaf2' },
-        textColor: '#5b4b3a',
-      },
-      grid: {
-        vertLines: { color: 'rgba(91, 75, 58, 0.08)' },
-        horzLines: { color: 'rgba(91, 75, 58, 0.08)' },
-      },
-      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      rightPriceScale: { borderColor: 'rgba(91, 75, 58, 0.18)' },
-      timeScale: {
-        borderColor: 'rgba(91, 75, 58, 0.18)',
-        timeVisible: true,
-        secondsVisible: false,
-      },
+    var chartState = window.fxChartCore.createStandardChart(container, {
+      decimals: DECIMALS,
     });
-
-    candleSeries = chart.addCandlestickSeries({
-      upColor: '#1f7a49',
-      downColor: '#b23b29',
-      borderUpColor: '#1f7a49',
-      borderDownColor: '#b23b29',
-      wickUpColor: '#1f7a49',
-      wickDownColor: '#b23b29',
-      priceFormat: { type: 'price', precision: DECIMALS, minMove: 1 / Math.pow(10, DECIMALS) },
-    });
+    chart = chartState.chart;
+    candleSeries = chartState.candleSeries;
 
     new ResizeObserver(function () {
       chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
@@ -122,7 +134,7 @@
 
   function loadChartData() {
     if (!pair) return Promise.resolve();
-    return fetch('/api/chart-data?pair=' + encodeURIComponent(pair))
+    return fetch('/api/chart-data?pair=' + encodeURIComponent(pair) + '&tf=1m')
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         if (data.error) {
@@ -138,12 +150,7 @@
         }
 
         // S/R zone bands
-        if (data.support) {
-          addZoneBand(data.support.lower, data.support.upper, 'rgba(31, 122, 73, 0.10)');
-        }
-        if (data.resistance) {
-          addZoneBand(data.resistance.lower, data.resistance.upper, 'rgba(178, 59, 41, 0.10)');
-        }
+        window.fxChartCore.addZoneBands(chart, data.support, data.resistance, data.bars || []);
       })
       .catch(function () {
         var banner = document.getElementById('error-banner');
@@ -152,28 +159,6 @@
           banner.style.display = 'block';
         }
       });
-  }
-
-  function addZoneBand(lower, upper, fillColor) {
-    var series = chart.addBaselineSeries({
-      baseValue: { type: 'price', price: lower },
-      topFillColor1: fillColor,
-      topFillColor2: fillColor,
-      topLineColor: 'transparent',
-      bottomFillColor1: 'transparent',
-      bottomFillColor2: 'transparent',
-      bottomLineColor: 'transparent',
-      lineWidth: 0,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    });
-    var pad = 365 * 24 * 3600;
-    var now = Math.floor(Date.now() / 1000);
-    series.setData([
-      { time: now - pad, value: upper },
-      { time: now + pad, value: upper },
-    ]);
   }
 
   function addTradeOverlay() {
@@ -258,6 +243,32 @@
     }
   }
 
+function loadTradeFromSignalId() {
+  if (!signalId) {
+    return Promise.resolve();
+  }
+  return fetch('/api/live-trade?signal_id=' + encodeURIComponent(signalId))
+    .then(function (res) {
+      if (!res.ok) {
+        var banner = document.getElementById('error-banner');
+        if (banner) {
+          banner.textContent = 'Unable to load trade details from signal_id';
+          banner.style.display = 'block';
+        }
+        return;
+      }
+      return res.json();
+      })
+      .then(function (payload) {
+        if (!payload || !payload.trade) return;
+        applyTradePayload(payload.trade);
+        setPageTitle();
+      })
+      .catch(function () {
+        return;
+      });
+  }
+
   /* ---- Other trades this day sidebar ---- */
   function fetchOtherTrades() {
     var sidebar = document.getElementById('other-trades-sidebar');
@@ -291,7 +302,11 @@
 
         for (var i = 0; i < trades.length; i++) {
           var t = trades[i];
-          var isCurrent = t.pair === pair && (t.signal_time || '') === entryTime;
+          var rowSignalId = t.signal_id || '';
+          var rowSignalTime = t.signal_time || t.opened_at || '';
+          var isCurrent = signalId
+            ? String(rowSignalId) === signalId
+            : (t.pair === pair && rowSignalTime === entryTime);
           var cls = (Number(t.pnl_r) || 0) >= 0 ? 'up' : 'down';
           var pnlR = t.pnl_r != null ? (t.pnl_r > 0 ? '+' : '') + Number(t.pnl_r).toFixed(2) + 'R' : '';
           var hm = function (iso) {
@@ -304,14 +319,12 @@
           var dirLabel = (t.direction || '').charAt(0);
           var dirCls = (t.direction || '').toLowerCase();
 
-          var clickAttr = isCurrent ? '' : ' onclick="window.location.href=\'/live-trade?pair=' + (t.pair || '') +
-            '&entry_price=' + (t.opened_price || '') +
-            '&entry_time=' + encodeURIComponent(t.opened_at || t.signal_time || '') +
-            (t.closed_price != null ? '&exit_price=' + t.closed_price : '') +
-            (t.closed_at ? '&exit_time=' + encodeURIComponent(t.closed_at) : '') +
-            (t.submitted_sl_price != null ? '&sl=' + t.submitted_sl_price : '') +
-            (t.submitted_tp_price != null ? '&tp=' + t.submitted_tp_price : '') +
-            '&direction=' + (t.direction || '') + '\'" style="cursor:pointer"';
+          var encodedPair = encodeURIComponent(t.pair || '');
+          var clickQuery = 'pair=' + encodedPair;
+          if (rowSignalId) {
+            clickQuery += '&signal_id=' + encodeURIComponent(rowSignalId);
+          }
+          var clickAttr = isCurrent ? '' : ' onclick="window.location.href=\'/live-trade?' + clickQuery + '\'" style="cursor:pointer"';
 
           html += '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:0.8rem;border-bottom:1px solid var(--line)"' + clickAttr + '>';
           html += '<span class="pill pill-' + dirCls + '" style="font-size:0.62rem;padding:1px 5px;min-width:auto">' + dirLabel + '</span>';
@@ -329,10 +342,18 @@
   }
 
   /* ---- Init ---- */
-  renderInfo();
-  initChart();
-  loadChartData().then(function () {
+  var boot = Promise.resolve();
+  if (signalId) {
+    boot = boot.then(loadTradeFromSignalId);
+  }
+  boot.then(function () {
+    setPageTitle();
+    renderInfo();
+    initChart();
+    return loadChartData();
+  }).then(function () {
     addTradeOverlay();
     fetchOtherTrades();
   });
+
 })();

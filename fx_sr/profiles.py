@@ -157,6 +157,9 @@ PROFILES = {
     'optimized': {
         'description': 'Best risk-adjusted: 99 trades, +337% return, 17.8% max DD at 5% risk',
 
+        # Chart timeframe for the live dashboard pair chart
+        'chart_tf': '1h',
+
         # Zone detection
         'pivot_window': 5,
         'cluster_tolerance': 0.08,
@@ -204,6 +207,9 @@ PROFILES = {
     'source': {
         'description': 'Source-like 1:1 profile with tighter correlation cap',
 
+        # Chart timeframe for the live dashboard pair chart
+        'chart_tf': '1h',
+
         # Zone detection
         'pivot_window': 5,
         'cluster_tolerance': 0.08,
@@ -250,6 +256,9 @@ PROFILES = {
 
     'balanced': {
         'description': 'Conservative profile with default filters',
+
+        # Chart timeframe for the live dashboard pair chart
+        'chart_tf': '1h',
 
         # Zone detection
         'pivot_window': 5,
@@ -357,6 +366,9 @@ PROFILES = {
         # Execution mode: 'intrabar' evaluates on minute bars, 'next_bar' waits for hourly close
         'execution_mode': 'intrabar',
 
+        # Chart timeframe for the live dashboard pair chart
+        'chart_tf': '1m',
+
         # Dynamic risk sizing: scale risk down during drawdowns
         'dynamic_risk': True,
         'dd_risk_start': 5.0,
@@ -364,8 +376,87 @@ PROFILES = {
         'dd_risk_floor': 0.5,
     },
 
+    'high_volume_v2': {
+        'description': 'high_volume + TP zone cap + break-even stop + exhaustion decay',
+
+        # Zone detection (same as high_volume)
+        'pivot_window': 5,
+        'cluster_tolerance': 0.08,
+        'major_touches': 3,
+        'max_zone_width_pct': 0.35,
+        'zone_history_days': 180,
+
+        # Entry rules (same as high_volume)
+        'min_zone_touches': 3,
+        'zone_penetration_pct': 0.36,
+        'min_entry_candle_body_pct': 0.0,
+        'momentum_lookback': 2,
+        'momentum_threshold': 0.75,
+        'blocked_hours': [2, 3],
+        'blocked_days': [],
+        'max_linger_bars': 0,
+        'linger_lookback': 8,
+        'zone_exhaustion_threshold': 0,
+        'zone_exhaustion_lookback': 50,
+
+        # Exit rules (same as high_volume)
+        'rr_ratio': 1.1,
+        'sl_buffer_pct': 0.15,
+        'early_exit_r': 0.35,
+        'max_hold_bars': 72,
+        'sideways_bars': 15,
+        'sideways_threshold': 0.3,
+        'friday_tp_pct': 0.70,
+
+        # Position management (same as high_volume)
+        'cooldown_bars': 1,
+        'max_correlated_trades': 4,
+        'use_correlation_filter': True,
+        'correlation_prefer_quality': True,
+
+        # Execution model (same as high_volume)
+        'spread_pips': 0.6,
+        'stop_slippage_pips': 0.2,
+
+        # Filters (same as high_volume)
+        'use_time_filters': True,
+        'use_pair_direction_filter': True,
+
+        # Quality-based sizing (same as high_volume)
+        'quality_sizing': True,
+        'quality_risk_min': 0.5,
+        'quality_risk_max': 1.6,
+
+        # Backtest settings (same as high_volume)
+        'hourly_days': 365,
+        'starting_balance': 1000.0,
+        'risk_pct': 6.0,
+
+        # Margin safety (same as high_volume)
+        'margin_cushion_pct': 15.0,
+
+        # Execution mode (same as high_volume)
+        'execution_mode': 'intrabar',
+        'chart_tf': '1m',
+
+        # Dynamic risk sizing (same as high_volume)
+        'dynamic_risk': True,
+        'dd_risk_start': 5.0,
+        'dd_risk_full': 18.0,
+        'dd_risk_floor': 0.5,
+
+        # === NEW: Three improvements ===
+        'tp_zone_cap': True,
+        'tp_zone_cap_min_rr': 0.6,
+        'breakeven_r': 0.5,
+        'zone_exhaustion_quality_decay': True,
+    },
+
     'aggressive': {
         'description': 'Higher-return profile with looser entry filters',
+
+        # Chart timeframe for the live dashboard pair chart
+        'chart_tf': '1h',
 
         # Zone detection
         'pivot_window': 5,

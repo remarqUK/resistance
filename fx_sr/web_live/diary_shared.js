@@ -10,7 +10,7 @@
 
 /* ── Constants ───────────────────────────────────────────────────────── */
 
-const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PRICE_DISPLAY_DECIMALS = 5;
 
 /* ── Formatting helpers ──────────────────────────────────────────────── */
@@ -128,6 +128,7 @@ function renderMonth(monthDate) {
     for (let i = 0; i < 7; i++) {
       const day = new Date(c);
       day.setDate(c.getDate() + i);
+      if (day.getDay() === 0) continue;
       week.push(renderDay(day, monthDate.getMonth()));
     }
     weeks.push(`<div class="diary-week">${week.join("")}</div>`);
@@ -169,6 +170,7 @@ function renderDay(dayDate, activeMonth) {
       <span class="diary-day-number">${dayDate.getDate()}</span>
       <span class="diary-day-count">${dayState.count} trade${dayState.count === 1 ? "" : "s"}</span>
       <span class="diary-day-pl">${formatSigned(dayState.total_pnl_r, 2, "R")}</span>
+      <span class="diary-day-pl">\u00a3${formatSigned(dayState.total_pnl_gbp, 2, "")}</span>
     </button>
   `;
 }

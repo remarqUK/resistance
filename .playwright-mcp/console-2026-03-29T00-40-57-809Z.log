@@ -1,0 +1,5 @@
+[       4ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:8765/static/chart-core.js:0
+[     211ms] TypeError: Cannot read properties of undefined (reading 'createStandardChart')
+    at initChart (http://localhost:8765/chart?pair=USDCAD:71:45)
+    at http://localhost:8765/chart?pair=USDCAD:437:9
+[     217ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:8765/favicon.ico:0

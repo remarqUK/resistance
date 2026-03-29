@@ -25,19 +25,21 @@ function buildCalendarState(trades) {
     const d = tradeDate(t);
     if (!d) continue;
     if (!map.has(d)) {
-      map.set(d, { date: d, trades: [], count: 0, wins: 0, losses: 0, total_pnl_r: 0 });
+      map.set(d, { date: d, trades: [], count: 0, wins: 0, losses: 0, total_pnl_r: 0, total_pnl_gbp: 0 });
     }
     const row = map.get(d);
     row.trades.push(t);
     row.count += 1;
     const r = Number(t.pnl_r) || 0;
     row.total_pnl_r += r;
+    row.total_pnl_gbp += Number(t.pnl_gbp) || 0;
     if (r > 0) row.wins += 1;
     if (r < 0) row.losses += 1;
   }
   for (const row of map.values()) {
     row.trades.sort((a, b) => String(b.signal_time || "").localeCompare(String(a.signal_time || "")));
     row.total_pnl_r = Number(row.total_pnl_r.toFixed(2));
+    row.total_pnl_gbp = Number(row.total_pnl_gbp.toFixed(2));
   }
   return map;
 }
@@ -52,9 +54,12 @@ function buildRows(trades) {
     const d = new Date(iso);
     return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",hour12:false});
   };
-  bodyEl.innerHTML = trades.map((t, i) => {
+  const totalGbp = trades.reduce((sum, t) => sum + (Number(t.pnl_gbp) || 0), 0);
+  const rows = trades.map((t, i) => {
     const pnlR = Number(t.pnl_r) || 0;
+    const pnlGbp = Number(t.pnl_gbp) || 0;
     const cls = pnlR >= 0 ? "up" : "down";
+    const gbpCls = pnlGbp >= 0 ? "up" : "down";
     const dirCls = (t.direction || "").toLowerCase();
     const dirLabel = (t.direction || "").charAt(0);
     const entryHm = _hhmm(t.opened_at || t.signal_time);
@@ -62,15 +67,39 @@ function buildRows(trades) {
     const timeRange = exitHm ? `${entryHm}\u2013${exitHm}` : entryHm;
     const reason = t.close_reason || (t.status === "OPEN" ? "Open" : "");
     return `
-      <div class="trade-history-row" data-idx="${i}" style="display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--line);cursor:pointer;font-size:0.82rem">
-        <span class="pill pill-${dirCls}" style="font-size:0.62rem;padding:1px 5px;min-width:auto">${dirLabel}</span>
-        <span style="font-weight:600;min-width:56px">${t.pair || "\u2013"}</span>
-        <span style="flex:1;color:var(--muted);font-size:0.76rem">${timeRange}</span>
-        <span class="${cls}" style="font-weight:600;min-width:50px;text-align:right">${formatSigned(t.pnl_r, 2, "R")}</span>
-        <span style="color:var(--muted);font-size:0.72rem;min-width:30px;text-align:right">${reason}</span>
-      </div>
+      <tr class="trade-history-row" data-idx="${i}" style="cursor:pointer">
+        <td><span class="pill pill-${dirCls}" style="font-size:0.62rem;padding:1px 5px;min-width:auto">${dirLabel}</span></td>
+        <td style="font-weight:600">${t.pair || "\u2013"}</td>
+        <td style="color:var(--muted);font-size:0.76rem">${timeRange}</td>
+        <td class="${cls}" style="font-weight:600;text-align:right">${formatSigned(t.pnl_r, 2, "R")}</td>
+        <td class="${gbpCls}" style="font-weight:600;text-align:right">\u00a3${formatSigned(pnlGbp, 2, "")}</td>
+        <td style="color:var(--muted);font-size:0.72rem;text-align:right">${reason}</td>
+      </tr>
     `;
   }).join("");
+
+  bodyEl.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:0.82rem">
+      <thead>
+        <tr style="font-size:0.72rem;color:var(--muted);text-align:left">
+          <th style="padding:4px 4px 4px 0"></th>
+          <th style="padding:4px">Pair</th>
+          <th style="padding:4px">Time</th>
+          <th style="padding:4px;text-align:right">P/L</th>
+          <th style="padding:4px;text-align:right">GBP</th>
+          <th style="padding:4px;text-align:right">Exit</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+      <tfoot>
+        <tr style="font-weight:700;font-size:0.82rem;border-top:2px solid var(--line)">
+          <td colspan="4" style="padding:5px 4px;text-align:right">Total</td>
+          <td class="${totalGbp >= 0 ? "up" : "down"}" style="padding:5px 4px;text-align:right">\u00a3${formatSigned(totalGbp, 2, "")}</td>
+          <td></td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
 
   bodyEl.querySelectorAll(".trade-history-row").forEach((row) => {
     const idx = Number(row.dataset.idx);
@@ -117,6 +146,7 @@ function loadDateTrades(date) {
   summaryEl.innerHTML = `
     <strong>${date}</strong> \u2014 ${dayData.count} trade${dayData.count === 1 ? "" : "s"} (W/L ${dayData.wins}/${dayData.losses})
     \u00b7 R: <span class="${cls}">${formatSigned(r, 2, "R")}</span>
+    \u00b7 <span class="${cls}">\u00a3${formatSigned(dayData.total_pnl_gbp, 2, "")}</span>
   `;
   buildRows(dayData.trades);
 }

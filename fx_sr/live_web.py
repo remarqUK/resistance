@@ -2494,6 +2494,27 @@ async def _chart_page(_request: web.Request) -> web.StreamResponse:
 
 
 
+async def _account_history_api(_request: web.Request) -> web.Response:
+    """Return daily account balance and P&L snapshots for the equity chart."""
+
+    import asyncio
+    from .live_history import load_daily_snapshots, get_or_fetch_today_snapshot
+
+    snapshots, today = await asyncio.gather(
+        asyncio.to_thread(load_daily_snapshots),
+        asyncio.to_thread(get_or_fetch_today_snapshot),
+    )
+
+    # Merge today's live snapshot if it's not already the last entry
+    if today:
+        if not snapshots or snapshots[-1]['date'] != today['date']:
+            snapshots.append(today)
+        else:
+            snapshots[-1] = today
+
+    return web.json_response({'snapshots': snapshots})
+
+
 async def _live_diary_api(_request: web.Request) -> web.Response:
     """Return live trades for the diary calendar."""
 
@@ -2940,6 +2961,7 @@ def run_live_web_app(
     app.router.add_get('/live-diary', _index)
     app.router.add_get('/live-trade', _index)
     app.router.add_get('/api/live-diary', _live_diary_api)
+    app.router.add_get('/api/account-history', _account_history_api)
     app.router.add_get('/api/live-trade', _live_trade_api)
     app.router.add_get('/trade-log', _index)
     app.router.add_get('/api/trade-log', handle_trade_log_api)
@@ -2967,4 +2989,4 @@ def run_live_web_app(
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
-    web.run_app(app, host='127.0.0.1', port=port, print=None)
+    web.run_app(app, host='0.0.0.0', port=port, print=None)

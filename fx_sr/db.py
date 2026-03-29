@@ -410,6 +410,15 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
         CREATE INDEX IF NOT EXISTS idx_backtest_pair_updated_at
         ON backtest_result (pair, updated_at DESC)
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS account_daily_snapshot (
+            snapshot_date   DATE PRIMARY KEY,
+            net_liquidation DOUBLE PRECISION NOT NULL,
+            daily_pnl_gbp  DOUBLE PRECISION,
+            currency        TEXT NOT NULL DEFAULT 'GBP',
+            recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
 
 
 def _escape_sql_value(value: str) -> str:

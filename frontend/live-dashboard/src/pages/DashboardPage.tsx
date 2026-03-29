@@ -664,6 +664,127 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, sl
   );
 });
 
+function AccountChart() {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [empty, setEmpty] = useState(false);
+
+  useEffect(() => {
+    const chartApi = window.LightweightCharts;
+    const container = containerRef.current;
+    if (!container || !chartApi) return;
+
+    let active = true;
+    let chart: any = null;
+    let ro: ResizeObserver | null = null;
+
+    async function load() {
+      try {
+        const res = await fetch('/api/account-history');
+        const data = await res.json();
+        const snapshots = data.snapshots || [];
+        if (!active) return;
+        if (!snapshots.length) { setEmpty(true); return; }
+
+        chart = chartApi.createChart(container, {
+          width: container.clientWidth,
+          height: 220,
+          layout: {
+            background: { type: 'solid', color: 'transparent' },
+            textColor: '#999',
+            fontSize: 11,
+          },
+          grid: {
+            vertLines: { color: 'rgba(0,0,0,0.06)' },
+            horzLines: { color: 'rgba(0,0,0,0.06)' },
+          },
+          rightPriceScale: {
+            visible: true,
+            borderVisible: true,
+            borderColor: 'rgba(0,0,0,0.15)',
+          },
+          leftPriceScale: {
+            visible: true,
+            borderVisible: true,
+            borderColor: 'rgba(0,0,0,0.15)',
+          },
+          timeScale: {
+            borderVisible: true,
+            borderColor: 'rgba(0,0,0,0.15)',
+            fixLeftEdge: true,
+            fixRightEdge: true,
+          },
+          crosshair: {
+            horzLine: { visible: false, labelVisible: false },
+          },
+        });
+
+        // Balance line on left scale — smoothed filled area
+        const balanceSeries = chart.addAreaSeries({
+          lineColor: '#5b9cf6',
+          topColor: 'rgba(91,156,246,0.28)',
+          bottomColor: 'rgba(91,156,246,0.02)',
+          lineWidth: 2,
+          lineType: 2,
+          priceScaleId: 'left',
+          lastValueVisible: true,
+          priceLineVisible: false,
+          crosshairMarkerVisible: true,
+          title: 'Balance',
+        });
+        balanceSeries.setData(
+          snapshots.map((s: any) => ({ time: s.date, value: s.balance }))
+        );
+
+        // Daily P&L histogram on right scale
+        const pnlSeries = chart.addHistogramSeries({
+          priceScaleId: 'right',
+          lastValueVisible: false,
+          priceLineVisible: false,
+          title: 'Daily P&L',
+        });
+        pnlSeries.setData(
+          snapshots
+            .filter((s: any) => s.daily_pnl_gbp != null)
+            .map((s: any) => ({
+              time: s.date,
+              value: s.daily_pnl_gbp,
+              color: s.daily_pnl_gbp >= 0 ? 'rgba(38,166,91,0.7)' : 'rgba(214,69,65,0.7)',
+            }))
+        );
+
+        chart.timeScale().fitContent();
+
+        ro = new ResizeObserver(() => {
+          if (chart) chart.applyOptions({ width: container.clientWidth });
+        });
+        ro.observe(container);
+      } catch {
+        if (active) setEmpty(true);
+      }
+    }
+
+    void load();
+    return () => {
+      active = false;
+      if (ro) { ro.disconnect(); ro = null; }
+      if (chart) { chart.remove(); chart = null; }
+    };
+  }, []);
+
+  return (
+    <section className="panel" style={{ marginBottom: '1rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+        <span className="meta-label" style={{ fontSize: '0.78rem' }}>Account equity &amp; daily P&amp;L (GBP)</span>
+      </div>
+      {empty
+        ? <div className="empty" style={{ fontSize: '0.82rem', padding: '12px 0' }}>No account history yet.</div>
+        : <div ref={containerRef} style={{ width: '100%' }} />
+      }
+    </section>
+  );
+}
+
+
 export function DashboardPage() {
   const [viewState, setViewState] = useState<DashboardState>(INITIAL_STATE);
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'disconnected' | 'error'>('connecting');
@@ -974,64 +1095,66 @@ export function DashboardPage() {
       <header className="hero">
         <div className="hero-title-row">
           <div>
-            <h1><span className="eyebrow">FX support / resistance scanner</span>Live Market Board</h1>
+            <h1><span className="eyebrow">FX support / resistance scanner</span>Forex Sentinel</h1>
           </div>
-          <NavLinks current="/" orientation="horizontal" />
-          <div className="hero-actions hero-middle-actions">
-            {summary.execution_available ? (
-              <button
-                id="trade-toggle-btn"
-                type="button"
-                className={`toolbar-btn hero-top-action-link hero-toggle-btn ${summary.execution_paused ? 'is-paused' : ''}`}
-                onClick={() => void toggleExecution()}
-                title={executionTogglePending ? 'Updating execution state' : summary.execution_paused ? 'Resume entries' : 'Pause entries'}
-                aria-label={executionTogglePending ? 'Updating execution state' : summary.execution_paused ? 'Resume entries' : 'Pause entries'}
-              >
-                {executionTogglePending ? BACKTEST_SPINNER_ICON : summary.execution_paused ? RESUME_ICON : PAUSE_ICON}
-              </button>
-            ) : null}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+            <NavLinks current="/" orientation="horizontal" />
+            <div className="hero-actions hero-middle-actions" style={{ display: 'flex', flexDirection: 'row', gap: '12px' }}>
+          {summary.execution_available ? (
             <button
-              id="rerun-backtest-btn"
+              id="trade-toggle-btn"
               type="button"
-              className="toolbar-btn hero-top-action-link cobalt"
-              onClick={() => void rerunBacktest()}
-              disabled={String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'}
-              title={currentBacktestButtonText(summary.backtest || {})}
-              aria-label={currentBacktestButtonText(summary.backtest || {})}
+              className={`toolbar-btn hero-top-action-link hero-toggle-btn ${summary.execution_paused ? 'is-paused' : ''}`}
+              onClick={() => void toggleExecution()}
+              title={executionTogglePending ? 'Updating execution state' : summary.execution_paused ? 'Resume entries' : 'Pause entries'}
+              aria-label={executionTogglePending ? 'Updating execution state' : summary.execution_paused ? 'Resume entries' : 'Pause entries'}
             >
-              {String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'
-                ? BACKTEST_SPINNER_ICON
-                : BACKTEST_ICON}
+              {executionTogglePending ? BACKTEST_SPINNER_ICON : summary.execution_paused ? RESUME_ICON : PAUSE_ICON}
             </button>
-            <button
-              type="button"
-              className="toolbar-btn hero-top-action-link blue"
-              onClick={() => void rebuildUI()}
-              disabled={rebuildState === 'building'}
-              title="Rebuild UI"
-              aria-label="Rebuild UI"
-            >
-              {rebuildState === 'building' ? BACKTEST_SPINNER_ICON : REBUILD_ICON}
-            </button>
-            <button
-              type="button"
-              className="toolbar-btn hero-top-action-link gold"
-              onClick={() => void restartServer()}
-              title="Restart"
-              aria-label="Restart"
-            >
-              {RESTART_ICON}
-            </button>
-            <button
-              id="stop-server-btn"
-              type="button"
-              className="toolbar-btn hero-top-action-link red"
-              onClick={() => void stopServer()}
-              title="Stop"
-              aria-label="Stop"
-            >
-              {STOP_ICON}
-            </button>
+          ) : null}
+          <button
+            id="rerun-backtest-btn"
+            type="button"
+            className="toolbar-btn hero-top-action-link cobalt"
+            onClick={() => void rerunBacktest()}
+            disabled={String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'}
+            title={currentBacktestButtonText(summary.backtest || {})}
+            aria-label={currentBacktestButtonText(summary.backtest || {})}
+          >
+            {String(summary.backtest?.status || 'idle') === 'starting' || String(summary.backtest?.status || 'idle') === 'running'
+              ? BACKTEST_SPINNER_ICON
+              : BACKTEST_ICON}
+          </button>
+          <button
+            type="button"
+            className="toolbar-btn hero-top-action-link blue"
+            onClick={() => void rebuildUI()}
+            disabled={rebuildState === 'building'}
+            title="Rebuild UI"
+            aria-label="Rebuild UI"
+          >
+            {rebuildState === 'building' ? BACKTEST_SPINNER_ICON : REBUILD_ICON}
+          </button>
+          <button
+            type="button"
+            className="toolbar-btn hero-top-action-link gold"
+            onClick={() => void restartServer()}
+            title="Restart"
+            aria-label="Restart"
+          >
+            {RESTART_ICON}
+          </button>
+          <button
+            id="stop-server-btn"
+            type="button"
+            className="toolbar-btn hero-top-action-link red"
+            onClick={() => void stopServer()}
+            title="Stop"
+            aria-label="Stop"
+          >
+            {STOP_ICON}
+          </button>
+            </div>
           </div>
         </div>
       </header>
@@ -1061,6 +1184,8 @@ export function DashboardPage() {
               <span id="execution-mode" className="metric-detail">{summary.execution_enabled ? 'Live execution enabled' : summary.execution_paused ? 'Execution paused' : 'Scan only'}</span>
             </article>
           </section>
+
+          <AccountChart />
 
           <section className="panel panel-watchlist">
             <div className="table-wrap">
@@ -1099,6 +1224,7 @@ export function DashboardPage() {
         </section>
         <section className="side-column">
           <section className="panel">
+            <div className="panel-subhead">Active Signals</div>
             <div id="signals-list" className="stack-list">
               {!signals.length ? <div className="empty-card">No active signals.</div> : signals.map((signal) => {
                 const plan = signal.size_plan || {};
@@ -1133,7 +1259,7 @@ export function DashboardPage() {
           </section>
 
           <section className="panel">
-            <div className="panel-subhead" style={{ marginBottom: '0.5rem' }}>Tracked Positions</div>
+            <div className="panel-subhead">Tracked Positions</div>
             <div id="positions-list" className="stack-list compact-list">
               {!viewState.positions.length ? <div className="empty-card">No tracked positions.</div> : viewState.positions.map((position) => {
                 const posKey = `${position.pair}:${position.direction}`;
@@ -1221,12 +1347,11 @@ export function DashboardPage() {
               })}
             </div>
           </section>
-        </section>
 
-        <section className="panel transactions-panel">
-          <div className="split-panel">
-            <div className="split-panel-section">
-              <div className="panel-subhead">Transactions</div>
+          <section className="panel transactions-panel">
+            <div className="split-panel">
+              <div className="split-panel-section">
+                <div className="panel-subhead">Transactions</div>
               <div id="executions-list" className="stack-list compact-list">
                 {!viewState.executions.length ? <div className="empty-card">No execution activity.</div> : [...viewState.executions].reverse().map((execution) => {
                   const key = executionKey(execution);
@@ -1301,23 +1426,24 @@ export function DashboardPage() {
               </div>
             </div>
           </div>
-        </section>
+          </section>
 
-        <section className="panel panel-log">
-          <div className="panel-head">
-            <div>
-              <p className="panel-kicker">Flow</p>
-              <h2>Event log</h2>
+          <section className="panel panel-log">
+            <div className="panel-head">
+              <div>
+                <p className="panel-kicker">Flow</p>
+                <h2>Event log</h2>
+              </div>
             </div>
-          </div>
-          <div id="log-list" className="log-list">
-            {!viewState.log.length ? <div className="empty-card">No events yet.</div> : [...viewState.log].reverse().map((entry, index) => (
-              <article key={`${entry.ts || 'log'}:${index}`} className={`log-row ${levelTone(entry.level)}`}>
-                <p>{entry.message}</p>
-                <time>{entry.ts || ''}</time>
-              </article>
-            ))}
-          </div>
+            <div id="log-list" className="log-list">
+              {!viewState.log.length ? <div className="empty-card">No events yet.</div> : [...viewState.log].reverse().map((entry, index) => (
+                <article key={`${entry.ts || 'log'}:${index}`} className={`log-row ${levelTone(entry.level)}`}>
+                  <p>{entry.message}</p>
+                  <time>{entry.ts || ''}</time>
+                </article>
+              ))}
+            </div>
+          </section>
         </section>
       </main>
     </div>

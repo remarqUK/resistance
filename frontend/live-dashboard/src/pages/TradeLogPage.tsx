@@ -141,6 +141,8 @@ export function TradeLogPage() {
                   <th>Spread</th>
                   <th>Quote</th>
                   <th>P&amp;L</th>
+                  <th>P/L R</th>
+                  <th>P/L GBP</th>
                   <th>Close Price</th>
                   <th>Close Reason</th>
                   <th>Note</th>
@@ -153,6 +155,10 @@ export function TradeLogPage() {
                   const ask = row.submit_ask != null ? formatNumber(row.submit_ask, 5) : '';
                   const bidAsk = bid && ask ? `${bid}/${ask}` : '';
                   const pnl = row.pnl_pips != null ? `${Number(row.pnl_pips) > 0 ? '+' : ''}${Number(row.pnl_pips).toFixed(1)}` : '';
+                  const pnlR = row.pnl_r != null ? `${Number(row.pnl_r) > 0 ? '+' : ''}${Number(row.pnl_r).toFixed(2)}R` : '';
+                  const pnlGbp = row.pnl_gbp != null ? `\u00a3${Number(row.pnl_gbp) > 0 ? '+' : ''}${Number(row.pnl_gbp).toFixed(2)}` : '';
+                  const pnlRClass = row.pnl_r != null ? (Number(row.pnl_r) >= 0 ? 'up' : 'down') : '';
+                  const pnlGbpClass = row.pnl_gbp != null ? (Number(row.pnl_gbp) >= 0 ? 'up' : 'down') : '';
                   const isClosed = String(row.status || '').toUpperCase() === 'CLOSED';
                   const closePrice = row.closed_price != null ? formatNumber(row.closed_price, 5) : '';
                   const closeReason = row.close_reason || '';
@@ -183,6 +189,8 @@ export function TradeLogPage() {
                       <td>{spread}</td>
                       <td>{row.quote_source || ''}</td>
                       <td>{pnl}</td>
+                      <td className={pnlRClass}>{pnlR}</td>
+                      <td className={pnlGbpClass}>{pnlGbp}</td>
                       <td>{isClosed ? closePrice : ''}</td>
                       <td>{isClosed ? closeReason : ''}</td>
                       <td className="note" title={row.note || ''}>{row.note || ''}</td>

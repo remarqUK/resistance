@@ -49,7 +49,7 @@ export function LiveDiaryPage() {
             </div>
           </div>
 
-          <div style={{ width: 320, flexShrink: 0 }}>
+          <div style={{ width: 420, flexShrink: 0 }}>
             <div className="diary-selected-date" id="selected-date" style={{ marginBottom: '8px' }}>Select a day to view trades.</div>
             <div id="diary-body" style={{ fontSize: '0.84rem' }}>
               <div style={{ color: 'var(--muted)', padding: '8px 0' }}>Select a date.</div>

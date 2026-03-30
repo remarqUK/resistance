@@ -1797,6 +1797,80 @@ def submit_fx_market_bracket_order(
             return None
 
 
+def submit_bracket_for_existing_position(
+    pair: str,
+    direction: str,
+    quantity: int,
+    take_profit_price: float,
+    stop_loss_price: float,
+    order_ref: str = '',
+) -> Optional[dict]:
+    """Submit standalone TP limit + SL stop orders for an existing position.
+
+    Used to restore bracket protection after a gateway restart wipes
+    working orders but preserves positions.  Unlike
+    submit_fx_market_bracket_order this does NOT place a parent market
+    order — the position already exists.
+    """
+    if quantity <= 0:
+        return None
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None
+
+        try:
+            from ib_async import LimitOrder, StopOrder
+
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
+            rounded_tp, rounded_sl = _round_bracket_exit_prices(
+                pair, direction, take_profit_price, stop_loss_price,
+                ib=ib, contract=contract,
+            )
+
+            close_action = 'SELL' if direction == 'LONG' else 'BUY'
+            ref_prefix = f'{order_ref}:rebracket' if order_ref else 'rebracket'
+
+            tp_order = LimitOrder(
+                close_action,
+                int(quantity),
+                float(rounded_tp),
+                orderId=ib.client.getReqId(),
+                orderRef=f'{ref_prefix}:tp',
+                tif='GTC',
+                transmit=False,
+            )
+            sl_order = StopOrder(
+                close_action,
+                int(quantity),
+                float(rounded_sl),
+                orderId=ib.client.getReqId(),
+                orderRef=f'{ref_prefix}:sl',
+                tif='GTC',
+                transmit=True,
+            )
+
+            tp_trade = ib.placeOrder(contract, tp_order)
+            sl_trade = ib.placeOrder(contract, sl_order)
+
+            tp_live = getattr(tp_trade, 'order', None)
+            sl_live = getattr(sl_trade, 'order', None)
+
+            return {
+                'pair': pair,
+                'direction': direction,
+                'take_profit_order_id': getattr(tp_live, 'orderId', None),
+                'stop_loss_order_id': getattr(sl_live, 'orderId', None),
+                'take_profit_price': float(rounded_tp),
+                'stop_loss_price': float(rounded_sl),
+            }
+        except Exception as e:
+            print(f"    Warning: failed to resubmit brackets for {pair}: {e}")
+            return None
+
+
 def cancel_orders(order_ids: set[int]) -> list[int]:
     """Cancel one or more orders by ID. Returns the IDs that were successfully sent."""
 

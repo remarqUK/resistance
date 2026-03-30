@@ -225,5 +225,51 @@ class IbkrOrderRoundingTests(unittest.TestCase):
         self.assertAlmostEqual(result['stop_loss_price'], 159.69)
 
 
+class SubmitBracketForExistingPositionTests(unittest.TestCase):
+    def test_submits_limit_and_stop_orders(self):
+        fake_ib_async = types.ModuleType('ib_async')
+        fake_ib_async.LimitOrder = MagicMock()
+        fake_ib_async.StopOrder = MagicMock()
+
+        ib = MagicMock()
+        ib.client.getReqId.side_effect = [200, 201]
+        ib.qualifyContracts = MagicMock()
+        contract = MagicMock()
+
+        tp_trade = MagicMock()
+        sl_trade = MagicMock()
+        tp_trade.order = MagicMock(orderId=200)
+        sl_trade.order = MagicMock(orderId=201)
+        ib.placeOrder.side_effect = [tp_trade, sl_trade]
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}), \
+                patch('fx_sr.ibkr._get_connection', return_value=(ib, True)), \
+                patch('fx_sr.ibkr._make_contract', return_value=contract), \
+                patch('fx_sr.ibkr._round_bracket_exit_prices', return_value=(1.1050, 1.0950)):
+            result = ibkr.submit_bracket_for_existing_position(
+                pair='EURUSD',
+                direction='LONG',
+                quantity=10000,
+                take_profit_price=1.1050,
+                stop_loss_price=1.0950,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result['take_profit_order_id'], 200)
+        self.assertEqual(result['stop_loss_order_id'], 201)
+        self.assertEqual(ib.placeOrder.call_count, 2)
+
+    def test_returns_none_when_not_connected(self):
+        with patch('fx_sr.ibkr._get_connection', return_value=(None, False)):
+            result = ibkr.submit_bracket_for_existing_position(
+                pair='EURUSD',
+                direction='LONG',
+                quantity=10000,
+                take_profit_price=1.1050,
+                stop_loss_price=1.0950,
+            )
+        self.assertIsNone(result)
+
+
 if __name__ == '__main__':
     unittest.main()

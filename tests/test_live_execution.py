@@ -504,5 +504,106 @@ class LiveExecutionTests(unittest.TestCase):
         self.assertEqual(updated.latest_pair_close('GBPUSD').pnl_r, -1.0)
 
 
+class ResubmitMissingBracketsTests(unittest.TestCase):
+    """Test that orphaned positions get their brackets restored."""
+
+    def test_resubmits_when_bracket_orders_missing(self):
+        """Position exists at IBKR, signal has bracket IDs, but orders are gone."""
+        from fx_sr.positions import _resubmit_missing_brackets
+
+        signal_row = {
+            'signal_id': 'EURUSD:LONG:abc123',
+            'pair': 'EURUSD',
+            'direction': 'LONG',
+            'take_profit_order_id': 100,
+            'stop_loss_order_id': 101,
+            'submitted_tp_price': 1.1050,
+            'submitted_sl_price': 1.0950,
+            'tp_price': 1.1050,
+            'sl_price': 1.0950,
+        }
+
+        with patch(
+            'fx_sr.positions.ibkr.fetch_open_order_pairs',
+            return_value=set(),
+        ), patch(
+            'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
+            return_value={
+                'take_profit_order_id': 200,
+                'stop_loss_order_id': 201,
+                'take_profit_price': 1.1050,
+                'stop_loss_price': 1.0950,
+            },
+        ) as submit_mock, patch(
+            'fx_sr.positions._update_signal_bracket_ids',
+        ) as update_mock:
+            _resubmit_missing_brackets(signal_row, ibkr_size=10000)
+
+        submit_mock.assert_called_once_with(
+            pair='EURUSD',
+            direction='LONG',
+            quantity=10000,
+            take_profit_price=1.1050,
+            stop_loss_price=1.0950,
+        )
+        update_mock.assert_called_once_with(
+            'EURUSD:LONG:abc123', 200, 201,
+        )
+
+    def test_skips_when_orders_still_working(self):
+        """Position has bracket orders that are still live at IBKR — no resubmission."""
+        from fx_sr.positions import _resubmit_missing_brackets
+
+        signal_row = {
+            'signal_id': 'EURUSD:LONG:abc123',
+            'pair': 'EURUSD',
+            'direction': 'LONG',
+            'take_profit_order_id': 100,
+            'stop_loss_order_id': 101,
+            'submitted_tp_price': 1.1050,
+            'submitted_sl_price': 1.0950,
+            'tp_price': 1.1050,
+            'sl_price': 1.0950,
+        }
+
+        with patch(
+            'fx_sr.positions.ibkr.fetch_open_order_pairs',
+            return_value={'EURUSD'},
+        ), patch(
+            'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
+        ) as submit_mock, patch(
+            'fx_sr.positions._update_signal_bracket_ids',
+        ):
+            _resubmit_missing_brackets(signal_row, ibkr_size=10000)
+
+        submit_mock.assert_not_called()
+
+    def test_skips_when_no_bracket_ids_on_signal(self):
+        """Signal was never bracketed (e.g. external position) — skip."""
+        from fx_sr.positions import _resubmit_missing_brackets
+
+        signal_row = {
+            'signal_id': 'EURUSD:LONG:abc123',
+            'pair': 'EURUSD',
+            'direction': 'LONG',
+            'take_profit_order_id': None,
+            'stop_loss_order_id': None,
+            'submitted_tp_price': None,
+            'submitted_sl_price': None,
+            'tp_price': 1.1050,
+            'sl_price': 1.0950,
+        }
+
+        with patch(
+            'fx_sr.positions.ibkr.fetch_open_order_pairs',
+            return_value=set(),
+        ), patch(
+            'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
+        ) as submit_mock:
+            _resubmit_missing_brackets(signal_row, ibkr_size=10000)
+
+        submit_mock.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

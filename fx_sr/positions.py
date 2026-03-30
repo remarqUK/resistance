@@ -631,6 +631,93 @@ def _resolve_closed_position_details(info: dict) -> tuple[str, float | None, str
 
 
 # ---------------------------------------------------------------------------
+# Bracket resubmission helpers
+# ---------------------------------------------------------------------------
+
+def _update_signal_bracket_ids(
+    signal_id: str,
+    tp_order_id: int | None,
+    sl_order_id: int | None,
+) -> None:
+    """Overwrite the TP/SL order IDs on a detected_signal row."""
+    from .live_history import load_detected_signal_conn, _replace_row_conn
+    with _tracking_db_transaction() as conn:
+        row = load_detected_signal_conn(conn, signal_id)
+        if row is None:
+            return
+        row['take_profit_order_id'] = tp_order_id
+        row['stop_loss_order_id'] = sl_order_id
+        _replace_row_conn(conn, row)
+
+
+def _resubmit_missing_brackets(
+    signal_row: dict,
+    ibkr_size: float,
+) -> None:
+    """Resubmit TP/SL bracket orders if the originals were lost (e.g. gateway restart).
+
+    Checks whether the pair still has working orders at IBKR.  If not,
+    and the signal has bracket prices, submits new TP limit + SL stop
+    and updates the signal record with the new order IDs.
+    """
+    tp_oid = signal_row.get('take_profit_order_id')
+    sl_oid = signal_row.get('stop_loss_order_id')
+
+    # Only attempt if the signal originally had bracket orders
+    if tp_oid is None and sl_oid is None:
+        return
+
+    pair = signal_row['pair']
+    direction = signal_row['direction']
+
+    # Check if the pair still has working orders at IBKR
+    open_pairs = ibkr.fetch_open_order_pairs()
+    if pair in open_pairs:
+        return  # Brackets (or other orders) still live — nothing to do
+
+    tp_price = (
+        float(signal_row['submitted_tp_price'])
+        if signal_row.get('submitted_tp_price') is not None
+        else float(signal_row['tp_price'])
+        if signal_row.get('tp_price') is not None
+        else None
+    )
+    sl_price = (
+        float(signal_row['submitted_sl_price'])
+        if signal_row.get('submitted_sl_price') is not None
+        else float(signal_row['sl_price'])
+        if signal_row.get('sl_price') is not None
+        else None
+    )
+    if tp_price is None or sl_price is None:
+        return
+
+    quantity = int(abs(ibkr_size))
+    print(f"    Resubmitting brackets for {pair} {direction} "
+          f"(TP={tp_price}, SL={sl_price}, qty={quantity})")
+
+    result = ibkr.submit_bracket_for_existing_position(
+        pair=pair,
+        direction=direction,
+        quantity=quantity,
+        take_profit_price=tp_price,
+        stop_loss_price=sl_price,
+    )
+    if result is None:
+        print(f"    Warning: bracket resubmission failed for {pair}")
+        return
+
+    _update_signal_bracket_ids(
+        signal_row['signal_id'],
+        result['take_profit_order_id'],
+        result['stop_loss_order_id'],
+    )
+    print(f"    Brackets restored for {pair}: "
+          f"TP order={result['take_profit_order_id']}, "
+          f"SL order={result['stop_loss_order_id']}")
+
+
+# ---------------------------------------------------------------------------
 # Sync + monitoring
 # ---------------------------------------------------------------------------
 

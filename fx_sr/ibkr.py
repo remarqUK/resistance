@@ -1832,6 +1832,7 @@ def submit_bracket_for_existing_position(
 
             close_action = 'SELL' if direction == 'LONG' else 'BUY'
             ref_prefix = f'{order_ref}:rebracket' if order_ref else 'rebracket'
+            oca_group = f'rebracket_{pair}_{ib.client.getReqId()}'
 
             tp_order = LimitOrder(
                 close_action,
@@ -1840,6 +1841,8 @@ def submit_bracket_for_existing_position(
                 orderId=ib.client.getReqId(),
                 orderRef=f'{ref_prefix}:tp',
                 tif='GTC',
+                ocaGroup=oca_group,
+                ocaType=1,
                 transmit=False,
             )
             sl_order = StopOrder(
@@ -1849,6 +1852,8 @@ def submit_bracket_for_existing_position(
                 orderId=ib.client.getReqId(),
                 orderRef=f'{ref_prefix}:sl',
                 tif='GTC',
+                ocaGroup=oca_group,
+                ocaType=1,
                 transmit=True,
             )
 

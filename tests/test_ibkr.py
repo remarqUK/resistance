@@ -232,7 +232,7 @@ class SubmitBracketForExistingPositionTests(unittest.TestCase):
         fake_ib_async.StopOrder = MagicMock()
 
         ib = MagicMock()
-        ib.client.getReqId.side_effect = [200, 201]
+        ib.client.getReqId.side_effect = [199, 200, 201]
         ib.qualifyContracts = MagicMock()
         contract = MagicMock()
 
@@ -258,6 +258,13 @@ class SubmitBracketForExistingPositionTests(unittest.TestCase):
         self.assertEqual(result['take_profit_order_id'], 200)
         self.assertEqual(result['stop_loss_order_id'], 201)
         self.assertEqual(ib.placeOrder.call_count, 2)
+
+    def test_returns_none_when_quantity_zero(self):
+        result = ibkr.submit_bracket_for_existing_position(
+            pair='EURUSD', direction='LONG', quantity=0,
+            take_profit_price=1.1050, stop_loss_price=1.0950,
+        )
+        self.assertIsNone(result)
 
     def test_returns_none_when_not_connected(self):
         with patch('fx_sr.ibkr._get_connection', return_value=(None, False)):

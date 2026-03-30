@@ -828,6 +828,10 @@ def sync_positions(
         elif signal_id:
             signal_row = load_detected_signal(signal_id)
 
+        # --- Bracket resubmission for orphaned positions ---
+        if signal_row is not None and not is_new_position and not size_changed:
+            _resubmit_missing_brackets(signal_row, ibkr_size=pos['size'])
+
         signal_status = signal_row.get('status') if signal_row is not None else (
             existing_info.get('signal_status') if existing_info is not None else None
         )

@@ -640,9 +640,9 @@ def _update_signal_bracket_ids(
     sl_order_id: int | None,
 ) -> None:
     """Overwrite the TP/SL order IDs on a detected_signal row."""
-    from .live_history import load_detected_signal_conn, _replace_row_conn
+    from .live_history import _load_detected_signal_conn, _replace_row_conn
     with _tracking_db_transaction() as conn:
-        row = load_detected_signal_conn(conn, signal_id)
+        row = _load_detected_signal_conn(conn, signal_id)
         if row is None:
             return
         row['take_profit_order_id'] = tp_order_id

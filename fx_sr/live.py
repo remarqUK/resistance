@@ -61,6 +61,12 @@ from . import ibkr
 _ACCOUNT_REFRESH_INTERVAL = 300  # 5 minutes
 
 
+def _per_slot_margin(balance: float, margin_cushion_pct: float, margin_slots: int) -> float:
+    """Compute the per-position margin budget from account balance."""
+    usable = float(balance) * (1.0 - margin_cushion_pct / 100.0)
+    return usable / max(margin_slots, 1)
+
+
 class _AccountCache:
     """Time-gated cache for IBKR account balance and excess liquidity."""
 
@@ -287,7 +293,7 @@ NEAR_ZONE_THRESHOLD_PCT = 0.30
 _LIVE_DAILY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
 _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
-_WALK_FORWARD_CACHE: Dict[str, tuple[str, str, Optional[Signal]]] = {}  # pair -> (hourly_bucket, zone_bucket, signal)
+_WALK_FORWARD_CACHE: Dict[str, tuple[str, Optional[Signal]]] = {}  # pair -> (cache_key, signal)
 
 
 @dataclass
@@ -901,6 +907,7 @@ def _scan_pair(
             minute_df=minute_df,
             execution_mode=execution_mode,
             force_close_end=True,
+            snapshot_source='live',
         )
 
         # If the walk-forward has an open trade at the current bar, build a
@@ -1143,14 +1150,12 @@ def build_live_size_plans(
         hourly_data_cache=hourly_data_cache,
     )
 
-    # Compute per-slot margin budget: same logic as execute_signal_plans.
+    # Compute per-slot margin budget: cushion baked in, so downstream gets 0.
     available_margin: Optional[float] = None
     display_margin_cushion_pct: float = params.margin_cushion_pct
     if params.enforce_margin and balance is not None:
-        usable = float(balance) * (1.0 - params.margin_cushion_pct / 100.0)
-        per_slot_margin = usable / max(params.margin_slots, 1)
-        available_margin = per_slot_margin
-        display_margin_cushion_pct = 0.0  # cushion already baked into slot budget
+        available_margin = _per_slot_margin(balance, params.margin_cushion_pct, params.margin_slots)
+        display_margin_cushion_pct = 0.0
 
     plans: List[Optional[PositionSizePlan]] = []
     for signal in signals:
@@ -1342,44 +1347,24 @@ def _prepare_execution_plan(
         if whatif is not None:
             margin_change = whatif.get('init_margin_change')
             if margin_change is not None and margin_change > available_margin:
-                # Scale units down to fit the slot budget
                 scale = available_margin / margin_change
                 clamped_units = int(repriced_plan.units * scale)
                 if clamped_units < params.min_order_units:
                     return None, f'margin slot exceeded ({margin_change:.0f} > {available_margin:.0f})'
-                # Rebuild plan with clamped units
+                # Rebuild with reduced risk to match clamped units
+                clamped_risk = float(size_plan.risk_amount) * scale
                 repriced_plan = build_position_size_plan_for_risk_amount(
                     pair=signal.pair,
                     direction=signal.direction,
                     entry_price=core_plan.entry_price,
                     stop_price=core_plan.stop_price,
                     balance=float(size_plan.balance),
-                    risk_amount=float(size_plan.risk_amount),
+                    risk_amount=clamped_risk,
                     account_currency=size_plan.account_currency,
                     price_lookup=quote_price_lookup,
-                    available_margin=available_margin,
-                    margin_cushion_pct=0.0,
-                    enforce_margin=params.enforce_margin,
+                    enforce_margin=False,
                     min_order_units=params.min_order_units,
                 )
-                if repriced_plan is None or repriced_plan.units > clamped_units:
-                    # Force the clamped size by rebuilding with exact risk for those units
-                    from .sizing import build_position_size_plan_for_risk_amount as _rebuild
-                    stop_distance = abs(core_plan.entry_price - core_plan.stop_price)
-                    risk_per_unit = quote_price_lookup(signal.pair) or 1.0
-                    clamped_risk = float(size_plan.risk_amount) * (clamped_units / repriced_plan.units if repriced_plan else 1.0)
-                    repriced_plan = _rebuild(
-                        pair=signal.pair,
-                        direction=signal.direction,
-                        entry_price=core_plan.entry_price,
-                        stop_price=core_plan.stop_price,
-                        balance=float(size_plan.balance),
-                        risk_amount=clamped_risk,
-                        account_currency=size_plan.account_currency,
-                        price_lookup=quote_price_lookup,
-                        enforce_margin=False,
-                        min_order_units=params.min_order_units,
-                    )
                 if repriced_plan is None:
                     return None, 'size unavailable after margin clamp'
 
@@ -1453,15 +1438,12 @@ def execute_signal_plans(
         if slot_risk_amount is not None and params.use_correlation_filter
         else None
     )
-    # Compute per-slot margin budget: divide usable margin equally across slots.
-    # Cushion is applied here so downstream clamp_units_to_margin gets cushion=0.
+    # Compute per-slot margin budget: cushion baked in, so downstream gets 0.
     exec_available_margin: Optional[float] = None
     exec_margin_cushion_pct: float = params.margin_cushion_pct
     if params.enforce_margin and balance is not None:
-        usable = float(balance) * (1.0 - params.margin_cushion_pct / 100.0)
-        per_slot_margin = usable / max(params.margin_slots, 1)
-        exec_available_margin = per_slot_margin
-        exec_margin_cushion_pct = 0.0  # cushion already baked into slot budget
+        exec_available_margin = _per_slot_margin(balance, params.margin_cushion_pct, params.margin_slots)
+        exec_margin_cushion_pct = 0.0
 
     results: list[Optional[ExecutionResult]] = [None] * len(signals)
     planned: dict[int, PreparedExecutionPlan] = {}

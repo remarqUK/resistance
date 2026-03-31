@@ -168,6 +168,9 @@ class StrategyParams:
     # Live scan lookback — must cover max_hold_bars so any trade the backtest
     # would still be holding is also found by the live walk-forward.
     scan_lookback_bars: int = 72              # walk last N hourly bars (matches max_hold_bars = 3 days)
+    # Diagnostic: dump JSON trade snapshots to logs/ for backtest/live parity debugging.
+    # Toggle off once parity is confirmed.
+    trade_snapshot_logging: bool = True
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -233,6 +236,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         breakeven_r=merged.get('breakeven_r', 0.0),
         zone_exhaustion_quality_decay=merged.get('zone_exhaustion_quality_decay', False),
         scan_lookback_bars=merged.get('scan_lookback_bars', 72),
+        trade_snapshot_logging=merged.get('trade_snapshot_logging', True),
     )
 
 

@@ -728,6 +728,7 @@ def run_backtest(
         execution_quote_provider=execution_quote_provider,
         execution_mode=execution_mode,
         force_close_end=True,
+        snapshot_source='backtest',
     )
     pending_trade = _build_pending_end_trade(
         hourly_df,
@@ -987,6 +988,7 @@ def run_backtest_fast(
         execution_quote_provider=execution_quote_provider,
         execution_mode=execution_mode,
         force_close_end=True,
+        snapshot_source='backtest',
     )
     pending_trade = _build_pending_end_trade(
         hourly_df,

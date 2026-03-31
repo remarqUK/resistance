@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import replace
+import json
+import os
+from dataclasses import asdict, dataclass, replace
 from typing import Callable, Optional
 
 import pandas as pd
@@ -22,6 +23,75 @@ from .strategy import (
     select_entry_signal,
 )
 from .intrabar import find_intrabar_signal, intrabar_execution_time
+
+
+_LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+
+
+def _zone_snapshot(zone: SRZone | None) -> dict | None:
+    if zone is None:
+        return None
+    return {'upper': zone.upper, 'lower': zone.lower, 'strength': zone.strength, 'touches': zone.touches}
+
+
+def _write_trade_snapshot(
+    *,
+    source: str,
+    event: str,
+    pair: str,
+    timestamp: pd.Timestamp,
+    signal: Signal | None,
+    trade: Trade | None,
+    quote: ExecutionQuote | None = None,
+    execution_plan=None,
+    bar_index: int = 0,
+    bar_time: pd.Timestamp | None = None,
+    bar_row: pd.Series | None = None,
+    bars_held: int = 0,
+    nearest_support: SRZone | None = None,
+    nearest_resistance: SRZone | None = None,
+    exit_reason: str | None = None,
+    exit_price: float | None = None,
+) -> None:
+    """Write a JSON trade snapshot to logs/. Fire-and-forget — never raises."""
+    try:
+        os.makedirs(_LOGS_DIR, exist_ok=True)
+        ts_str = str(timestamp).replace(':', '').replace(' ', '-')[:13]
+        filename = f"{source}-{event}-{pair}-{ts_str}.json"
+        snapshot = {
+            'source': source,
+            'event': event,
+            'pair': pair,
+            'timestamp': str(timestamp),
+            'signal': asdict(signal) if signal else None,
+            'trade': asdict(trade) if trade else None,
+            'execution_quote': asdict(quote) if quote else None,
+            'execution_plan': {
+                'entry_price': execution_plan.entry_price,
+                'stop_price': execution_plan.stop_price,
+                'take_profit_price': execution_plan.take_profit_price,
+            } if execution_plan else None,
+            'bar': {
+                'time': str(bar_time),
+                'open': float(bar_row['Open']) if bar_row is not None else None,
+                'high': float(bar_row['High']) if bar_row is not None else None,
+                'low': float(bar_row['Low']) if bar_row is not None else None,
+                'close': float(bar_row['Close']) if bar_row is not None else None,
+            },
+            'bar_index': bar_index,
+            'bars_held': bars_held,
+            'zones': {
+                'support': _zone_snapshot(nearest_support),
+                'resistance': _zone_snapshot(nearest_resistance),
+            },
+            'exit_reason': exit_reason,
+            'exit_price': exit_price,
+        }
+        filepath = os.path.join(_LOGS_DIR, filename)
+        with open(filepath, 'w') as f:
+            json.dump(snapshot, f, indent=2, default=str)
+    except Exception:
+        pass  # Snapshot failures must never break trading
 
 
 def slice_daily_window(
@@ -180,6 +250,7 @@ def run_walk_forward(
     on_bar: Callable[[WalkForwardBar], None] | None = None,
     force_close_end: bool = True,
     is_entry_blocked: Callable[[pd.Timestamp], bool] | None = None,
+    snapshot_source: str = '',
 ) -> WalkForwardResult:
     """Run the shared per-bar execution loop for one pair.
 
@@ -193,6 +264,8 @@ def run_walk_forward(
     (e.g. cooldown between trades) without coupling portfolio policy into
     the walk-forward engine.
     """
+
+    _snap = bool(snapshot_source and params.trade_snapshot_logging)
 
     trades: list[Trade] = []
     current_trade: Optional[Trade] = None
@@ -251,6 +324,15 @@ def run_walk_forward(
                     pip,
                 )
                 trades.append(exit_trade)
+                if _snap:
+                    _write_trade_snapshot(
+                        source=snapshot_source, event='exit', pair=pair,
+                        timestamp=current_time, signal=None, trade=exit_trade,
+                        bar_index=i, bar_time=current_time, bar_row=row,
+                        bars_held=bars_held, nearest_support=nearest_support,
+                        nearest_resistance=nearest_resistance,
+                        exit_reason=exit_reason, exit_price=exit_price,
+                    )
                 current_trade = None
                 if on_bar is not None:
                     on_bar(
@@ -315,12 +397,21 @@ def run_walk_forward(
             else:
                 current_trade = None
 
+            _entry_signal = pending_signal  # capture before clearing
             del quote_note
             pending_signal = None
             pending_signal_submit_time = None
             if current_trade is not None:
                 trade_entry_bar = i
                 opened_trade = current_trade
+                if _snap:
+                    _write_trade_snapshot(
+                        source=snapshot_source, event='entry', pair=pair,
+                        timestamp=current_time, signal=_entry_signal, trade=current_trade,
+                        quote=quote, execution_plan=execution_plan,
+                        bar_index=i, bar_time=current_time, bar_row=row,
+                        nearest_support=nearest_support, nearest_resistance=nearest_resistance,
+                    )
 
         if opened_trade is not None:
             result = check_exit(
@@ -344,6 +435,15 @@ def run_walk_forward(
                     pip,
                 )
                 trades.append(exit_trade)
+                if _snap:
+                    _write_trade_snapshot(
+                        source=snapshot_source, event='exit', pair=pair,
+                        timestamp=current_time, signal=None, trade=exit_trade,
+                        bar_index=i, bar_time=current_time, bar_row=row,
+                        bars_held=0, nearest_support=nearest_support,
+                        nearest_resistance=nearest_resistance,
+                        exit_reason=exit_reason, exit_price=exit_price,
+                    )
                 current_trade = None
                 if on_bar is not None:
                     on_bar(
@@ -424,6 +524,14 @@ def run_walk_forward(
                     )
                     trade_entry_bar = i
                     opened_trade = current_trade
+                    if _snap:
+                        _write_trade_snapshot(
+                            source=snapshot_source, event='entry', pair=pair,
+                            timestamp=current_time, signal=signal, trade=current_trade,
+                            quote=quote, execution_plan=execution_plan,
+                            bar_index=i, bar_time=current_time, bar_row=row,
+                            nearest_support=nearest_support, nearest_resistance=nearest_resistance,
+                        )
                 else:
                     pending_signal = signal
                     pending_signal_submit_time = submit_time
@@ -449,21 +557,29 @@ def run_walk_forward(
             )
 
     if force_close_end and current_trade is not None:
-        trades.append(
-            finalize_trade(
-                current_trade,
-                hourly_df.index[-1],
-                get_market_exit_price(
-                    float(hourly_df['Close'].iloc[-1]),
-                    current_trade.direction,
-                    pip,
-                    params,
-                ),
-                'END',
-                len(hourly_df) - 1 - trade_entry_bar,
+        end_exit = finalize_trade(
+            current_trade,
+            hourly_df.index[-1],
+            get_market_exit_price(
+                float(hourly_df['Close'].iloc[-1]),
+                current_trade.direction,
                 pip,
-            )
+                params,
+            ),
+            'END',
+            len(hourly_df) - 1 - trade_entry_bar,
+            pip,
         )
+        trades.append(end_exit)
+        if _snap:
+            _write_trade_snapshot(
+                source=snapshot_source, event='exit', pair=pair,
+                timestamp=hourly_df.index[-1], signal=None, trade=end_exit,
+                bar_index=len(hourly_df) - 1, bar_time=hourly_df.index[-1],
+                bar_row=hourly_df.iloc[-1],
+                bars_held=len(hourly_df) - 1 - trade_entry_bar,
+                exit_reason='END', exit_price=end_exit.exit_price,
+            )
         current_trade = None
 
     return WalkForwardResult(trades=trades, zones=current_zones, open_trade=current_trade)

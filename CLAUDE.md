@@ -44,6 +44,16 @@ These are real-time constraints that cannot be eliminated:
 3. **Thread new parameters** through the full chain: `run.py` → `live_web.py` → `live_dashboard.py` → `live.py:run_monitor_cycle()` → `collect_scan_rows()` → `_scan_pair()`.
 4. **Test signal parity** by running a backtest and comparing its trades with live signals on the same data window.
 
+### Trade snapshot logging
+
+`StrategyParams.trade_snapshot_logging` (default `True`) writes a JSON file to `logs/` for every trade entry and exit in the walk-forward — both backtest and live. Files are named `{source}-{event}-{pair}-{timestamp}.json`.
+
+Each file contains the full state at the moment of the trade: signal, trade, execution quote, execution plan, bar OHLC, zones, exit reason. This enables direct comparison between backtest and live to verify signal parity.
+
+To compare: run a backtest, then start live on the same profile/days. Diff the JSON files for the same pair and timestamp. Fields should match exactly (except for acceptable live-only differences listed above).
+
+Set `trade_snapshot_logging: false` in the profile or params to disable once parity is confirmed. The `logs/` directory is gitignored.
+
 ## Frontend
 
 The dashboard is a **React SPA** (`frontend/live-dashboard/src/`), built with Vite and served as static files from `fx_sr/web_live/react/`. All frontend page changes must go in React components (`.tsx` files in `frontend/live-dashboard/src/pages/`), **not** in vanilla HTML files in `fx_sr/web_live/`.

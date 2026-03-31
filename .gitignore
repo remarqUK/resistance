@@ -16,6 +16,9 @@ backups/
 venv/
 env/
 
+# Trade diagnostic snapshots
+logs/
+
 # Frontend tooling
 node_modules/
 fx_sr/web_live/react/

@@ -14,6 +14,7 @@ from typing import Callable, Dict, List, Optional, Set
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
+from .db import load_l2_snapshots
 from .execution import build_execution_plan, historical_execution_quote
 from .levels import detect_zones, get_nearest_zones, SRZone, is_price_in_zone
 from .live_history import (
@@ -866,16 +867,25 @@ def _scan_pair(
                 return []
             return detect_zones(daily_window)
 
+        # Load L2 snapshots for the walk-forward window — same as backtest.
+        # Returns empty DataFrame when no L2 data exists (common).
+        l2_snapshots = load_l2_snapshots(
+            pair_info['ticker'],
+            start=scan_df.index[0],
+            end=scan_df.index[-1],
+        )
+
         # Execution quote provider: identical to backtest — resolve quotes
-        # from minute data at submit time, falling back to hourly bar Open.
+        # from L2/minute data at submit time, with same fallback rules.
+        _allow_h1 = not params.strict_backtest_execution and params.allow_h1_execution_fallback
         def _wf_execution_quote_provider(signal, submit_time, _bar_index, row):
             return historical_execution_quote(
                 signal.pair,
                 submit_time,
                 params,
                 minute_df=minute_df,
-                l2_snapshots=None,
-                allow_h1_fallback=True,
+                l2_snapshots=l2_snapshots,
+                allow_h1_fallback=_allow_h1,
                 fallback_mid_price=float(row['Open']),
             )
 

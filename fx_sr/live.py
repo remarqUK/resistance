@@ -1334,6 +1334,62 @@ def _prepare_execution_plan(
     if repriced_plan is None:
         return None, 'size unavailable'
 
+    # Clamp units to the per-slot margin budget using IBKR's actual margin
+    # model (whatif). Our hardcoded rates don't match IBKR's real rates, so
+    # this is the authoritative check that prevents over-leveraging.
+    if (
+        params.enforce_margin
+        and available_margin is not None
+        and available_margin > 0
+        and repriced_plan.units >= params.min_order_units
+    ):
+        whatif = ibkr.whatif_margin_check(
+            signal.pair, signal.direction, repriced_plan.units,
+        )
+        if whatif is not None:
+            margin_change = whatif.get('init_margin_change')
+            if margin_change is not None and margin_change > available_margin:
+                # Scale units down to fit the slot budget
+                scale = available_margin / margin_change
+                clamped_units = int(repriced_plan.units * scale)
+                if clamped_units < params.min_order_units:
+                    return None, f'margin slot exceeded ({margin_change:.0f} > {available_margin:.0f})'
+                # Rebuild plan with clamped units
+                repriced_plan = build_position_size_plan_for_risk_amount(
+                    pair=signal.pair,
+                    direction=signal.direction,
+                    entry_price=core_plan.entry_price,
+                    stop_price=core_plan.stop_price,
+                    balance=float(size_plan.balance),
+                    risk_amount=float(size_plan.risk_amount),
+                    account_currency=size_plan.account_currency,
+                    price_lookup=quote_price_lookup,
+                    available_margin=available_margin,
+                    margin_cushion_pct=0.0,
+                    enforce_margin=params.enforce_margin,
+                    min_order_units=params.min_order_units,
+                )
+                if repriced_plan is None or repriced_plan.units > clamped_units:
+                    # Force the clamped size by rebuilding with exact risk for those units
+                    from .sizing import build_position_size_plan_for_risk_amount as _rebuild
+                    stop_distance = abs(core_plan.entry_price - core_plan.stop_price)
+                    risk_per_unit = quote_price_lookup(signal.pair) or 1.0
+                    clamped_risk = float(size_plan.risk_amount) * (clamped_units / repriced_plan.units if repriced_plan else 1.0)
+                    repriced_plan = _rebuild(
+                        pair=signal.pair,
+                        direction=signal.direction,
+                        entry_price=core_plan.entry_price,
+                        stop_price=core_plan.stop_price,
+                        balance=float(size_plan.balance),
+                        risk_amount=clamped_risk,
+                        account_currency=size_plan.account_currency,
+                        price_lookup=quote_price_lookup,
+                        enforce_margin=False,
+                        min_order_units=params.min_order_units,
+                    )
+                if repriced_plan is None:
+                    return None, 'size unavailable after margin clamp'
+
     return (
         PreparedExecutionPlan(
             signal=signal,

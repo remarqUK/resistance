@@ -8,6 +8,7 @@ Strategy flow:
 5. Re-detect zones when new daily bars form
 """
 
+from bisect import bisect_right
 import time
 import pandas as pd
 import numpy as np
@@ -34,14 +35,14 @@ from .profiles import PROFILES
 from .strategy import (
     Trade, StrategyParams, check_exit, get_market_exit_price,
     build_trade_from_signal, get_tradeable_zones, is_pair_fully_blocked, params_from_profile,
-    select_entry_signal,
 )
 from .walkforward import (
     finalize_trade as shared_finalize_trade,
     run_walk_forward,
     slice_daily_window as shared_slice_daily_window,
+    resolve_entry_signal_for_bar,
 )
-from .intrabar import find_intrabar_signal, intrabar_execution_time
+from .intrabar import intrabar_execution_time
 from .serialization import (
     deserialize_timestamp as shared_deserialize_timestamp,
     serialize_timestamp as shared_serialize_timestamp,
@@ -51,7 +52,7 @@ from .serialization import (
 from .db import load_backtest_result, save_backtest_result, load_l2_snapshots, load_ohlc
 from . import ibkr
 from .commission import compute_round_turn_commission
-from .sizing import calculate_risk_amount
+from .sizing import build_position_size_plan_for_risk_amount, calculate_risk_amount
 
 
 class BacktestCacheMissingError(RuntimeError):
@@ -64,6 +65,7 @@ def _load_cached_data_window(
     days: int,
     *,
     enforce_coverage: bool = True,
+    allow_stale_cache: bool = False,
 ) -> pd.DataFrame:
     """Load a trailing interval window from cache and enforce strict coverage checks."""
     if days <= 0:
@@ -122,7 +124,7 @@ def _load_cached_data_window(
             f'{days}d backtest window ({first_ts} -> {last_ts})'
         )
 
-    if last_ts < now - stale_tolerance:
+    if not allow_stale_cache and last_ts < now - stale_tolerance:
         raise BacktestCacheMissingError(
             f'Cached {interval} data for {ticker} is stale ({last_ts} < {now - stale_tolerance})'
         )
@@ -134,19 +136,25 @@ def _load_cached_backtest_data(
     ticker: str,
     hourly_days: int,
     zone_history_days: int,
+    allow_stale_cache: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load strictly cached inputs for one backtest pair."""
     # Daily zones are evaluated with a rolling lookback (`zone_history_days`) at each
     # hourly bar, so we only need enough daily rows to cover the larger of the
     # execution horizon and zone-history horizon for strict cache checks.
     daily_days = max(1, int(max(hourly_days, zone_history_days)))
-    daily_df = _load_cached_data_window(ticker, '1d', daily_days)
-    hourly_df = _load_cached_data_window(ticker, '1h', int(hourly_days))
+    daily_df = _load_cached_data_window(
+        ticker, '1d', daily_days, allow_stale_cache=allow_stale_cache,
+    )
+    hourly_df = _load_cached_data_window(
+        ticker, '1h', int(hourly_days), allow_stale_cache=allow_stale_cache,
+    )
     minute_df = _load_cached_data_window(
         ticker,
         '1m',
         int(hourly_days),
         enforce_coverage=False,
+        allow_stale_cache=allow_stale_cache,
     )
     return daily_df, hourly_df, minute_df
 
@@ -401,7 +409,7 @@ def build_backtest_run_config_json(
     hourly_days: int,
     zone_history_days: int,
     *,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
     requested_profile: str | None = None,
     starting_balance: float | None = None,
     risk_pct: float | None = None,
@@ -446,7 +454,7 @@ def _data_signature(
     daily_df: pd.DataFrame,
     hourly_df: pd.DataFrame,
     minute_df: pd.DataFrame | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
 ) -> str:
     signature_payload = json.dumps({
         'daily': _normalize_df_for_signature(daily_df).to_json(orient='split', date_unit='ns'),
@@ -489,7 +497,7 @@ def _build_pending_end_trade(
     zone_provider,
     execution_quote_provider,
     trades: List[Trade],
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
     minute_df: pd.DataFrame | None = None,
 ) -> Trade | None:
     """Materialize a final pending signal when submit-time data already exists.
@@ -537,31 +545,18 @@ def _build_pending_end_trade(
     ):
         return None
 
-    intrabar_submit_time = None
-    signal = None
-    if execution_mode == 'intrabar':
-        intrabar_signal = find_intrabar_signal(
-            last_time,
-            minute_df,
-            pair,
-            params,
-            nearest_support,
-            nearest_resistance,
-        )
-        if intrabar_signal is not None:
-            signal, intrabar_submit_time = intrabar_signal
-
-    if signal is None:
-        signal = select_entry_signal(
-            hourly_df=hourly_df,
-            bar_idx=len(hourly_df) - 1,
-            pair=pair,
-            params=params,
-            support_zone=nearest_support,
-            resistance_zone=nearest_resistance,
-        )
-        if signal is not None and execution_mode == 'next_bar':
-            intrabar_submit_time = pd.Timestamp(last_time) + pd.Timedelta(hours=1)
+    signal, intrabar_submit_time = resolve_entry_signal_for_bar(
+        hourly_df=hourly_df,
+        bar_idx=len(hourly_df) - 1,
+        pair=pair,
+        params=params,
+        current_bar_time=last_time,
+        nearest_support=nearest_support,
+        nearest_resistance=nearest_resistance,
+        execution_mode=execution_mode,
+        minute_df=minute_df,
+        align_signal_time=False,
+    )
 
     if signal is None:
         return None
@@ -683,7 +678,7 @@ def run_backtest(
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
     minute_df: pd.DataFrame | None = None,
     l2_snapshots: pd.DataFrame | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
 ) -> BacktestResult:
     """Run multi-timeframe backtest: daily zones + hourly execution.
 
@@ -892,6 +887,7 @@ def _fetch_pair_data_only(
     zone_history_days: int,
     force_refresh: bool,
     client_id: int | None,
+    allow_stale_cache: bool = False,
     *,
     debug: bool = False,
 ) -> Tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -917,6 +913,7 @@ def _fetch_pair_data_only(
             ticker,
             hourly_days,
             zone_history_days,
+            allow_stale_cache=allow_stale_cache,
         )
         _dbg(
             f'phase1-worker: pair={pair} cached data load complete '
@@ -959,7 +956,7 @@ def run_backtest_fast(
     pip: float,
     minute_df: pd.DataFrame | None = None,
     l2_snapshots: pd.DataFrame | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
 ) -> BacktestResult:
     """Fast backtest using pre-computed zones (skips zone detection).
 
@@ -1049,6 +1046,7 @@ def run_all_backtests(
     daily_data: Dict[str, pd.DataFrame],
     hourly_data: Dict[str, pd.DataFrame],
     params: StrategyParams = None,
+    execution_mode: str = 'intrabar',
 ) -> Dict[str, BacktestResult]:
     """Run backtests on all pairs."""
     results = {}
@@ -1068,7 +1066,7 @@ def run_all_backtests(
             continue
 
         print(f"  Backtesting {pair} ({len(daily_df)} daily bars, {len(hourly_df)} hourly bars)...")
-        results[pair] = run_backtest(daily_df, hourly_df, pair, params)
+        results[pair] = run_backtest(daily_df, hourly_df, pair, params, execution_mode=execution_mode)
         r = results[pair]
         print(f"    -> {r.total_trades} trades, {r.win_rate:.1f}% win rate, "
               f"{r.total_pnl_pips:.1f} pips, avg loss {r.avg_loss_r:.2f}R")
@@ -1084,7 +1082,7 @@ def _backtest_pair(
     force_refresh: bool = False,
     client_id: int | None = None,
     run_config_json: str | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Fetch data and run backtest for a single pair."""
     params_hash = _params_signature(params)
@@ -1178,7 +1176,7 @@ def _run_backtest_pair_on_core(
     client_id: int | None,
     core_id: int | None = None,
     run_config_json: str | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
 ) -> Tuple[str, Optional[BacktestResult]]:
     """Run a pair backtest in the current process and bind to a dedicated core if possible."""
     if core_id is not None:
@@ -1222,7 +1220,8 @@ def run_all_backtests_parallel(
     run_config_json: str | None = None,
     debug: bool = False,
     fetch_workers: int | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
+    allow_stale_cache: bool = False,
 ) -> Dict[str, BacktestResult]:
     """Run all pair backtests with maximum CPU utilisation.
 
@@ -1353,6 +1352,7 @@ def run_all_backtests_parallel(
                     zone_history_days,
                     force_refresh,
                     cid,
+                    allow_stale_cache,
                     debug=debug,
                 )
                 fetch_futures[future] = pair
@@ -1417,6 +1417,7 @@ def run_all_backtests_parallel(
             _debug(f'phase1: sequential fetch pair={pair} client_id={cid}')
             pair, daily_df, hourly_df, minute_df, l2_snapshots = _fetch_pair_data_only(
                 pair, info, hourly_days, zone_history_days, force_refresh, cid,
+                allow_stale_cache,
                 debug=debug,
             )
             if (daily_df is not None and not daily_df.empty
@@ -1827,6 +1828,126 @@ def _compute_trade_commission(
     return float(cost) if cost is not None else 0.0
 
 
+def _build_compounding_price_history(
+    candidates: List[Tuple[str, Trade]],
+) -> dict[str, tuple[list[pd.Timestamp], list[float]]]:
+    """Build an as-of price lookup from historical trade entry prices."""
+
+    grouped: dict[str, list[tuple[pd.Timestamp, float]]] = {}
+    for pair_id, trade in candidates:
+        if trade.entry_time is None or trade.entry_price in (None, ''):
+            continue
+        grouped.setdefault(pair_id.upper(), []).append(
+            (pd.Timestamp(trade.entry_time), float(trade.entry_price))
+        )
+
+    history: dict[str, tuple[list[pd.Timestamp], list[float]]] = {}
+    for pair_id, rows in grouped.items():
+        rows.sort(key=lambda item: item[0])
+        history[pair_id] = (
+            [timestamp for timestamp, _ in rows],
+            [price for _, price in rows],
+        )
+    return history
+
+
+def _build_compounding_price_lookup(
+    price_history: dict[str, tuple[list[pd.Timestamp], list[float]]],
+    as_of: pd.Timestamp,
+    *,
+    override_prices: dict[str, float] | None = None,
+):
+    """Return a historical FX price lookup anchored to one batch timestamp."""
+
+    as_of = pd.Timestamp(as_of)
+    overrides = {
+        pair_id.upper(): float(price)
+        for pair_id, price in (override_prices or {}).items()
+    }
+    cache: dict[str, float | None] = {}
+
+    def lookup(pair_id: str) -> float | None:
+        pair_id = pair_id.upper()
+        if pair_id in cache:
+            return cache[pair_id]
+        if pair_id in overrides:
+            cache[pair_id] = overrides[pair_id]
+            return cache[pair_id]
+
+        series = price_history.get(pair_id)
+        if not series:
+            cache[pair_id] = None
+            return None
+
+        timestamps, prices = series
+        idx = bisect_right(timestamps, as_of) - 1
+        if idx < 0:
+            idx = 0
+        cache[pair_id] = prices[idx]
+        return cache[pair_id]
+
+    return lookup
+
+
+def _build_backtest_size_plan(
+    pair_id: str,
+    trade: Trade,
+    *,
+    balance: float,
+    risk_amount: float,
+    account_currency: str,
+    available_margin: float | None,
+    params: StrategyParams,
+    price_lookup,
+):
+    """Build a live-style size plan for backtest execution, with skip reason."""
+
+    shared_kwargs = {
+        'pair': pair_id,
+        'direction': trade.direction,
+        'entry_price': float(trade.entry_price),
+        'stop_price': float(trade.sl_price),
+        'balance': float(balance),
+        'risk_amount': float(risk_amount),
+        'account_currency': account_currency,
+        'price_lookup': price_lookup,
+    }
+    plan = build_position_size_plan_for_risk_amount(
+        **shared_kwargs,
+        available_margin=available_margin,
+        margin_cushion_pct=params.margin_cushion_pct,
+        enforce_margin=params.enforce_margin,
+        min_order_units=params.min_order_units,
+    )
+    if plan is not None:
+        return plan, None
+
+    raw_plan = build_position_size_plan_for_risk_amount(
+        **shared_kwargs,
+        available_margin=None,
+        margin_cushion_pct=params.margin_cushion_pct,
+        enforce_margin=False,
+        min_order_units=1,
+    )
+    if raw_plan is None:
+        return None, 'SIZE_UNAVAILABLE'
+
+    if not params.enforce_margin:
+        return None, 'SIZE_UNAVAILABLE'
+
+    min_size_plan = build_position_size_plan_for_risk_amount(
+        **shared_kwargs,
+        available_margin=None,
+        margin_cushion_pct=params.margin_cushion_pct,
+        enforce_margin=True,
+        min_order_units=params.min_order_units,
+    )
+    if min_size_plan is None:
+        return None, 'BELOW_MIN_SIZE'
+
+    return None, 'MARGIN_INSUFFICIENT'
+
+
 def calculate_execution_aware_compounding_pnl(
     results: Dict[str, BacktestResult],
     starting_balance: float = 1000.0,
@@ -1835,8 +1956,6 @@ def calculate_execution_aware_compounding_pnl(
     account_currency: str = 'GBP',
 ) -> ExecutionAwarePortfolioResult:
     """Run the live-style portfolio admission funnel over historical trades."""
-
-    from .margin import compute_margin_requirement, check_margin_available
 
     if params is None:
         params = StrategyParams()
@@ -1853,6 +1972,7 @@ def calculate_execution_aware_compounding_pnl(
             candidates.append((pair, trade))
 
     candidates.sort(key=lambda item: (item[1].entry_time, item[0]))
+    price_history = _build_compounding_price_history(candidates)
     trade_log: list[tuple[str, Trade, float, float, float]] = []
     skipped: list[ExecutionAwareSkip] = []
     skip_counts: dict[str, int] = {}
@@ -1898,8 +2018,19 @@ def calculate_execution_aware_compounding_pnl(
             )
             for exposure in active
         ]
-        planned: dict[int, tuple[str, Trade, float]] = {}
+        planned: dict[int, tuple[str, Trade, float, object, float]] = {}
         planned_reserved_risk = 0.0
+        batch_margin_used = 0.0
+        batch_prices = {
+            pair_id.upper(): float(trade.entry_price)
+            for pair_id, trade in batch
+            if trade.entry_price not in (None, '')
+        }
+        price_lookup = _build_compounding_price_lookup(
+            price_history,
+            batch_time,
+            override_prices=batch_prices,
+        )
 
         for batch_idx, (pair_id, trade) in enumerate(batch):
             block = state.entry_block(pair_id, batch_time)
@@ -1981,39 +2112,34 @@ def calculate_execution_aware_compounding_pnl(
                 _record_execution_skip(skipped, skip_counts, pair_id, trade, 'RISK_BUDGET_FULL')
                 continue
 
-            # Estimate units from risk amount and stop distance
-            stop_dist = abs(trade.entry_price - trade.sl_price)
-            est_units = int(risk_amount / stop_dist) if stop_dist > 0 else 0
-
-            # Margin and minimum-size checks
-            trade_margin = 0.0
+            current_margin = None
             if margin_tracker is not None:
-                if est_units < params.min_order_units:
-                    _record_execution_skip(skipped, skip_counts, pair_id, trade, 'BELOW_MIN_SIZE')
-                    continue
+                current_margin = max(0.0, margin_tracker.available_margin - batch_margin_used)
 
-                # Build a simple price lookup from the batch entry prices
-                batch_prices = {p: t.entry_price for p, t in batch}
-                margin_req = compute_margin_requirement(
-                    pair_id, est_units, trade.entry_price,
-                    account_currency, lambda pid: batch_prices.get(pid),
-                )
-                if margin_req is not None:
-                    allowed_margin, _ = check_margin_available(
-                        margin_req.margin_required,
-                        margin_tracker.available_margin,
-                        params.margin_cushion_pct,
-                    )
-                    if not allowed_margin:
-                        _record_execution_skip(skipped, skip_counts, pair_id, trade, 'MARGIN_INSUFFICIENT')
-                        continue
-                    trade_margin = margin_req.margin_required
+            size_plan, skip_reason = _build_backtest_size_plan(
+                pair_id,
+                trade,
+                balance=current_balance,
+                risk_amount=float(risk_amount),
+                account_currency=account_currency,
+                available_margin=current_margin,
+                params=params,
+                price_lookup=price_lookup,
+            )
+            if size_plan is None:
+                _record_execution_skip(skipped, skip_counts, pair_id, trade, skip_reason or 'SIZE_UNAVAILABLE')
+                continue
+            actual_risk_amount = float(size_plan.units) * float(size_plan.risk_per_unit_account)
 
             for payload in replaced_exposures:
                 prior = planned.pop(payload, None)
                 if prior is None:
                     continue
                 planned_reserved_risk -= float(prior[2])
+                prior_plan = prior[3]
+                prior_margin = getattr(prior_plan, 'margin_required', None)
+                if prior_margin is not None:
+                    batch_margin_used = max(0.0, batch_margin_used - float(prior_margin))
                 _record_execution_skip(
                     skipped,
                     skip_counts,
@@ -2027,8 +2153,10 @@ def calculate_execution_aware_compounding_pnl(
                     if exposure.payload != payload
                 ]
 
-            planned[batch_idx] = (pair_id, trade, float(risk_amount), trade_margin, est_units)
+            planned[batch_idx] = (pair_id, trade, float(risk_amount), size_plan, actual_risk_amount)
             planned_reserved_risk += float(risk_amount)
+            if size_plan.margin_required is not None:
+                batch_margin_used += float(size_plan.margin_required)
             exposures.append(
                 CorrelationExposure(
                     pair=pair_id,
@@ -2039,32 +2167,31 @@ def calculate_execution_aware_compounding_pnl(
             )
 
         for batch_idx in sorted(planned):
-            pair_id, trade, risk_amount, trade_margin, est_units = planned[batch_idx]
+            pair_id, trade, _reserved_risk_amount, size_plan, actual_risk_amount = planned[batch_idx]
 
             # Compute commission and deduct from P&L
             commission_cost = 0.0
-            if est_units > 0 and params.commission_bps > 0:
-                batch_prices = {p: t.entry_price for p, t in batch}
+            if size_plan.units > 0 and params.commission_bps > 0:
                 commission_cost = _compute_trade_commission(
-                    pair_id, est_units, trade.entry_price,
-                    account_currency, lambda pid, _bp=batch_prices: _bp.get(pid),
+                    pair_id, size_plan.units, trade.entry_price,
+                    account_currency, price_lookup,
                     params.commission_bps, params.commission_min_usd,
                 )
             trade.commission_cost = commission_cost
-            pnl_amount = float(risk_amount) * float(trade.pnl_r) - commission_cost
+            pnl_amount = float(actual_risk_amount) * float(trade.pnl_r) - commission_cost
             report_balance += pnl_amount
-            trade_log.append((pair_id, trade, float(risk_amount), pnl_amount, report_balance))
+            trade_log.append((pair_id, trade, float(actual_risk_amount), pnl_amount, report_balance))
             exposure = _ActiveExecutionExposure(
                 pair=pair_id,
                 trade=trade,
-                risk_amount=float(risk_amount),
+                risk_amount=float(actual_risk_amount),
                 pnl_amount=pnl_amount,
-                margin_required=trade_margin,
+                margin_required=float(size_plan.margin_required or 0.0),
             )
             active.append(exposure)
-            if margin_tracker is not None and trade_margin > 0:
+            if margin_tracker is not None and size_plan.margin_required is not None and size_plan.margin_required > 0:
                 key = f"{pair_id}_{id(trade)}"
-                margin_tracker.add_position(key, trade_margin)
+                margin_tracker.add_position(key, float(size_plan.margin_required))
                 margin_tracker.sync_balance(report_balance)
 
     return ExecutionAwarePortfolioResult(
@@ -2158,14 +2285,15 @@ def format_compounding_results(
 ) -> str:
     """Format compounding P&L results as a readable report."""
     lines = []
-    lines.append("=" * 130)
+    lines.append("=" * 176)
     lines.append(f"  {title}")
-    lines.append("=" * 130)
+    lines.append("=" * 176)
     lines.append(
-        f"  {'#':>3} {'Date':<20} {'Pair':<8} {'Dir':>5} {'Exit':>10} "
+        f"  {'#':>3} {'Entry Time':<17} {'Exit Time':<17} {'Pair':<8} {'Dir':>5} "
+        f"{'Entry':>10} {'Exit':>10} {'Reason':>10} "
         f"{'Bars':>5} {'R-Mult':>7} {'Risk':>10} {'P&L':>11} {'Balance':>12}"
     )
-    lines.append("-" * 130)
+    lines.append("-" * 176)
 
     monthly = {}
     peak = starting_balance
@@ -2174,9 +2302,16 @@ def format_compounding_results(
     max_losing_streak = 0
 
     for idx, (pair, t, risk_amt, pnl, balance) in enumerate(trade_log, 1):
+        pair_info = PAIRS.get(pair, {})
+        dec = pair_info.get('decimals', 5)
+        entry_ts = str(t.entry_time)[:16] if t.entry_time else ''
+        exit_ts = str(t.exit_time)[:16] if t.exit_time else ''
+        entry_px = f"{t.entry_price:.{dec}f}" if t.entry_price else ''
+        exit_px = f"{t.exit_price:.{dec}f}" if t.exit_price else ''
         lines.append(
-            f"  {idx:>3} {str(t.entry_time):<20} {pair:<8} {t.direction:>5} "
-            f"{t.exit_reason:>10} {t.bars_held:>5} {t.pnl_r:>+7.2f}R "
+            f"  {idx:>3} {entry_ts:<17} {exit_ts:<17} {pair:<8} {t.direction:>5} "
+            f"{entry_px:>10} {exit_px:>10} {t.exit_reason:>10} "
+            f"{t.bars_held:>5} {t.pnl_r:>+7.2f}R "
             f"  GBP {risk_amt:>8.2f}  GBP {pnl:>+9.2f}  GBP {balance:>11.2f}"
         )
 
@@ -2213,7 +2348,7 @@ def format_compounding_results(
     avg_win = np.mean([e[1].pnl_r for e in wins]) if wins else 0
     avg_loss = np.mean([e[1].pnl_r for e in losses]) if losses else 0
 
-    lines.append("=" * 130)
+    lines.append("=" * 176)
 
     # Monthly breakdown
     lines.append("")
@@ -2234,7 +2369,7 @@ def format_compounding_results(
         )
 
     lines.append("")
-    lines.append("=" * 130)
+    lines.append("=" * 176)
     lines.append(f"  Starting balance:     GBP {starting_balance:,.2f}")
     lines.append(f"  Final balance:        GBP {final_balance:,.2f}")
     lines.append(f"  Net P&L:              GBP {final_balance - starting_balance:+,.2f} "

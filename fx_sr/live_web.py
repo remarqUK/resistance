@@ -6,7 +6,7 @@ import asyncio
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import re
 from pathlib import Path
@@ -44,7 +44,7 @@ from .data import _remaining_days_to_fetch, download_single_interval
 from .db import get_cached_range, init_db
 from .portfolio import build_portfolio_state, closed_trade_summary_from_row, get_entry_block
 from .live_stream import StreamingScanner
-from .positions import calc_pnl_pips, pair_pip, process_hourly_exit_bars, sync_positions
+from .positions import calc_pnl_pips, cancel_bracket_children, pair_pip, process_hourly_exit_bars, sync_positions
 
 
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
@@ -223,7 +223,7 @@ class LiveDashboardHub:
         """Append a structured log entry."""
 
         entry = {
-            'ts': datetime.now().strftime('%H:%M:%S'),
+            'ts': datetime.now(timezone.utc).strftime('%H:%M:%S'),
             'level': level,
             'message': message,
         }
@@ -713,6 +713,14 @@ class LiveDashboardHub:
         if base_client_id == 60:
             base_client_id += 1000
         return base_client_id + 2000
+
+    def _backfill_client_id_base(self) -> int:
+        """Return a client-id base dedicated to startup backfill."""
+
+        base_client_id = int(self.client_id if self.client_id is not None else ibkr.TWS_CLIENT_ID)
+        if base_client_id == 60:
+            base_client_id += 1000
+        return base_client_id + 4000
 
     def _find_fill_gaps(self, target_days: int) -> list[tuple[str, dict, str]]:
         """Find cache gaps for supported intervals."""
@@ -1528,25 +1536,15 @@ class LiveDashboardHub:
 
             close_direction = 'SHORT' if direction == 'LONG' else 'LONG'
             trade = info['trade']
-            order_ref = f'fxsr:close:{pair}:{direction}:{int(datetime.now().timestamp() * 1000)}'
+            order_ref = f'fxsr:close:{pair}:{direction}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
 
-            # Collect bracket child order IDs so we can cancel them after the close
-            bracket_child_ids: set[int] = set()
             signal_id = info.get('signal_id')
-            if signal_id:
-                signal_row = load_detected_signal(signal_id)
-                if signal_row is not None:
-                    for key in ('take_profit_order_id', 'stop_loss_order_id'):
-                        raw = signal_row.get(key)
-                        if raw is not None:
-                            bracket_child_ids.add(int(raw))
 
         # Cancel bracket TP/SL children first so they can't fire on a flat book
-        if bracket_child_ids:
-            await self._loop.run_in_executor(
-                self._scan_executor,
-                lambda: ibkr.cancel_orders(bracket_child_ids),
-            )
+        await self._loop.run_in_executor(
+            self._scan_executor,
+            lambda: cancel_bracket_children(signal_id),
+        )
 
         order = await self._loop.run_in_executor(
             self._scan_executor,
@@ -1771,6 +1769,10 @@ class LiveDashboardHub:
             state_payload = self._export_state() if positions_changed else None
 
         for signal_id, exit_reason, exit_price in exit_signal_writes:
+            await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda sid=signal_id: cancel_bracket_children(sid),
+            )
             await enqueue_write_async(
                 lambda s=signal_id, r=exit_reason, p=exit_price: record_exit_signal(
                     s, exit_reason=r, exit_price=p,
@@ -2171,9 +2173,11 @@ class LiveDashboardHub:
         from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
         from .levels import detect_zones
         from .strategy import get_tradeable_zones as _get_tz
+        from .walkforward import slice_daily_window
 
         pair_list = list(self.pairs.items())
         total = len(pair_list)
+        backfill_client_id = self._backfill_client_id_base()
 
         pair_status = self._backfill_progress['pair_status']
 
@@ -2187,9 +2191,14 @@ class LiveDashboardHub:
                 pair_status[pair_id] = 'no ticker'
                 continue
             try:
-                daily_df = fetch_daily_data(ticker, days=self.zone_history_days)
+                daily_df = fetch_daily_data(
+                    ticker,
+                    days=self.zone_history_days,
+                    client_id=backfill_client_id + idx,
+                )
                 if not daily_df.empty:
-                    zones = detect_zones(daily_df)
+                    daily_window = slice_daily_window(daily_df, daily_df.index[-1], self.zone_history_days)
+                    zones = detect_zones(daily_window)
                     ref_price = float(daily_df['Close'].iloc[-1])
                     support, resistance = _get_tz(zones, ref_price)
                     self._scanner._zones[pair_id] = (support, resistance, zones)
@@ -2210,10 +2219,19 @@ class LiveDashboardHub:
             if not ticker:
                 continue
             try:
-                hourly_df = fetch_hourly_data(ticker, days=7)
+                hourly_df = fetch_hourly_data(
+                    ticker,
+                    days=7,
+                    client_id=backfill_client_id + idx,
+                )
                 self._accumulator.seed(pair_id, hourly_df)
                 try:
-                    minute_df = fetch_minute_data_cached(ticker, days=2, allow_stale_cache=True)
+                    minute_df = fetch_minute_data_cached(
+                        ticker,
+                        days=2,
+                        allow_stale_cache=True,
+                        client_id=backfill_client_id + idx,
+                    )
                     self._accumulator.seed_minutes(pair_id, minute_df)
                 except Exception:
                     pass
@@ -2247,7 +2265,9 @@ class LiveDashboardHub:
 
         async with self._lock:
             self.summary = self._build_summary(status='backfilling')
+            self._append_log('info', 'Starting startup backfill...')
         await self._broadcast({'type': 'scan_status', 'summary': dict(self.summary)})
+        await self._broadcast_log('info', 'Startup backfill started. Loading zone and hourly history...')
 
         # Start a progress broadcast task
         progress_stop = asyncio.Event()
@@ -2274,8 +2294,8 @@ class LiveDashboardHub:
             progress_stop.set()
             await progress_task
             async with self._lock:
-                self._append_log('error', f'Backfill failed: {exc}')
                 self.summary = self._build_summary(status='error')
+            await self._broadcast_log('error', f'Backfill failed: {exc}')
             await self._broadcast({'type': 'error', 'summary': dict(self.summary), 'message': str(exc)})
             return
 
@@ -2283,6 +2303,10 @@ class LiveDashboardHub:
         await progress_task
 
         self._backfill_progress.update(phase='done', current_pair=None)
+        await self._broadcast_log(
+            'info',
+            f'Backfill data loaded for {len(self._accumulator.seeded_pairs)} pairs.',
+        )
 
         # Position sync + balance refresh
         def _post_backfill():
@@ -2344,6 +2368,10 @@ class LiveDashboardHub:
             state = self._export_state()
 
         await self._broadcast({'type': 'snapshot', 'state': state})
+        await self._broadcast_log(
+            'success',
+            f'Startup backfill complete: {len(pair_rows)} pairs, {len(signals)} signals.',
+        )
 
     async def _housekeeping_loop(self) -> None:
         """Low-frequency periodic tasks: position sync, zone refresh, balance."""
@@ -2423,16 +2451,19 @@ class LiveDashboardHub:
         """Start backfill, then streaming and housekeeping tasks."""
 
         self._loop = asyncio.get_running_loop()
+        await self._broadcast_log('info', 'Live dashboard startup requested.')
         start_background_writer()
 
         # Phase 1: backfill historical data with progress
         await self._run_backfill()
+        await self._broadcast_log('info', 'Loading recent execution activity...')
         await self._loop.run_in_executor(
             self._scan_executor,
             self._hydrate_execution_activity,
         )
         async with self._lock:
             self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+        await self._broadcast_log('info', 'Startup scans complete, connecting quote stream...')
 
         # Phase 2: start real-time bar streaming
         self._quote_thread = threading.Thread(
@@ -2441,9 +2472,20 @@ class LiveDashboardHub:
             daemon=True,
         )
         self._quote_thread.start()
+        await self._broadcast_log('success', 'Live quote stream thread started.')
 
-        # Phase 3: start low-frequency housekeeping
+        # Phase 3: start bar persistence (bulk-save to PostgreSQL every ~60s)
+        pair_ticker_map = {
+            pair_id: pair_info['ticker']
+            for pair_id, pair_info in self.pairs.items()
+            if pair_info.get('ticker')
+        }
+        self._accumulator.start_persistence(pair_ticker_map)
+        await self._broadcast_log('info', 'Bar persistence thread started.')
+
+        # Phase 4: start low-frequency housekeeping
         self._scan_task = asyncio.create_task(self._housekeeping_loop())
+        await self._broadcast_log('info', 'Housekeeping loop running.')
 
     async def stop(self) -> None:
         """Stop background tasks and tear down subscriptions."""
@@ -2461,6 +2503,8 @@ class LiveDashboardHub:
             await asyncio.to_thread(self._quote_thread.join, 5)
             if self._quote_thread.is_alive():
                 ibkr.disconnect()
+
+        self._accumulator.stop_persistence()
 
         for task in list(self._pending_tasks):
             task.cancel()
@@ -2500,9 +2544,20 @@ async def _account_history_api(_request: web.Request) -> web.Response:
     import asyncio
     from .live_history import load_daily_snapshots, get_or_fetch_today_snapshot
 
+    hub = _request.app.get('hub')
+    loop = getattr(hub, '_loop', None) if hub is not None else None
+
+    if hub is None or loop is None:
+        today_task = asyncio.to_thread(get_or_fetch_today_snapshot, force_refresh=True)
+    else:
+        today_task = loop.run_in_executor(
+            hub._scan_executor,
+            lambda: get_or_fetch_today_snapshot(force_refresh=True),
+        )
+
     snapshots, today = await asyncio.gather(
         asyncio.to_thread(load_daily_snapshots),
-        asyncio.to_thread(get_or_fetch_today_snapshot),
+        today_task,
     )
 
     # Merge today's live snapshot if it's not already the last entry
@@ -2513,6 +2568,179 @@ async def _account_history_api(_request: web.Request) -> web.Response:
             snapshots[-1] = today
 
     return web.json_response({'snapshots': snapshots})
+
+
+async def _position_health_api(request: web.Request) -> web.Response:
+    """Return live positions, their bracket orders, and recent closed trades from IBKR."""
+
+    import asyncio
+    from datetime import timedelta
+
+    hours = int(request.query.get('hours', '12'))
+
+    def _load():
+        from . import ibkr
+        from .db import _connect, get_db_path, init_db
+
+        # 1. Live positions
+        raw_positions = ibkr.fetch_positions()
+        positions = []
+        if raw_positions:
+            for p in raw_positions:
+                direction = 'LONG' if p['size'] > 0 else 'SHORT'
+                positions.append({
+                    'pair': p['pair'],
+                    'direction': direction,
+                    'size': p['size'],
+                    'avg_cost': p['avg_cost'],
+                })
+
+        # 2. Open orders with detail
+        open_orders = []
+        terminal = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
+        with ibkr._IBKR_LOCK:
+            ib, connected = ibkr._get_connection()
+            if connected:
+                try:
+                    all_orders = ib.reqAllOpenOrders()
+                    for t in all_orders:
+                        status = getattr(getattr(t, 'orderStatus', None), 'status', '') or ''
+                        if status in terminal:
+                            continue
+                        o = t.order
+                        c = t.contract
+                        pair_id = ibkr._contract_to_pair(c)
+                        if not pair_id:
+                            continue
+                        open_orders.append({
+                            'pair': pair_id,
+                            'action': getattr(o, 'action', ''),
+                            'quantity': float(getattr(o, 'totalQuantity', 0)),
+                            'order_type': getattr(o, 'orderType', ''),
+                            'lmt_price': float(getattr(o, 'lmtPrice', 0) or 0),
+                            'aux_price': float(getattr(o, 'auxPrice', 0) or 0),
+                            'order_id': getattr(o, 'orderId', None),
+                            'parent_id': getattr(o, 'parentId', None),
+                            'oca_group': getattr(o, 'ocaGroup', ''),
+                            'tif': getattr(o, 'tif', ''),
+                            'status': status,
+                            'order_ref': getattr(o, 'orderRef', ''),
+                        })
+                except Exception:
+                    pass
+
+        # 3. Closed trades from DB
+        closed_trades = []
+        try:
+            db_path = get_db_path()
+            init_db(db_path)
+            conn = _connect(db_path)
+            try:
+                from datetime import datetime, timezone
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+                rows = conn.execute(
+                    """SELECT pair, direction, status,
+                              entry_price, sl_price, tp_price,
+                              closed_price, close_reason, close_source,
+                              detected_at, closed_at, pnl_pips
+                       FROM detected_signal
+                       WHERE closed_at IS NOT NULL AND closed_at >= %s
+                       ORDER BY closed_at DESC""",
+                    (cutoff,),
+                ).fetchall()
+                cols = ['pair', 'direction', 'status', 'entry_price', 'sl_price',
+                        'tp_price', 'closed_price', 'close_reason', 'close_source',
+                        'detected_at', 'closed_at', 'pnl_pips']
+                for row in rows:
+                    d = {cols[i]: row[i] for i in range(len(cols))}
+                    for ts_key in ('detected_at', 'closed_at'):
+                        if d.get(ts_key):
+                            d[ts_key] = str(d[ts_key])
+                    if d.get('pnl_pips') is not None:
+                        d['pnl_pips'] = float(d['pnl_pips'])
+                    for px_key in ('entry_price', 'sl_price', 'tp_price', 'closed_price'):
+                        if d.get(px_key) is not None:
+                            d[px_key] = float(d[px_key])
+                    closed_trades.append(d)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        # Cross-reference: which positions have brackets?
+        order_pairs = {o['pair'] for o in open_orders}
+        for pos in positions:
+            pos['has_brackets'] = pos['pair'] in order_pairs
+            pos['bracket_orders'] = [o for o in open_orders if o['pair'] == pos['pair']]
+
+        # Orphaned orders (orders with no matching position)
+        position_pairs = {p['pair'] for p in positions}
+        orphaned_orders = [o for o in open_orders if o['pair'] not in position_pairs]
+
+        return {
+            'positions': positions,
+            'open_orders': open_orders,
+            'orphaned_orders': orphaned_orders,
+            'closed_trades': closed_trades,
+            'hours': hours,
+        }
+
+    try:
+        result = await asyncio.to_thread(_load)
+        return web.json_response(result)
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def _order_audit_log_api(request: web.Request) -> web.Response:
+    """Return recent order audit log entries with optional filtering."""
+
+    import asyncio
+    from .db import _connect, get_db_path, init_db
+
+    pair = (request.query.get('pair', '') or '').strip().upper() or None
+    action = (request.query.get('action', '') or '').strip() or None
+    limit = int(request.query.get('limit', '200'))
+
+    def _load():
+        db_path = get_db_path()
+        init_db(db_path)
+        conn = _connect(db_path)
+        try:
+            query = "SELECT id, event_ts, function_name, pair, direction, action, request_json, response_json, error, duration_ms, order_ids FROM order_audit_log"
+            filters = []
+            params: list = []
+            if pair:
+                filters.append("pair = %s")
+                params.append(pair)
+            if action:
+                filters.append("action = %s")
+                params.append(action)
+            if filters:
+                query += " WHERE " + " AND ".join(filters)
+            query += " ORDER BY event_ts DESC"
+            if limit:
+                query += " LIMIT %s"
+                params.append(limit)
+            cursor = conn.execute(query, params)
+            columns = [d[0] for d in cursor.description]
+            rows = []
+            for row in cursor.fetchall():
+                d = {columns[i]: row[i] for i in range(len(columns))}
+                if d.get('event_ts'):
+                    d['event_ts'] = str(d['event_ts'])
+                rows.append(d)
+            return rows
+        finally:
+            conn.close()
+
+    try:
+        rows = await asyncio.to_thread(_load)
+        pairs = sorted({r['pair'] for r in rows if r.get('pair')})
+        actions = sorted({r['action'] for r in rows if r.get('action')})
+        return web.json_response({'entries': rows, 'pairs': pairs, 'actions': actions, 'count': len(rows)})
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
 
 
 async def _live_diary_api(_request: web.Request) -> web.Response:
@@ -2543,6 +2771,20 @@ def _spa_index_response() -> web.StreamResponse:
     """Serve the built React shell or fail with a clear build instruction."""
 
     index_path = REACT_BUILD_DIR / 'index.html'
+    legacy_index_path = WEB_DIR / 'index.html'
+    if index_path.exists():
+        # If the React build output is incomplete, avoid serving a broken shell.
+        react_assets_dir = REACT_BUILD_DIR / 'assets'
+        has_react_bundle = (
+            react_assets_dir.exists()
+            and bool(list(react_assets_dir.glob('index-*.js')))
+            and bool(list(react_assets_dir.glob('index-*.css')))
+        )
+        if has_react_bundle:
+            return web.FileResponse(index_path)
+    if legacy_index_path.exists():
+        return web.FileResponse(legacy_index_path)
+
     if index_path.exists():
         return web.FileResponse(index_path)
     return web.Response(
@@ -2644,6 +2886,10 @@ def _origin_allowed(origin: str, request: web.Request) -> bool:
 
     origin_host = parsed_origin.hostname.lower()
     expected_host = parsed_expected.hostname.lower()
+
+    local_aliases = {'localhost', '127.0.0.1', '::1', '0.0.0.0'}
+    if origin_host in local_aliases and expected_host in local_aliases:
+        return True
 
     return origin_host == expected_host
 
@@ -2866,8 +3112,11 @@ async def _websocket(request: web.Request) -> web.StreamResponse:
 async def _startup(app: web.Application) -> None:
     """Start background services when aiohttp comes up."""
 
-    # Launch hub startup (backfill + streaming) as a background task so the
-    # web server can serve pages immediately while data loads.
+    # Keep startup non-blocking so the dashboard shell is visible while
+    # backfill/bootstrap runs in the background.
+    app["hub"]._loop = asyncio.get_running_loop()
+    await app["hub"]._broadcast_log('info', 'Dashboard startup task scheduled.')
+
     async def _hub_start_with_logging():
         try:
             await app["hub"].start()
@@ -2875,6 +3124,7 @@ async def _startup(app: web.Application) -> None:
             import traceback
             print(f"  Hub startup failed: {exc}")
             traceback.print_exc()
+
     app["_hub_task"] = asyncio.create_task(_hub_start_with_logging())
 
 
@@ -2888,6 +3138,7 @@ async def _cleanup(app: web.Application) -> None:
             await hub_task
         except (asyncio.CancelledError, Exception):
             pass
+
     await app["hub"].stop()
 
 
@@ -2965,6 +3216,10 @@ def run_live_web_app(
     app.router.add_get('/api/live-trade', _live_trade_api)
     app.router.add_get('/trade-log', _index)
     app.router.add_get('/api/trade-log', handle_trade_log_api)
+    app.router.add_get('/order-audit-log', _index)
+    app.router.add_get('/api/order-audit-log', _order_audit_log_api)
+    app.router.add_get('/position-health', _index)
+    app.router.add_get('/api/position-health', _position_health_api)
     app.router.add_get('/api/replay', handle_replay)
     app.router.add_get('/api/replay/bars', handle_replay_bars)
     app.router.add_get('/api/replay/dates', handle_replay_dates)
@@ -2974,7 +3229,7 @@ def run_live_web_app(
     @web.middleware
     async def no_cache(request, handler):
         response = await handler(request)
-        if request.path.startswith('/static/') or request.path in ('/', '/chart', '/trade-log', '/replay'):
+        if request.path.startswith('/static/') or request.path in ('/', '/chart', '/trade-log', '/replay', '/order-audit-log', '/position-health'):
             response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
         return response
 

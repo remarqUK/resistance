@@ -566,6 +566,30 @@ body::before {
   min-width: 100px;
 }
 
+.execution-filter-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.execution-filter-btn {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.execution-filter-btn.is-active {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+
 .page-summary {
   margin: 6px 0 12px;
   color: var(--muted);

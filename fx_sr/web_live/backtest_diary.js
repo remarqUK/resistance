@@ -35,6 +35,7 @@ function formatBacktestDate(isoTime) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "UTC",
   });
 }
 
@@ -124,7 +125,7 @@ function buildRows(trades, dateFilter = "") {
   const _hhmm = (iso) => {
     if (!iso) return "";
     const d = new Date(iso);
-    return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",hour12:false});
+    return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"UTC"});
   };
   bodyEl.innerHTML = trades.map((trade, i) => {
     const cls = (trade.pnl_r || 0) >= 0 ? "up" : "down";
@@ -235,7 +236,7 @@ function renderCalendar() {
   const monthRows = [];
   while (monthKeyFromDate(cursor) >= startMonth) {
     monthRows.push(renderMonth(cursor));
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1);
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() - 1, 1));
   }
 
   calendarEl.innerHTML = monthRows.join("");

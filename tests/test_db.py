@@ -36,6 +36,22 @@ class DbHelperTests(unittest.TestCase):
 
         self.assertEqual(rows, [('ok',)])
 
+    def test_order_audit_log_table_exists(self):
+        with db_module._connect(self.db_path) as conn:
+            rows = conn.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'order_audit_log'
+                ORDER BY ordinal_position
+            """).fetchall()
+        columns = [r[0] for r in rows]
+        expected = [
+            'id', 'event_ts', 'function_name', 'pair', 'direction',
+            'action', 'request_json', 'response_json', 'error',
+            'duration_ms', 'order_ids',
+        ]
+        self.assertEqual(columns, expected)
+
     def test_l2_load_helpers_round_trip(self):
         db_module.save_l2_snapshot(
             ticker='EURUSD=X',

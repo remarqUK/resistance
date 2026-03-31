@@ -7,12 +7,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from contextlib import contextmanager
+import json
 import os
 import threading
 import time
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
+
+from .db import _connect, get_db_path, init_db
 
 import pandas as pd
 from typing import Callable, Optional
@@ -113,6 +116,52 @@ _HISTORICAL_FETCH_CONCURRENCY = max(1, _get_env_int('IBKR_HISTORICAL_FETCH_CONCU
 _HISTORICAL_FETCH_SEMAPHORE = threading.BoundedSemaphore(_HISTORICAL_FETCH_CONCURRENCY)
 _HISTORICAL_REQUEST_GAP_SECONDS = max(0.0, _get_env_int('IBKR_HISTORICAL_REQUEST_GAP_MS', 200)) / 1000.0
 _HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS = max(5.0, _get_env_int('IBKR_HISTORICAL_FETCH_SLOT_TIMEOUT_MS', 15000) / 1000.0)
+_ALLOW_CLIENT_ID_FALLBACK = True
+_LAST_FALLBACK_OFFSET = 0  # remember highest successful offset so new threads skip stale IDs
+
+
+def log_order_event(
+    *,
+    function_name: str,
+    action: str,
+    pair: str | None = None,
+    direction: str | None = None,
+    request_data: dict | None = None,
+    response_data: dict | None = None,
+    error: str | None = None,
+    order_ids: list[int] | None = None,
+    duration_ms: float | None = None,
+) -> None:
+    """Write one row to order_audit_log. Fire-and-forget — never raises."""
+    try:
+        db_path = get_db_path()
+        init_db(db_path)
+        conn = _connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO order_audit_log
+                    (function_name, pair, direction, action,
+                     request_json, response_json, error, order_ids, duration_ms)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    function_name,
+                    pair,
+                    direction,
+                    action,
+                    json.dumps(request_data, default=str) if request_data else None,
+                    json.dumps(response_data, default=str) if response_data else None,
+                    error,
+                    ','.join(str(i) for i in order_ids) if order_ids else None,
+                    duration_ms,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass  # Audit must never interfere with trading
 
 
 @contextmanager
@@ -141,6 +190,15 @@ def set_historical_fetch_concurrency(max_concurrent: int | None = None) -> int:
     _HISTORICAL_FETCH_CONCURRENCY = limit
     _HISTORICAL_FETCH_SEMAPHORE = threading.BoundedSemaphore(limit)
     return limit
+
+
+def set_client_id_fallback(enabled: bool) -> bool:
+    """Enable or disable client-id fallback behavior."""
+
+    global _ALLOW_CLIENT_ID_FALLBACK
+    previous = _ALLOW_CLIENT_ID_FALLBACK
+    _ALLOW_CLIENT_ID_FALLBACK = bool(enabled)
+    return previous
 
 
 def _respect_historical_request_gap() -> None:
@@ -251,18 +309,35 @@ def _get_connection_legacy(client_id: Optional[int] = None, retries: int = 3):
 def _get_connection(client_id: Optional[int] = None, retries: int = 20):
     """Get or create a TWS connection. Returns (ib, connected) tuple.
 
-    Retries client-id-in-use errors by walking up ids from the requested base.
+    By default, retries client-id-in-use errors by walking up IDs from the requested base.
+    When fallback is disabled, retries use only the exact requested client ID.
     """
+    global _LAST_FALLBACK_OFFSET
+
     resolved_client_id = _resolve_client_id(client_id)
     max_attempts = max(1, int(retries))
     ib, connected, active_client_id = _get_thread_connection_state()
 
+    # Reuse any working connection on this thread.  When fallback is enabled
+    # accept any client ID; otherwise require an exact match.  This prevents
+    # the cycle: connect on fallback ID 62 → next call resolves to 60 →
+    # mismatch → disconnect 62 → fail on 60 → walk back to 62 → repeat.
+    if connected and ib and ib.isConnected():
+        if _ALLOW_CLIENT_ID_FALLBACK or active_client_id == resolved_client_id:
+            return ib, True
+
     from ib_async import IB
 
+    # Start from the highest known-good offset so new threads skip stale IDs
+    # left behind by previous threads that died without disconnecting.
+    start_offset = _LAST_FALLBACK_OFFSET if _ALLOW_CLIENT_ID_FALLBACK else 0
+
     for attempt in range(max_attempts):
-        candidate_client_id = resolved_client_id + attempt
-        if connected and ib and ib.isConnected() and active_client_id == candidate_client_id:
-            return ib, True
+        candidate_client_id = (
+            resolved_client_id
+            if not _ALLOW_CLIENT_ID_FALLBACK
+            else resolved_client_id + start_offset + attempt
+        )
 
         try:
             if ib and ib.isConnected():
@@ -270,6 +345,7 @@ def _get_connection(client_id: Optional[int] = None, retries: int = 20):
             ib = IB()
             ib.connect(TWS_HOST, TWS_PORT, clientId=candidate_client_id, timeout=5)
             _set_thread_connection_state(ib, True, candidate_client_id)
+            _LAST_FALLBACK_OFFSET = max(_LAST_FALLBACK_OFFSET, start_offset + attempt)
             return ib, True
         except Exception as exc:
             if attempt < max_attempts - 1:
@@ -303,7 +379,11 @@ def is_available() -> bool:
 
     for attempt in range(max_attempts):
         probe = None
-        candidate_client_id = base_client_id + attempt
+        candidate_client_id = (
+            base_client_id
+            if not _ALLOW_CLIENT_ID_FALLBACK
+            else base_client_id + attempt
+        )
         try:
             probe = IB()
             probe.connect(TWS_HOST, TWS_PORT, clientId=candidate_client_id, timeout=5)
@@ -1277,6 +1357,19 @@ def _safe_float(value) -> Optional[float]:
     return f
 
 
+def _is_nonfatal_whatif_warning(error: Exception) -> bool:
+    """Return True for IB warnings from whatIf that do not imply margin rejection."""
+
+    text = str(error)
+    if not text:
+        return False
+    normalized = text.lower()
+    return (
+        '10349' in normalized
+        or 'order tif was set to day based on order preset' in normalized
+    )
+
+
 def whatif_margin_check(
     pair: str,
     direction: str,
@@ -1302,7 +1395,7 @@ def whatif_margin_check(
             ib.qualifyContracts(contract)
 
             action = 'BUY' if direction == 'LONG' else 'SELL'
-            order = MarketOrder(action, int(quantity))
+            order = MarketOrder(action, int(quantity), tif='DAY')
             order.whatIf = True
 
             state = ib.whatIfOrder(contract, order)
@@ -1353,12 +1446,30 @@ def whatif_margin_check(
                 'margin_exceeded': margin_exceeded,
             }
         except Exception as e:
+            if _is_nonfatal_whatif_warning(e):
+                print(f"    Info: non-fatal whatIf warning for {pair} {direction} {quantity}: {e}")
+                return {
+                    'pair': pair,
+                    'direction': direction,
+                    'quantity': quantity,
+                    'init_margin_change': None,
+                    'maint_margin_change': None,
+                    'equity_with_loan_after': None,
+                    'init_margin_after': None,
+                    'would_liquidate': False,
+                    'margin_exceeded': False,
+                }
             print(f"    Warning: whatIf margin check failed for {pair}: {e}")
             return None
 
 
 def fetch_open_order_pairs() -> set[str]:
-    """Return pairs with active FX orders that are not terminal."""
+    """Return pairs with active FX orders that are not terminal.
+
+    Uses ``reqAllOpenOrders`` to see orders across all client sessions,
+    not just the current one.  This is critical after a gateway restart
+    where brackets placed by a previous session are still working.
+    """
     terminal_statuses = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
 
     with _IBKR_LOCK:
@@ -1367,10 +1478,8 @@ def fetch_open_order_pairs() -> set[str]:
             return set()
 
         try:
-            if hasattr(ib, 'openTrades'):
-                trades = ib.openTrades()
-            else:
-                trades = ib.trades()
+            # reqAllOpenOrders sees orders from ALL client IDs, not just ours.
+            trades = ib.reqAllOpenOrders()
 
             result = set()
             for trade in trades:
@@ -1637,9 +1746,23 @@ def submit_fx_market_order(
     if quantity <= 0:
         return None
 
+    _audit_start = time.monotonic()
+
     with _IBKR_LOCK:
         ib, connected = _get_connection()
         if not connected:
+            log_order_event(
+                function_name='submit_fx_market_order',
+                pair=pair,
+                direction=direction,
+                action='submit',
+                request_data={
+                    'quantity': quantity,
+                    'order_ref': order_ref,
+                },
+                error='Not connected',
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             return None
 
         try:
@@ -1657,6 +1780,23 @@ def submit_fx_market_order(
             live_order = getattr(trade, 'order', None)
             order_status = getattr(trade, 'orderStatus', None)
 
+            log_order_event(
+                function_name='submit_fx_market_order',
+                pair=pair,
+                direction=direction,
+                action='submit',
+                request_data={
+                    'quantity': quantity,
+                    'order_ref': order_ref,
+                },
+                response_data={
+                    'order_id': getattr(live_order, 'orderId', None),
+                    'status': getattr(order_status, 'status', None),
+                    'avg_fill_price': getattr(order_status, 'avgFillPrice', None),
+                },
+                order_ids=[getattr(live_order, 'orderId', None)],
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             return {
                 'pair': pair,
                 'direction': direction,
@@ -1667,6 +1807,18 @@ def submit_fx_market_order(
             }
         except Exception as e:
             print(f"    Warning: failed to submit FX order for {pair}: {e}")
+            log_order_event(
+                function_name='submit_fx_market_order',
+                pair=pair,
+                direction=direction,
+                action='submit',
+                request_data={
+                    'quantity': quantity,
+                    'order_ref': order_ref,
+                },
+                error=str(e),
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             return None
 
 
@@ -1681,6 +1833,31 @@ def submit_fx_market_bracket_order(
     """Submit a market-entry FX bracket order with attached TP/SL protection."""
 
     if quantity <= 0:
+        return None
+
+    _audit_start = time.monotonic()
+
+    # Pre-flight margin check via whatIf: ask IBKR whether the full
+    # bracket (entry + TP + SL) is affordable before placing anything.
+    margin = whatif_margin_check(pair, direction, quantity)
+    if margin is not None and (margin.get('margin_exceeded') or margin.get('would_liquidate')):
+        print(f"    Skipping bracket order for {pair}: "
+              f"insufficient margin (equity_after={margin.get('equity_with_loan_after')}, "
+              f"init_margin_after={margin.get('init_margin_after')})")
+        log_order_event(
+            function_name='submit_fx_market_bracket_order',
+            pair=pair,
+            direction=direction,
+            action='submit',
+            request_data={
+                'quantity': quantity,
+                'take_profit_price': take_profit_price,
+                'stop_loss_price': stop_loss_price,
+                'order_ref': order_ref,
+            },
+            error='margin_exceeded',
+            duration_ms=(time.monotonic() - _audit_start) * 1000,
+        )
         return None
 
     with _IBKR_LOCK:
@@ -1763,6 +1940,22 @@ def submit_fx_market_bracket_order(
                         ib.sleep(1)
                 except Exception:
                     pass
+                log_order_event(
+                    function_name='submit_fx_market_bracket_order',
+                    pair=pair,
+                    direction=direction,
+                    action='submit',
+                    request_data={
+                        'quantity': quantity,
+                        'take_profit_price': take_profit_price,
+                        'stop_loss_price': stop_loss_price,
+                        'order_ref': order_ref,
+                        'rounded_tp': float(rounded_take_profit_price),
+                        'rounded_sl': float(rounded_stop_loss_price),
+                    },
+                    error=f'market order not filled after {fill_timeout}s (status={status_str})',
+                    duration_ms=(time.monotonic() - _audit_start) * 1000,
+                )
                 return None
 
             parent_live_order = getattr(parent_trade, 'order', None)
@@ -1776,6 +1969,34 @@ def submit_fx_market_bracket_order(
                 if filled_units <= 0.0:
                     remaining_units = total_units
 
+            log_order_event(
+                function_name='submit_fx_market_bracket_order',
+                pair=pair,
+                direction=direction,
+                action='submit',
+                request_data={
+                    'quantity': quantity,
+                    'take_profit_price': take_profit_price,
+                    'stop_loss_price': stop_loss_price,
+                    'order_ref': order_ref,
+                    'rounded_tp': float(rounded_take_profit_price),
+                    'rounded_sl': float(rounded_stop_loss_price),
+                },
+                response_data={
+                    'order_id': getattr(parent_live_order, 'orderId', None),
+                    'status': getattr(parent_status, 'status', None),
+                    'avg_fill_price': getattr(parent_status, 'avgFillPrice', None),
+                    'filled_units': filled_units,
+                    'tp_order_id': getattr(tp_live_order, 'orderId', None),
+                    'sl_order_id': getattr(sl_live_order, 'orderId', None),
+                },
+                order_ids=[
+                    getattr(parent_live_order, 'orderId', None),
+                    getattr(tp_live_order, 'orderId', None),
+                    getattr(sl_live_order, 'orderId', None),
+                ],
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             return {
                 'pair': pair,
                 'direction': direction,
@@ -1793,6 +2014,20 @@ def submit_fx_market_bracket_order(
                 'stop_loss_price': float(rounded_stop_loss_price),
             }
         except Exception as e:
+            log_order_event(
+                function_name='submit_fx_market_bracket_order',
+                pair=pair,
+                direction=direction,
+                action='submit',
+                request_data={
+                    'quantity': quantity,
+                    'take_profit_price': take_profit_price,
+                    'stop_loss_price': stop_loss_price,
+                    'order_ref': order_ref,
+                },
+                error=str(e),
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             print(f"    Warning: failed to submit FX bracket order for {pair}: {e}")
             return None
 
@@ -1813,6 +2048,34 @@ def submit_bracket_for_existing_position(
     order — the position already exists.
     """
     if quantity <= 0:
+        return None
+
+    _audit_start = time.monotonic()
+
+    # Pre-flight margin check: these are closing orders for existing
+    # positions, but IBKR's margin system may still reject them if the
+    # account is near its margin limit.  The whatIf simulates the
+    # closing side to verify IBKR will accept the order.
+    close_direction = 'SHORT' if direction == 'LONG' else 'LONG'
+    margin = whatif_margin_check(pair, close_direction, quantity)
+    if margin is not None and (margin.get('margin_exceeded') or margin.get('would_liquidate')):
+        print(f"    Skipping bracket resubmission for {pair}: "
+              f"insufficient margin (equity_after={margin.get('equity_with_loan_after')}, "
+              f"init_margin_after={margin.get('init_margin_after')})")
+        log_order_event(
+            function_name='submit_bracket_for_existing_position',
+            pair=pair,
+            direction=direction,
+            action='resubmit',
+            request_data={
+                'quantity': quantity,
+                'take_profit_price': take_profit_price,
+                'stop_loss_price': stop_loss_price,
+                'order_ref': order_ref,
+            },
+            error='margin_exceeded',
+            duration_ms=(time.monotonic() - _audit_start) * 1000,
+        )
         return None
 
     with _IBKR_LOCK:
@@ -1863,7 +2126,7 @@ def submit_bracket_for_existing_position(
             tp_live = getattr(tp_trade, 'order', None)
             sl_live = getattr(sl_trade, 'order', None)
 
-            return {
+            result = {
                 'pair': pair,
                 'direction': direction,
                 'take_profit_order_id': getattr(tp_live, 'orderId', None),
@@ -1871,23 +2134,90 @@ def submit_bracket_for_existing_position(
                 'take_profit_price': float(rounded_tp),
                 'stop_loss_price': float(rounded_sl),
             }
+            log_order_event(
+                function_name='submit_bracket_for_existing_position',
+                pair=pair,
+                direction=direction,
+                action='resubmit',
+                request_data={
+                    'quantity': quantity,
+                    'take_profit_price': take_profit_price,
+                    'stop_loss_price': stop_loss_price,
+                    'rounded_tp': float(rounded_tp),
+                    'rounded_sl': float(rounded_sl),
+                    'oca_group': oca_group,
+                },
+                response_data={
+                    'tp_order_id': getattr(tp_live, 'orderId', None),
+                    'sl_order_id': getattr(sl_live, 'orderId', None),
+                },
+                order_ids=[
+                    getattr(tp_live, 'orderId', None),
+                    getattr(sl_live, 'orderId', None),
+                ],
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
+            return result
         except Exception as e:
+            log_order_event(
+                function_name='submit_bracket_for_existing_position',
+                pair=pair,
+                direction=direction,
+                action='resubmit',
+                request_data={
+                    'quantity': quantity,
+                    'take_profit_price': take_profit_price,
+                    'stop_loss_price': stop_loss_price,
+                    'order_ref': order_ref,
+                },
+                error=str(e),
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             print(f"    Warning: failed to resubmit brackets for {pair}: {e}")
             return None
 
 
-def cancel_orders(order_ids: set[int]) -> list[int]:
-    """Cancel one or more orders by ID. Returns the IDs that were successfully sent."""
+def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> list[int]:
+    """Cancel one or more orders by ID. Returns the IDs that were successfully sent.
+
+    When *suppress_not_found* is True, IBKR error 10147 (order not found) is
+    silently swallowed — useful for cleaning up bracket children that may
+    have already been filled or cancelled.
+    """
 
     if not order_ids:
         return []
 
+    _audit_start = time.monotonic()
+
     with _IBKR_LOCK:
         ib, connected = _get_connection()
         if not connected:
+            log_order_event(
+                function_name='cancel_orders',
+                action='cancel',
+                request_data={
+                    'order_ids': sorted(order_ids),
+                    'suppress_not_found': suppress_not_found,
+                },
+                order_ids=sorted(order_ids),
+                error='Not connected',
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
             return []
 
+        # Temporarily swap ib_async's error handler to mute "order not found"
+        if suppress_not_found:
+            _orig = ib._onError
+            def _filtered(reqId, errorCode, errorString, contract=None):
+                if errorCode == 10147:
+                    return
+                _orig(reqId, errorCode, errorString, contract)
+            ib.errorEvent -= _orig
+            ib.errorEvent += _filtered
+
         cancelled: list[int] = []
+        cancel_error = None
         try:
             from ib_async import Order
 
@@ -1898,10 +2228,30 @@ def cancel_orders(order_ids: set[int]) -> list[int]:
                     cancelled.append(int(oid))
                 except Exception as e:
                     print(f"    Warning: failed to cancel order {oid}: {e}")
+                    cancel_error = str(e)
             if cancelled and hasattr(ib, 'sleep'):
                 ib.sleep(1)
         except Exception as e:
             print(f"    Warning: cancel_orders failed: {e}")
+            cancel_error = str(e)
+        finally:
+            if suppress_not_found:
+                ib.errorEvent -= _filtered
+                ib.errorEvent += _orig
+        log_order_event(
+            function_name='cancel_orders',
+            action='cancel',
+            request_data={
+                'order_ids': sorted(order_ids),
+                'suppress_not_found': suppress_not_found,
+            },
+            response_data={
+                'cancelled': sorted(cancelled),
+            },
+            order_ids=sorted(order_ids),
+            error=cancel_error,
+            duration_ms=(time.monotonic() - _audit_start) * 1000,
+        )
         return cancelled
 
 

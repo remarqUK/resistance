@@ -3,7 +3,7 @@ import React from 'react';
 const ALL_LINKS = [
   { href: '/', label: 'Live Board' },
   // Live group
-  { href: '/trade-log', label: 'Live Trade Log' },
+  { href: '/trade-log', label: 'Live Trades' },
   { href: '/live-diary', label: 'Live Diary' },
   // Backtest group
   { href: '/backtest-trades', label: 'Backtest Trades' },

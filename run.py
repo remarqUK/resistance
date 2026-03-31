@@ -58,12 +58,15 @@ from fx_sr.strategy import (
 )
 
 
-def _configure_ibkr(args) -> int:
+def _configure_ibkr(args, *, allow_client_id_fallback: bool = True) -> int:
     """Apply optional CLI IBKR connection overrides."""
 
     client_id = getattr(args, 'ibkr_client_id', None)
     if client_id is not None:
         ibkr.configure_connection(client_id=client_id)
+    previous = ibkr.set_client_id_fallback(allow_client_id_fallback)
+    if previous != allow_client_id_fallback:
+        ibkr.disconnect()
     hist_workers = getattr(args, 'ib_historical_fetch_concurrency', None)
     if hist_workers is not None:
         ibkr.set_historical_fetch_concurrency(hist_workers)
@@ -313,6 +316,7 @@ def _run_backtests_until_target(
     hourly_days: int,
     execution_mode: str = 'intrabar',
     fetch_workers: int | None = None,
+    allow_stale_cache: bool = False,
 ) -> tuple[
     dict[str, object],
     StrategyParams,
@@ -371,6 +375,7 @@ def _run_backtests_until_target(
             debug=bool(getattr(args, 'backtest_debug', False)),
             execution_mode=execution_mode,
             fetch_workers=fetch_workers,
+            allow_stale_cache=allow_stale_cache,
         )
         elapsed = time.time() - t0
 
@@ -757,6 +762,7 @@ def cmd_backtest(args):
             hourly_days=args.days,
             execution_mode=execution_mode,
             fetch_workers=getattr(args, 'fetch_workers', None),
+            allow_stale_cache=getattr(args, 'allow_stale_cache', False),
         )
     else:
         run_config_json = _build_backtest_run_config(
@@ -780,6 +786,7 @@ def cmd_backtest(args):
             execution_mode=execution_mode,
             debug=bool(getattr(args, 'backtest_debug', False)),
             fetch_workers=getattr(args, 'fetch_workers', None),
+            allow_stale_cache=getattr(args, 'allow_stale_cache', False),
         )
         attempt_logs: list[dict[str, float | int | str]] = []
         summary = _portfolio_summary(
@@ -1396,7 +1403,9 @@ def cmd_viz(args):
 def cmd_live(args):
     """Run live monitoring mode."""
 
-    active_client_id = _configure_ibkr(args)
+    client_id_provided = getattr(args, 'ibkr_client_id', None) is not None
+    # Keep client-id fallback enabled so startup can recover if any configured ID is already active.
+    active_client_id = _configure_ibkr(args, allow_client_id_fallback=True)
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
     zone_days = args.zone_history
@@ -1412,7 +1421,12 @@ def cmd_live(args):
             print(show_zones(pair_id, pair_info, zone_history_days=zone_days))
         return
 
+    live_web_client_id = active_client_id
+    if not args.once and not client_id_provided:
+        live_web_client_id = active_client_id + 1000
     print(f"\n  IBKR client ID: {active_client_id}")
+    if not args.once and not client_id_provided and live_web_client_id != active_client_id:
+        print(f"  Live dashboard IBKR client ID: {live_web_client_id}")
     print(f"  Strategy profile: {_format_preset_label(profile_name)}")
     print(f"  Active params: {_format_param_summary(params)}")
     print(f"  Signal timing: {execution_mode}")
@@ -1420,6 +1434,12 @@ def cmd_live(args):
     # Release the main-thread IBKR connection so worker threads in the web
     # app can reuse the same client_id without TWS rejecting them (Error 326).
     ibkr.disconnect()
+
+    # Keep the shared IBKR default at the base live ID; the dashboard stream
+    # thread uses its own client-id offset internally.
+    if client_id_provided and not args.once:
+        ibkr.configure_connection(client_id=live_web_client_id)
+
     if live_balance is not None and live_currency:
         print(
             f"  Live sizing: {live_currency} {live_balance:,.2f} balance, "
@@ -1528,7 +1548,7 @@ def cmd_live(args):
         account_currency=live_currency,
         execute_orders=args.paper_trade,
         strategy_label=_format_preset_label(profile_name),
-        client_id=active_client_id,
+        client_id=live_web_client_id,
         port=args.port,
         open_browser=not args.no_browser,
         execution_mode=execution_mode,
@@ -1622,6 +1642,11 @@ def main():
         help='Compatibility flag only; backtests always run from cache and will fail fast if data is missing',
     )
     bt.add_argument(
+        '--allow-stale-cache',
+        action='store_true',
+        help='Allow stale cached bars in backtests (skip recency checks) while keeping shape checks active',
+    )
+    bt.add_argument(
         '--execution-mode',
         choices=('next_bar', 'intrabar'),
         default=None,
@@ -1696,7 +1721,6 @@ def main():
         help=f'Days of daily data for zones (default: {DEFAULT_ZONE_HISTORY_DAYS})',
     )
     _add_ibkr_args(lv)
-    lv.set_defaults(ibkr_client_id=99)
     _add_strategy_args(lv)
     _add_risk_sizing_args(lv, include_balance=True, include_account_currency=True)
     lv.add_argument('--once', action='store_true', help='Single scan then exit')

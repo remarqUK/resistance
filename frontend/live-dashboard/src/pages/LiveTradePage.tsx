@@ -23,7 +23,7 @@ export function LiveTradePage() {
       });
     };
 
-    ensureScript('/static/chart-core.js')
+    ensureScript('/static/chart_core.js')
       .then(() => ensureScript('/static/live_trade.js'))
       .then(() => {
         window.__fxLiveTradeScriptLoaded = true;

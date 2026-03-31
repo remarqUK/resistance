@@ -98,6 +98,7 @@ function formatTime(isoTime) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    timeZone: "UTC",
   });
 }
 
@@ -115,6 +116,7 @@ function formatBacktestDate(isoTime) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "UTC",
   });
 }
 

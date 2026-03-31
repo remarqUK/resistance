@@ -22,7 +22,7 @@
     if (!iso) return '\u2014';
     var d = new Date(iso);
     if (isNaN(d)) return '\u2014';
-    return d.toLocaleString([], {year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
+    return d.toLocaleString([], {year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'UTC'});
   }
 
   function normalizeDecimal(value) {
@@ -312,7 +312,7 @@ function loadTradeFromSignalId() {
           var hm = function (iso) {
             if (!iso) return '';
             var d = new Date(iso);
-            return isNaN(d) ? '' : d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false});
+            return isNaN(d) ? '' : d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'UTC'});
           };
           var timeRange = hm(t.opened_at || t.signal_time);
           if (t.closed_at) timeRange += '\u2013' + hm(t.closed_at);

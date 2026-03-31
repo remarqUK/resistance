@@ -58,6 +58,7 @@ function formatTimestamp(isoString?: string | null) {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+    timeZone: 'UTC',
   });
 }
 
@@ -73,6 +74,7 @@ function formatDateOnly(isoString?: string | null) {
     year: 'numeric',
     month: 'short',
     day: '2-digit',
+    timeZone: 'UTC',
   });
 }
 
@@ -83,6 +85,8 @@ const BACKTEST_SPINNER_ICON = '\u27F3';
 const REBUILD_ICON = '\u21BB';
 const RESTART_ICON = '\u21BA';
 const STOP_ICON = '\u23F9';
+const AUDIT_LOG_ICON = '\uD83D\uDCCB';  // clipboard/log icon
+const HEALTH_ICON = '\uD83E\uDE7A';    // stethoscope icon
 
 function badgeClass(value: any) {
   const token = String(value || 'muted').toLowerCase().replaceAll(/[^a-z0-9]+/g, '-');
@@ -151,6 +155,33 @@ function executionKey(execution: ExecutionRow) {
     execution.order_id || '',
     execution.time || '',
   ].join('|');
+}
+
+function executionTimestampMs(execution: ExecutionRow) {
+  if (!execution?.time) {
+    return null;
+  }
+  const withOffset = String(execution.time).trim();
+  const normalizedTime = withOffset.includes('T')
+    ? String(execution.time)
+    : withOffset.replace(' ', 'T');
+  const noOffsetGapTime = normalizedTime.replace(/\s(?=[+-]\d{2}:\d{2}$)/, '');
+  const normalizedMsPrecision = noOffsetGapTime.replace(/(\.\d{3})\d+(?=(?:[+-]\d{2}:\d{2}|$))/, '$1');
+  const time = Date.parse(normalizedMsPrecision);
+  return Number.isNaN(time) ? null : time;
+}
+
+function isClosedExecution(execution: ExecutionRow) {
+  const status = String(execution.status || '').toUpperCase();
+  return execution.closed_at != null || (status !== '' && status !== 'OPEN');
+}
+
+type ExecutionFilterMode = 'all' | 'open' | 'closed';
+
+function executionFilterButtonLabel(mode: ExecutionFilterMode) {
+  if (mode === 'open') return 'Open';
+  if (mode === 'closed') return 'Closed';
+  return 'All';
 }
 
 function replayDateForExecution(execution: ExecutionRow) {
@@ -235,7 +266,7 @@ function mergeStateWithMessage(previous: DashboardState, message: any): Dashboar
 
   if (message.type === 'error') {
     const entry: LogEntry = {
-      ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      ts: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'UTC' }),
       level: 'error',
       message: message.message || 'Unknown live dashboard error',
     };
@@ -332,6 +363,7 @@ function nextTransactionText(now: number) {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
+      timeZone: 'UTC',
     }),
   };
 }
@@ -388,7 +420,7 @@ const WatchlistRow = memo(function WatchlistRow({ row }: { row: PairRow }) {
     <tr>
       <td>
         <a
-          href={`/chart?pair=${encodeURIComponent(row.pair)}`}
+          href={`/live-trade?pair=${encodeURIComponent(row.pair)}`}
           target="_blank"
           rel="noreferrer"
           className="pair-main pair-link"
@@ -729,10 +761,10 @@ function AccountChart() {
           lastValueVisible: true,
           priceLineVisible: false,
           crosshairMarkerVisible: true,
-          title: 'Balance',
+          title: 'Equity',
         });
         balanceSeries.setData(
-          snapshots.map((s: any) => ({ time: s.date, value: s.balance }))
+          snapshots.map((s: any) => ({ time: s.date, value: s.equity ?? s.balance }))
         );
 
         // Daily P&L histogram on right scale
@@ -789,6 +821,7 @@ export function DashboardPage() {
   const [viewState, setViewState] = useState<DashboardState>(INITIAL_STATE);
   const [connectionState, setConnectionState] = useState<'connecting' | 'live' | 'disconnected' | 'error'>('connecting');
   const [executionTogglePending, setExecutionTogglePending] = useState(false);
+  const [executionFilterMode, setExecutionFilterMode] = useState<ExecutionFilterMode>('all');
   const [selectedExecutionKey, setSelectedExecutionKey] = useState<string | null>(null);
   const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
   const [closingPositionKey, setClosingPositionKey] = useState<string | null>(null);
@@ -800,7 +833,7 @@ export function DashboardPage() {
 
   const pushLog = useCallback((entry: LogEntry) => {
     const nextEntry: LogEntry = {
-      ts: entry.ts || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      ts: entry.ts || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'UTC' }),
       level: entry.level || 'info',
       message: entry.message || '',
     };
@@ -819,10 +852,29 @@ export function DashboardPage() {
     if (!selectedExecutionKey) {
       return;
     }
-    if (!viewState.executions.some((execution) => executionKey(execution) === selectedExecutionKey)) {
+    const cutoff = nowTick - (72 * 60 * 60 * 1000);
+    const isSelectedVisible = viewState.executions.some((execution) => {
+      const key = executionKey(execution);
+      if (key !== selectedExecutionKey) {
+        return false;
+      }
+      const executionTime = executionTimestampMs(execution);
+      if (executionTime === null || executionTime < cutoff) {
+        return false;
+      }
+      if (executionFilterMode === 'open') {
+        return !isClosedExecution(execution);
+      }
+      if (executionFilterMode === 'closed') {
+        return isClosedExecution(execution);
+      }
+      return true;
+    });
+
+    if (!isSelectedVisible) {
       setSelectedExecutionKey(null);
     }
-  }, [selectedExecutionKey, viewState.executions]);
+  }, [selectedExecutionKey, nowTick, executionFilterMode, viewState.executions]);
 
   useEffect(() => {
     function flushQueue() {
@@ -901,6 +953,26 @@ export function DashboardPage() {
   const sortedRows = useMemo(() => sortPairs(viewState.pairs, viewState.positions), [viewState.pairs, viewState.positions]);
   const signals = useMemo(() => viewState.signals || [], [viewState.signals]);
   const nextTransaction = useMemo(() => nextTransactionText(nowTick), [nowTick]);
+  const filteredExecutions = useMemo(() => {
+    const cutoff = nowTick - (72 * 60 * 60 * 1000);
+    const filtered = viewState.executions.filter((execution) => {
+      const executionTime = executionTimestampMs(execution);
+      if (executionTime === null || executionTime < cutoff) {
+        return false;
+      }
+      if (executionFilterMode === 'open') {
+        return !isClosedExecution(execution);
+      }
+      if (executionFilterMode === 'closed') {
+        return isClosedExecution(execution);
+      }
+      return true;
+    });
+
+    return filtered
+      .slice()
+      .sort((left, right) => (executionTimestampMs(right) ?? 0) - (executionTimestampMs(left) ?? 0));
+  }, [executionFilterMode, nowTick, viewState.executions]);
 
   const scanStatus = summary.status || 'Starting';
   const isScanLive = scanStatus === 'live';
@@ -1100,6 +1172,26 @@ export function DashboardPage() {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
             <NavLinks current="/" orientation="horizontal" />
             <div className="hero-actions hero-middle-actions" style={{ display: 'flex', flexDirection: 'row', gap: '12px' }}>
+          <a
+            href="/position-health"
+            target="_blank"
+            className="toolbar-btn hero-top-action-link"
+            title="Position health"
+            aria-label="Position health"
+            style={{ textDecoration: 'none', fontSize: '1.05rem' }}
+          >
+            {HEALTH_ICON}
+          </a>
+          <a
+            href="/order-audit-log"
+            target="_blank"
+            className="toolbar-btn hero-top-action-link"
+            title="Order audit log"
+            aria-label="Order audit log"
+            style={{ textDecoration: 'none', fontSize: '1.05rem' }}
+          >
+            {AUDIT_LOG_ICON}
+          </a>
           {summary.execution_available ? (
             <button
               id="trade-toggle-btn"
@@ -1224,41 +1316,6 @@ export function DashboardPage() {
         </section>
         <section className="side-column">
           <section className="panel">
-            <div className="panel-subhead">Active Signals</div>
-            <div id="signals-list" className="stack-list">
-              {!signals.length ? <div className="empty-card">No active signals.</div> : signals.map((signal) => {
-                const plan = signal.size_plan || {};
-                return (
-                  <article key={`${signal.pair}:${signal.direction}`} className="signal-card">
-                    <div className="signal-head" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                      <div className="mini-head-copy">
-                        <strong>{signal.pair}</strong>
-                        {' '}
-                        <span className={badgeClass(signal.direction)}>{signal.direction}</span>
-                        {' '}
-                        <span className="pair-sub">{signal.zone_type || 'setup'} · {signal.zone_strength || '–'}</span>
-                      </div>
-                      <span className={badgeClass('signal')}>SIGNAL</span>
-                    </div>
-                    <div className="signal-meta">
-                      <div><span className="value-label">Entry</span><span className="value">{formatNumber(signal.entry_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Stop</span><span className="value">{formatNumber(signal.sl_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Target</span><span className="value">{formatNumber(signal.tp_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Units</span><span className="value">{plan.units ? Number(plan.units).toLocaleString() : '–'}</span></div>
-                      <div><span className="value-label">Risk</span><span className="value">{plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${plan.account_currency || ''}` : '–'}</span></div>
-                      <div><span className="value-label">Notional</span><span className="value">{plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${plan.account_currency || ''}` : '–'}</span></div>
-                    </div>
-                    <div className="signal-meta" style={{ marginTop: '0.85rem' }}>
-                      <div><span className="value-label">Arrived</span><span className="value">{formatTimestamp(signal.arrived_at)}</span></div>
-                      <div><span className="value-label">Last valid</span><span className="value">{formatTimestamp(signal.last_valid_at)}</span></div>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel">
             <div className="panel-subhead">Tracked Positions</div>
             <div id="positions-list" className="stack-list compact-list">
               {!viewState.positions.length ? <div className="empty-card">No tracked positions.</div> : viewState.positions.map((position) => {
@@ -1348,12 +1405,59 @@ export function DashboardPage() {
             </div>
           </section>
 
+          <section className="panel">
+            <div className="panel-subhead">Active Signals</div>
+            <div id="signals-list" className="stack-list">
+              {!signals.length ? <div className="empty-card">No active signals.</div> : signals.map((signal) => {
+                const plan = signal.size_plan || {};
+                return (
+                  <article key={`${signal.pair}:${signal.direction}`} className="signal-card">
+                    <div className="signal-head" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                      <div className="mini-head-copy">
+                        <strong>{signal.pair}</strong>
+                        {' '}
+                        <span className={badgeClass(signal.direction)}>{signal.direction}</span>
+                        {' '}
+                        <span className="pair-sub">{signal.zone_type || 'setup'} · {signal.zone_strength || '–'}</span>
+                      </div>
+                      <span className={badgeClass('signal')}>SIGNAL</span>
+                    </div>
+                    <div className="signal-meta">
+                      <div><span className="value-label">Entry</span><span className="value">{formatNumber(signal.entry_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
+                      <div><span className="value-label">Stop</span><span className="value">{formatNumber(signal.sl_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
+                      <div><span className="value-label">Target</span><span className="value">{formatNumber(signal.tp_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
+                      <div><span className="value-label">Units</span><span className="value">{plan.units ? Number(plan.units).toLocaleString() : '–'}</span></div>
+                      <div><span className="value-label">Risk</span><span className="value">{plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${plan.account_currency || ''}` : '–'}</span></div>
+                      <div><span className="value-label">Notional</span><span className="value">{plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${plan.account_currency || ''}` : '–'}</span></div>
+                    </div>
+                    <div className="signal-meta" style={{ marginTop: '0.85rem' }}>
+                      <div><span className="value-label">Arrived</span><span className="value">{formatTimestamp(signal.arrived_at)}</span></div>
+                      <div><span className="value-label">Last valid</span><span className="value">{formatTimestamp(signal.last_valid_at)}</span></div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+
           <section className="panel transactions-panel">
             <div className="split-panel">
               <div className="split-panel-section">
                 <div className="panel-subhead">Transactions</div>
+                <div className="execution-filter-toolbar">
+                  {(['all', 'open', 'closed'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`execution-filter-btn ${executionFilterMode === mode ? 'is-active' : ''}`}
+                      onClick={() => setExecutionFilterMode(mode)}
+                    >
+                      {executionFilterButtonLabel(mode)}
+                    </button>
+                  ))}
+                </div>
               <div id="executions-list" className="stack-list compact-list">
-                {!viewState.executions.length ? <div className="empty-card">No execution activity.</div> : [...viewState.executions].reverse().map((execution) => {
+                {!filteredExecutions.length ? <div className="empty-card">No execution activity in the last 72 hours.</div> : filteredExecutions.map((execution) => {
                   const key = executionKey(execution);
                   const selected = key === selectedExecutionKey;
                   const pnlSummary = executionPnlROrPips(execution);

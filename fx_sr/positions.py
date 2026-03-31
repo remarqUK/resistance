@@ -8,14 +8,14 @@ Phase 1 (read-only):
 """
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data
-from .db import _connect, _normalize_ts, db_transaction, get_db_path
+from .db import _connect, _normalize_ts, db_transaction, get_db_path, set_setting
 from .live_history import (
     claim_signal_for_position_conn,
     ensure_detected_signal_table,
@@ -27,11 +27,59 @@ from .live_history import (
 from .levels import detect_zones, SRZone
 from .strategy import Trade, StrategyParams, check_exit, get_market_exit_price, get_tradeable_zones
 from . import ibkr
+from .ibkr import log_order_event
 
 
 # ---------------------------------------------------------------------------
 # Helpers (shared across module)
 # ---------------------------------------------------------------------------
+
+def cancel_bracket_children(signal_id: str | None) -> set[int]:
+    """Load bracket TP/SL order IDs for a signal and cancel them at the broker.
+
+    Returns the set of order IDs that were sent for cancellation.
+    Blocking — run on an executor thread when called from async code.
+    Orders that no longer exist at the broker are silently ignored.
+    """
+    if not signal_id:
+        return set()
+    signal_row = load_detected_signal(signal_id)
+    if signal_row is None:
+        return set()
+    order_ids: set[int] = set()
+    for key in ('take_profit_order_id', 'stop_loss_order_id'):
+        raw = signal_row.get(key)
+        if raw is not None:
+            order_ids.add(int(raw))
+    if order_ids:
+        ibkr.cancel_orders(order_ids, suppress_not_found=True)
+    return order_ids
+
+
+def _cancel_orders_for_pairs(pairs: set[str]) -> None:
+    """Cancel all working orders for the given pairs at IBKR."""
+    with ibkr._IBKR_LOCK:
+        ib, connected = ibkr._get_connection()
+        if not connected:
+            return
+        try:
+            all_orders = ib.reqAllOpenOrders()
+            cancel_ids: set[int] = set()
+            for trade in all_orders:
+                status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
+                if status in ('Filled', 'Cancelled', 'ApiCancelled', 'Inactive'):
+                    continue
+                pair_id = ibkr._contract_to_pair(getattr(trade, 'contract', None))
+                if pair_id in pairs:
+                    oid = getattr(getattr(trade, 'order', None), 'orderId', None)
+                    if oid is not None:
+                        cancel_ids.add(int(oid))
+            if cancel_ids:
+                ibkr.cancel_orders(cancel_ids)
+                print(f"    Cancelled {len(cancel_ids)} orphaned orders")
+        except Exception as e:
+            print(f"    Warning: failed to cancel orphaned orders: {e}")
+
 
 def calc_pnl_pips(trade: Trade, current_mid_price: float, pip: float, params: StrategyParams) -> float:
     """Calculate executable P&L in pips using the shared midpoint fill model."""
@@ -439,7 +487,9 @@ def _build_trade_from_position(
     if daily_df.empty:
         return None
 
-    zones = detect_zones(daily_df)
+    from .walkforward import slice_daily_window
+    daily_window = slice_daily_window(daily_df, daily_df.index[-1], zone_history_days)
+    zones = detect_zones(daily_window)
     nearest_sup, nearest_res = get_tradeable_zones(zones, avg_cost)
 
     # Pick zone matching direction, fallback to other, fallback to synthetic
@@ -651,44 +701,60 @@ def _update_signal_bracket_ids(
 
 
 def _resubmit_missing_brackets(
-    signal_row: dict,
+    signal_row: dict | None,
     ibkr_size: float,
+    *,
+    trade: 'Trade | None' = None,
+    pair: str | None = None,
+    direction: str | None = None,
+    open_order_pairs: set[str] | None = None,
 ) -> None:
     """Resubmit TP/SL bracket orders if the originals were lost (e.g. gateway restart).
 
     Checks whether the pair still has working orders at IBKR.  If not,
-    and the signal has bracket prices, submits new TP limit + SL stop
-    and updates the signal record with the new order IDs.
-    """
-    tp_oid = signal_row.get('take_profit_order_id')
-    sl_oid = signal_row.get('stop_loss_order_id')
+    and TP/SL prices are available (from signal or trade), submits new
+    TP limit + SL stop and updates the signal record with the new order IDs.
 
-    # Only attempt if the signal originally had bracket orders
-    if tp_oid is None and sl_oid is None:
+    Works with a signal row, a Trade object, or both.  Unlinked positions
+    (no signal) use the trade's TP/SL prices directly.
+
+    *open_order_pairs* can be pre-fetched to avoid repeated API calls
+    when checking multiple positions in a loop.
+    """
+    pair = pair or (signal_row['pair'] if signal_row else None)
+    direction = direction or (signal_row['direction'] if signal_row else None)
+    if not pair or not direction:
         return
 
-    pair = signal_row['pair']
-    direction = signal_row['direction']
-
     # Check if the pair still has working orders at IBKR
-    open_pairs = ibkr.fetch_open_order_pairs()
-    if pair in open_pairs:
+    if open_order_pairs is None:
+        open_order_pairs = ibkr.fetch_open_order_pairs()
+    if pair in open_order_pairs:
         return  # Brackets (or other orders) still live — nothing to do
 
-    tp_price = (
-        float(signal_row['submitted_tp_price'])
-        if signal_row.get('submitted_tp_price') is not None
-        else float(signal_row['tp_price'])
-        if signal_row.get('tp_price') is not None
-        else None
-    )
-    sl_price = (
-        float(signal_row['submitted_sl_price'])
-        if signal_row.get('submitted_sl_price') is not None
-        else float(signal_row['sl_price'])
-        if signal_row.get('sl_price') is not None
-        else None
-    )
+    # Resolve TP/SL prices: signal row first, then trade fallback
+    tp_price = None
+    sl_price = None
+    if signal_row is not None:
+        tp_price = (
+            float(signal_row['submitted_tp_price'])
+            if signal_row.get('submitted_tp_price') is not None
+            else float(signal_row['tp_price'])
+            if signal_row.get('tp_price') is not None
+            else None
+        )
+        sl_price = (
+            float(signal_row['submitted_sl_price'])
+            if signal_row.get('submitted_sl_price') is not None
+            else float(signal_row['sl_price'])
+            if signal_row.get('sl_price') is not None
+            else None
+        )
+    if tp_price is None and trade is not None and trade.tp_price:
+        tp_price = float(trade.tp_price)
+    if sl_price is None and trade is not None and trade.sl_price:
+        sl_price = float(trade.sl_price)
+
     if tp_price is None or sl_price is None:
         return
 
@@ -707,11 +773,12 @@ def _resubmit_missing_brackets(
         print(f"    Warning: bracket resubmission failed for {pair}")
         return
 
-    _update_signal_bracket_ids(
-        signal_row['signal_id'],
-        result['take_profit_order_id'],
-        result['stop_loss_order_id'],
-    )
+    if signal_row is not None and signal_row.get('signal_id'):
+        _update_signal_bracket_ids(
+            signal_row['signal_id'],
+            result['take_profit_order_id'],
+            result['stop_loss_order_id'],
+        )
     print(f"    Brackets restored for {pair}: "
           f"TP order={result['take_profit_order_id']}, "
           f"SL order={result['stop_loss_order_id']}")
@@ -735,14 +802,23 @@ def sync_positions(
     if params is None:
         params = StrategyParams()
 
-    reconcile_detected_signal_orders()
-    db_trades = _load_trades()
     ibkr_positions = ibkr.fetch_positions()
 
     # None means broker connection failed — don't touch tracked trades
+    # and don't reconcile without live position data (could falsely close signals).
     if ibkr_positions is None:
-        print("    Warning: broker unavailable, skipping position sync")
-        return db_trades
+        print("    Warning: broker unavailable, skipping position sync and reconciliation")
+        return _load_trades()
+
+    # Build live position keys BEFORE reconciliation so it never closes
+    # a signal whose position still exists at IBKR.
+    live_position_keys = set()
+    for pos in ibkr_positions:
+        direction = 'LONG' if pos['size'] > 0 else 'SHORT'
+        live_position_keys.add(f"{pos['pair']}:{direction}")
+
+    reconcile_detected_signal_orders(live_position_keys=live_position_keys)
+    db_trades = _load_trades()
 
     if not ibkr_positions and not db_trades:
         return {}
@@ -758,6 +834,7 @@ def sync_positions(
         if key not in ibkr_by_key:
             info = db_trades[key]
             print(f"    Position closed externally: {info['pair']} {info['trade'].direction}")
+            cancel_bracket_children(info.get('signal_id'))
             closed_row = None
             if info.get('signal_id'):
                 close_reason, close_price, close_source = _resolve_closed_position_details(info)
@@ -774,6 +851,10 @@ def sync_positions(
             if closed_row is not None and on_signal_closed is not None:
                 on_signal_closed(closed_row)
             del db_trades[key]
+
+    # Fetch open orders once for the entire sync cycle — used by bracket
+    # resubmission and orphaned order sweep.
+    open_order_pairs = ibkr.fetch_open_order_pairs()
 
     for key, pos in ibkr_by_key.items():
         direction = 'LONG' if pos['size'] > 0 else 'SHORT'
@@ -829,8 +910,16 @@ def sync_positions(
             signal_row = load_detected_signal(signal_id)
 
         # --- Bracket resubmission for orphaned positions ---
-        if signal_row is not None and not is_new_position and not size_changed:
-            _resubmit_missing_brackets(signal_row, ibkr_size=pos['size'])
+        # Run for ALL positions (including newly detected ones after a crash/restart)
+        # to ensure every live position has bracket protection.
+        _resubmit_missing_brackets(
+            signal_row,
+            ibkr_size=pos['size'],
+            trade=trade,
+            pair=pos['pair'],
+            direction=direction,
+            open_order_pairs=open_order_pairs,
+        )
 
         signal_status = signal_row.get('status') if signal_row is not None else (
             existing_info.get('signal_status') if existing_info is not None else None
@@ -872,6 +961,29 @@ def sync_positions(
             'last_processed_bar_time': last_processed_bar_time,
         }
 
+    # --- Sweep for orphaned bracket orders ---
+    # Cancel any working orders on pairs that no longer have a position.
+    # This catches brackets left behind by gateway restarts, partial OCA
+    # failures, or correlation replacements that didn't cancel old orders.
+    live_pairs = {pos['pair'] for pos in ibkr_positions}
+    orphaned_order_pairs = open_order_pairs - live_pairs
+    if orphaned_order_pairs:
+        print(f"    Cancelling orphaned orders on pairs with no position: "
+              f"{', '.join(sorted(orphaned_order_pairs))}")
+        # Cancel all working orders for these pairs
+        _cancel_orders_for_pairs(orphaned_order_pairs)
+        log_order_event(
+            function_name='sync_positions',
+            action='sweep',
+            request_data={
+                'orphaned_pairs': sorted(orphaned_order_pairs),
+                'live_pairs': sorted(live_pairs),
+                'open_order_pairs': sorted(open_order_pairs),
+            },
+        )
+
+    set_setting('last_sync_positions', value_ts=datetime.now(timezone.utc))
+
     return db_trades
 
 
@@ -899,7 +1011,7 @@ def _tracking_history_days(last_processed_bar_time: Optional[pd.Timestamp]) -> i
         return 2
 
     ts = pd.Timestamp(last_processed_bar_time)
-    now = pd.Timestamp.now(tz=ts.tzinfo) if ts.tzinfo is not None else pd.Timestamp.now()
+    now = pd.Timestamp.now(tz=ts.tzinfo) if ts.tzinfo is not None else pd.Timestamp.now(tz='UTC')
     age_days = max((now - ts).total_seconds(), 0.0) / 86400.0
     return max(2, min(14, int(age_days) + 2))
 

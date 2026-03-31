@@ -108,6 +108,52 @@ class RunArgumentTests(unittest.TestCase):
         parsed = cmd_download.call_args.args[0]
         self.assertTrue(parsed.refresh_all)
 
+    def test_main_parses_live_without_forced_client_id(self):
+        argv = ['run.py', 'live', '--once']
+
+        with patch.object(sys, 'argv', argv), \
+                patch('run.cmd_live') as cmd_live:
+            run.main()
+
+        parsed = cmd_live.call_args.args[0]
+        self.assertIsNone(parsed.ibkr_client_id)
+
+    def test_cmd_live_defaults_client_id_to_99(self):
+        args = SimpleNamespace(
+            pair=None,
+            profile='aggressive',
+            preset=None,
+            zone_history=180,
+            execution_mode=None,
+            interval=60,
+            balance=1000.0,
+            account_currency='USD',
+            no_positions=True,
+            once=True,
+            zones=False,
+            risk_pct=None,
+            paper_trade=False,
+            port=8765,
+            no_browser=False,
+            ibkr_client_id=None,
+        )
+
+        with patch('run._configure_ibkr') as configure_ibkr, \
+                patch('run._build_strategy_params', return_value=StrategyParams()), \
+                patch('run.get_profile', return_value={'execution_mode': 'intrabar', 'risk_pct': 5.0}), \
+                patch('run._resolve_pairs', return_value={'EURUSD': {'ticker': 'EURUSD=X'}}), \
+                patch('run.load_portfolio_state', return_value={}), \
+                patch('run.ibkr.fetch_open_order_pairs', return_value=set()), \
+                patch('run.scan_opportunities', return_value=[]), \
+                patch('run.build_live_size_plans', return_value={}), \
+                patch('run.record_detected_signals'), \
+                patch('run.format_signals_with_sizes', return_value=''):
+            configure_ibkr.return_value = 99
+            run.cmd_live(args)
+
+        configure_ibkr.assert_called_once()
+        self.assertEqual(configure_ibkr.call_args.args[0].ibkr_client_id, 99)
+
     def test_cmd_backtest_does_not_override_explicit_profile_matching_values(self):
         args = SimpleNamespace(
             pair='EURUSD',

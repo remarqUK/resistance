@@ -14,6 +14,7 @@ from fx_sr.live_web import (
     EXECUTION_LIMIT,
     LiveDashboardHub,
     _configure_windows_event_loop_policy,
+    _account_history_api,
     _set_execution_mode,
     _validate_websocket_request,
 )
@@ -354,6 +355,43 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].note, 'execution paused')
 
 
+class AccountHistoryApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_account_history_api_refreshes_today_snapshot_and_exposes_equity(self):
+        snapshots = [
+            {
+                'date': '2026-03-29',
+                'balance': 10000.0,
+                'daily_pnl_gbp': 12.0,
+                'currency': 'GBP',
+            },
+        ]
+        today_snapshot = {
+            'date': '2026-03-30',
+            'balance': 10123.45,
+            'daily_pnl_gbp': 5.0,
+            'currency': 'GBP',
+            'equity': 10123.45,
+        }
+
+        with patch(
+            'fx_sr.live_history.load_daily_snapshots',
+            return_value=snapshots,
+        ) as load_snapshots_mock, patch(
+            'fx_sr.live_history.get_or_fetch_today_snapshot',
+            return_value=today_snapshot,
+        ) as today_snapshot_mock:
+            response = await _account_history_api(SimpleNamespace())
+
+        load_snapshots_mock.assert_called_once_with()
+        today_snapshot_mock.assert_called_once_with(force_refresh=True)
+
+        payload = json.loads(response.text)
+        self.assertEqual(len(payload['snapshots']), 2)
+        self.assertEqual(payload['snapshots'][1]['date'], '2026-03-30')
+        self.assertNotIn('equity', payload['snapshots'][0])
+        self.assertEqual(payload['snapshots'][1]['equity'], 10123.45)
+
+
 class WebsocketRequestValidationTests(unittest.TestCase):
     def _request(self, *, origin='http://127.0.0.1:8765'):
         return SimpleNamespace(
@@ -370,9 +408,13 @@ class WebsocketRequestValidationTests(unittest.TestCase):
     def test_no_origin_is_accepted(self):
         _validate_websocket_request(self._request(origin=None))
 
+    def test_localhost_aliases_are_accepted(self):
+        _validate_websocket_request(self._request(origin='http://localhost:8765'))
+        _validate_websocket_request(self._request(origin='http://127.0.0.1:8765'))
+
     def test_mismatched_origin_is_rejected(self):
         with self.assertRaises(web.HTTPForbidden):
-            _validate_websocket_request(self._request(origin='http://localhost:8765'))
+            _validate_websocket_request(self._request(origin='http://10.0.0.1:8765'))
 
 
 class ExecutionModeEndpointTests(unittest.IsolatedAsyncioTestCase):

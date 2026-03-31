@@ -292,7 +292,7 @@ function parseUnixTime(value) {
 function formatTimestamp(value, options) {
   const parsed = parseTimestamp(value);
   if (!parsed) return String(value || '');
-  return parsed.toLocaleString([], options);
+  return parsed.toLocaleString([], Object.assign({ timeZone: 'UTC' }, options));
 }
 
 function escapeAttr(value) {

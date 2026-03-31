@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import threading
+import time
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
@@ -17,6 +19,7 @@ import pandas as pd
 _LOGGER = logging.getLogger(__name__)
 
 _MINUTE_TAIL = 3000  # rolling cap: ~50 hours of minute bars kept in memory
+_PERSIST_INTERVAL = 60  # seconds between bulk saves
 
 
 def _hour_start(ts: datetime | pd.Timestamp) -> pd.Timestamp:
@@ -366,3 +369,99 @@ class HourlyBarAccumulator:
         if completed is not None and not completed.empty:
             return float(completed['Close'].iloc[-1])
         return None
+
+    # ------------------------------------------------------------------
+    # Periodic persistence — bulk-save accumulated bars to PostgreSQL
+    # ------------------------------------------------------------------
+
+    def start_persistence(
+        self,
+        pair_ticker_map: Dict[str, str],
+        interval: float = _PERSIST_INTERVAL,
+    ) -> None:
+        """Start a daemon thread that bulk-saves bars to PostgreSQL every *interval* seconds.
+
+        *pair_ticker_map* maps pair IDs (e.g. ``'EURUSD'``) to cache ticker
+        symbols (e.g. ``'EURUSD=X'``) used by ``save_ohlc``.
+        """
+        self._persist_stop = threading.Event()
+        self._persist_ticker_map = dict(pair_ticker_map)
+        self._persist_last_saved: Dict[str, Dict[str, pd.Timestamp]] = {}
+        self._persist_thread = threading.Thread(
+            target=self._persist_loop,
+            args=(interval,),
+            name='bar-persist',
+            daemon=True,
+        )
+        self._persist_thread.start()
+        _LOGGER.info("Bar persistence thread started (interval=%ss)", interval)
+
+    def stop_persistence(self) -> None:
+        """Stop the persistence thread and do a final flush."""
+        stop = getattr(self, '_persist_stop', None)
+        if stop is None:
+            return
+        stop.set()
+        thread = getattr(self, '_persist_thread', None)
+        if thread is not None:
+            thread.join(timeout=10)
+        self._flush_to_db()
+        _LOGGER.info("Bar persistence thread stopped, final flush complete")
+
+    def _persist_loop(self, interval: float) -> None:
+        """Background loop: sleep then flush."""
+        while not self._persist_stop.is_set():
+            self._persist_stop.wait(timeout=interval)
+            if not self._persist_stop.is_set():
+                self._flush_to_db()
+        # Final flush on stop is handled by stop_persistence
+
+    def _flush_to_db(self) -> None:
+        """Bulk-save new completed hourly and minute bars to PostgreSQL."""
+        from .db import save_ohlc
+
+        ticker_map = getattr(self, '_persist_ticker_map', {})
+        last_saved = getattr(self, '_persist_last_saved', {})
+
+        for pair in list(self._completed.keys()):
+            ticker = ticker_map.get(pair)
+            if not ticker:
+                continue
+            self._save_interval(pair, ticker, '1h', self._completed, last_saved, save_ohlc)
+
+        for pair in list(self._completed_minutes.keys()):
+            ticker = ticker_map.get(pair)
+            if not ticker:
+                continue
+            self._save_interval(pair, ticker, '1m', self._completed_minutes, last_saved, save_ohlc)
+
+    @staticmethod
+    def _save_interval(
+        pair: str,
+        ticker: str,
+        interval: str,
+        store: Dict[str, pd.DataFrame],
+        last_saved: Dict[str, Dict[str, pd.Timestamp]],
+        save_fn,
+    ) -> None:
+        """Save only new bars (after last saved timestamp) for one pair+interval."""
+        df = store.get(pair)
+        if df is None or df.empty:
+            return
+
+        key = f"{pair}:{interval}"
+        cutoff = last_saved.get(key)
+        if cutoff is not None:
+            new_bars = df[df.index > cutoff]
+        else:
+            new_bars = df
+
+        if new_bars.empty:
+            return
+
+        try:
+            save_fn(ticker, interval, new_bars)
+            last_saved[key] = new_bars.index[-1]
+            _LOGGER.debug("Saved %d %s bars for %s", len(new_bars), interval, pair)
+        except Exception:
+            _LOGGER.exception("Failed to save %s bars for %s", interval, pair)

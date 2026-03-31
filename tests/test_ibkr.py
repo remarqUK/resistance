@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 import fx_sr.ibkr as ibkr
+import fx_sr.db as db_module
+from tests._test_db_helpers import temporary_test_database
 
 
 def _fake_ib_async_module():
@@ -16,6 +18,64 @@ def _fake_ib_async_module():
 
 
 class IbkrHistoricalFetchTests(unittest.TestCase):
+    def test_get_connection_without_fallback_uses_exact_client_id(self):
+        connect_calls = []
+
+        class FailingIb:
+            def connect(self, _host, _port, clientId, timeout=5):
+                connect_calls.append(clientId)
+                raise RuntimeError('Unable to connect as the client id is already in use')
+
+            def isConnected(self):
+                return False
+
+            def disconnect(self):
+                pass
+
+        fake_ib_async = _fake_ib_async_module()
+        fake_ib_async.IB = FailingIb
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}):
+            ibkr.disconnect()
+            previous = ibkr.set_client_id_fallback(False)
+            try:
+                ib, connected = ibkr._get_connection(client_id=99, retries=3)
+            finally:
+                ibkr.set_client_id_fallback(previous)
+
+        self.assertIsNone(ib)
+        self.assertFalse(connected)
+        self.assertEqual(connect_calls, [99, 99, 99])
+
+    def test_get_connection_with_fallback_advances_client_id(self):
+        connect_calls = []
+
+        class FailingIb:
+            def connect(self, _host, _port, clientId, timeout=5):
+                connect_calls.append(clientId)
+                raise RuntimeError('Unable to connect as the client id is already in use')
+
+            def isConnected(self):
+                return False
+
+            def disconnect(self):
+                pass
+
+        fake_ib_async = _fake_ib_async_module()
+        fake_ib_async.IB = FailingIb
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}):
+            ibkr.disconnect()
+            previous = ibkr.set_client_id_fallback(True)
+            try:
+                ib, connected = ibkr._get_connection(client_id=99, retries=3)
+            finally:
+                ibkr.set_client_id_fallback(previous)
+
+        self.assertIsNone(ib)
+        self.assertFalse(connected)
+        self.assertEqual(connect_calls, [99, 100, 101])
+
     def test_fetch_historical_uses_connection_with_client_id(self):
         fake_ib_async = _fake_ib_async_module()
         ib = MagicMock()
@@ -159,6 +219,86 @@ class IbkrHistoricalFetchTests(unittest.TestCase):
         self.assertEqual(rows_by_id[201]['remaining_units'], 0.0)
 
 
+class LogOrderEventTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.ibkr.get_db_path')
+    def test_log_order_event_inserts_row(self, mock_db_path):
+        mock_db_path.return_value = self.db_path
+        from fx_sr.ibkr import log_order_event
+
+        log_order_event(
+            function_name='submit_fx_market_bracket_order',
+            pair='EURUSD',
+            direction='LONG',
+            action='submit',
+            request_data={'quantity': 10000, 'tp': 1.15, 'sl': 1.13},
+            response_data={'order_id': 123, 'status': 'Filled'},
+            order_ids=[123, 124, 125],
+            duration_ms=342.5,
+        )
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT function_name, pair, direction, action, request_json, "
+                "response_json, order_ids, duration_ms, error "
+                "FROM order_audit_log ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row[0], 'submit_fx_market_bracket_order')
+            self.assertEqual(row[1], 'EURUSD')
+            self.assertEqual(row[2], 'LONG')
+            self.assertEqual(row[3], 'submit')
+            self.assertIn('10000', row[4])
+            self.assertIn('123', row[5])
+            self.assertEqual(row[6], '123,124,125')
+            self.assertAlmostEqual(row[7], 342.5)
+            self.assertIsNone(row[8])
+        finally:
+            conn.close()
+
+    @patch('fx_sr.ibkr.get_db_path')
+    def test_log_order_event_stores_error(self, mock_db_path):
+        mock_db_path.return_value = self.db_path
+        from fx_sr.ibkr import log_order_event
+
+        log_order_event(
+            function_name='cancel_orders',
+            action='cancel',
+            error='Connection lost',
+            order_ids=[999],
+        )
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT function_name, error, order_ids FROM order_audit_log LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row[0], 'cancel_orders')
+            self.assertEqual(row[1], 'Connection lost')
+            self.assertEqual(row[2], '999')
+        finally:
+            conn.close()
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._connect', side_effect=RuntimeError('DB down'))
+    def test_log_order_event_survives_db_failure(self, _mock_connect, mock_db_path):
+        mock_db_path.return_value = self.db_path
+        from fx_sr.ibkr import log_order_event
+
+        # Must not raise — audit failures are silent
+        log_order_event(
+            function_name='test',
+            action='test',
+        )
+
 class IbkrOrderRoundingTests(unittest.TestCase):
     def test_submit_fx_market_bracket_order_rounds_jpy_exit_prices_to_min_tick(self):
         fake_ib_async = _fake_ib_async_module()
@@ -196,10 +336,10 @@ class IbkrOrderRoundingTests(unittest.TestCase):
             return types.SimpleNamespace(
                 order=order,
                 orderStatus=types.SimpleNamespace(
-                    status='Submitted',
+                    status='Filled',
                     avgFillPrice=0.0,
-                    filled=0.0,
-                    remaining=float(order.totalQuantity),
+                    filled=float(order.totalQuantity),
+                    remaining=0.0,
                 ),
             )
 
@@ -276,6 +416,267 @@ class SubmitBracketForExistingPositionTests(unittest.TestCase):
                 stop_loss_price=1.0950,
             )
         self.assertIsNone(result)
+
+
+class SubmitBracketAuditTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    @patch('fx_sr.ibkr.whatif_margin_check', return_value=None)
+    def test_submit_bracket_logs_success(self, _margin, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        ib = MagicMock()
+        ib.client.getReqId.side_effect = [100, 101, 102]
+        mock_conn.return_value = (ib, True)
+
+        parent_trade = MagicMock()
+        parent_trade.orderStatus.status = 'Filled'
+        parent_trade.orderStatus.filled = 10000.0
+        parent_trade.orderStatus.remaining = 0.0
+        parent_trade.orderStatus.avgFillPrice = 1.145
+        parent_trade.order.orderId = 100
+        parent_trade.order.totalQuantity = 10000.0
+
+        tp_trade = MagicMock()
+        tp_trade.order.orderId = 101
+        sl_trade = MagicMock()
+        sl_trade.order.orderId = 102
+
+        ib.placeOrder.side_effect = [parent_trade, tp_trade, sl_trade]
+
+        from fx_sr.ibkr import submit_fx_market_bracket_order
+        result = submit_fx_market_bracket_order(
+            pair='EURUSD', direction='LONG', quantity=10000,
+            take_profit_price=1.15, stop_loss_price=1.13,
+            order_ref='test',
+        )
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT action, pair, direction, request_json, response_json, error "
+                "FROM order_audit_log LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row, "Expected an audit log row")
+            self.assertEqual(row[0], 'submit')
+            self.assertEqual(row[1], 'EURUSD')
+            self.assertEqual(row[2], 'LONG')
+            self.assertIsNone(row[5])  # no error
+        finally:
+            conn.close()
+
+
+class ResubmitBracketAuditTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    @patch('fx_sr.ibkr.whatif_margin_check', return_value=None)
+    def test_resubmit_bracket_logs_success(self, _margin, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        ib = MagicMock()
+        ib.client.getReqId.side_effect = [200, 201, 202]
+        mock_conn.return_value = (ib, True)
+
+        tp_trade = MagicMock()
+        tp_trade.order.orderId = 201
+        sl_trade = MagicMock()
+        sl_trade.order.orderId = 202
+        ib.placeOrder.side_effect = [tp_trade, sl_trade]
+
+        from fx_sr.ibkr import submit_bracket_for_existing_position
+        result = submit_bracket_for_existing_position(
+            pair='GBPUSD', direction='SHORT', quantity=5000,
+            take_profit_price=1.30, stop_loss_price=1.33,
+        )
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT action, pair, direction, request_json, response_json, error "
+                "FROM order_audit_log LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row, "Expected an audit log row")
+            self.assertEqual(row[0], 'resubmit')
+            self.assertEqual(row[1], 'GBPUSD')
+            self.assertEqual(row[2], 'SHORT')
+            self.assertIsNone(row[5])  # no error
+        finally:
+            conn.close()
+
+
+class CancelOrdersAuditTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    def test_cancel_orders_logs_audit(self, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        ib = MagicMock()
+        mock_conn.return_value = (ib, True)
+
+        # Mock openTrades to return matching trade objects
+        trade1 = MagicMock()
+        trade1.order.orderId = 500
+        trade2 = MagicMock()
+        trade2.order.orderId = 501
+        ib.openTrades.return_value = [trade1, trade2]
+
+        from fx_sr.ibkr import cancel_orders
+        cancel_orders({500, 501})
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT action, order_ids, error FROM order_audit_log LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row, "Expected an audit log row")
+            self.assertEqual(row[0], 'cancel')
+            self.assertIn('500', row[1])
+            self.assertIn('501', row[1])
+        finally:
+            conn.close()
+
+
+class SubmitMarketOrderAuditTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    def test_submit_market_order_logs_audit(self, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        ib = MagicMock()
+        ib.client.getReqId.return_value = 300
+        mock_conn.return_value = (ib, True)
+
+        trade = MagicMock()
+        trade.order.orderId = 300
+        trade.orderStatus.status = 'Filled'
+        trade.orderStatus.avgFillPrice = 1.145
+        ib.placeOrder.return_value = trade
+
+        from fx_sr.ibkr import submit_fx_market_order
+        result = submit_fx_market_order(
+            pair='EURUSD', direction='LONG', quantity=10000,
+        )
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT action, pair, direction, error FROM order_audit_log LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row, "Expected an audit log row")
+            self.assertEqual(row[0], 'submit')
+            self.assertEqual(row[1], 'EURUSD')
+            self.assertEqual(row[2], 'LONG')
+        finally:
+            conn.close()
+
+
+class OrphanSweepAuditTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.positions.set_setting')
+    @patch('fx_sr.positions.get_db_path')
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.positions._cancel_orders_for_pairs')
+    @patch('fx_sr.positions._resubmit_missing_brackets')
+    @patch('fx_sr.positions.ibkr')
+    @patch('fx_sr.positions._load_trades')
+    @patch('fx_sr.positions.reconcile_detected_signal_orders')
+    def test_orphan_sweep_logs_audit(
+        self,
+        _recon,
+        mock_load_trades,
+        mock_ibkr,
+        mock_resubmit,
+        mock_cancel_pairs,
+        mock_pos_db,
+        mock_ibkr_db,
+        _set_setting,
+    ):
+        mock_pos_db.return_value = self.db_path
+        mock_ibkr_db.return_value = self.db_path
+
+        # One live position on USDJPY — so early-return guard is bypassed
+        ibkr_positions = [{'pair': 'USDJPY', 'size': 10000, 'avg_cost': 150.0}]
+        mock_ibkr.fetch_positions.return_value = ibkr_positions
+        # One open order pair on CHFJPY — orphaned (no position)
+        mock_ibkr.fetch_open_order_pairs.return_value = {'CHFJPY'}
+
+        # Existing DB trade matching the USDJPY:LONG position (no size change)
+        mock_trade = MagicMock()
+        mock_trade.tp_price = None
+        mock_trade.sl_price = None
+        mock_load_trades.return_value = {
+            'USDJPY:LONG': {
+                'pair': 'USDJPY',
+                'trade': mock_trade,
+                'signal_id': None,
+                'ibkr_size': 10000.0,
+                'ibkr_avg_cost': 150.0,
+                'bars_monitored': 0,
+                'signal_status': None,
+                'pending_exit_reason': None,
+                'pending_exit_price': None,
+                'pending_exit_detected_at': None,
+                'last_processed_bar_time': None,
+            }
+        }
+
+        from fx_sr.positions import sync_positions
+        sync_positions()
+
+        conn = db_module._connect(self.db_path)
+        try:
+            row = conn.execute(
+                "SELECT action, request_json FROM order_audit_log "
+                "WHERE action = 'sweep' LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(row, "Expected a sweep audit log row")
+            self.assertIn('CHFJPY', row[1])
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':

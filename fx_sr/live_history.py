@@ -551,14 +551,21 @@ def _compute_pnl_r(row: dict) -> float | None:
     return round(pnl_r, 2)
 
 
-def _compute_pnl_gbp(row: dict, conn) -> float | None:
+def _compute_pnl_gbp(
+    row: dict,
+    conn,
+    *,
+    current_price: float | None = None,
+    as_of: dt_datetime | date | None = None,
+    to_currency: str = 'GBP',
+) -> float | None:
     """Compute realised P&L in GBP from units, prices, and historical FX rate."""
 
     from .db import INTERVAL_TO_CODE, TICKER_TO_CODE
     from .sizing import split_pair, convert_currency
 
     opened = row.get('opened_price')
-    closed = row.get('closed_price')
+    closed = current_price if current_price is not None else row.get('closed_price')
     units = row.get('open_units')
     direction = row.get('direction')
     pair = row.get('pair')
@@ -577,18 +584,18 @@ def _compute_pnl_gbp(row: dict, conn) -> float | None:
         return None
 
     _, quote = split_pair(pair)
+    currency = to_currency.upper() if to_currency else 'GBP'
 
     if direction.upper() == 'LONG':
         pnl_quote = units * (closed - opened)
     else:
         pnl_quote = units * (opened - closed)
 
-    if quote.upper() == 'GBP':
+    if quote.upper() == currency:
         return round(pnl_quote, 2)
 
-    # Build a price_lookup that uses the 1h OHLC close nearest to the trade's
-    # close time (or latest available bar for open trades).
-    ref_ts = closed_at or row.get('opened_at') or row.get('signal_time')
+    # Build a price_lookup that uses the latest 1h close no later than reference time.
+    ref_ts = as_of or closed_at or row.get('opened_at') or row.get('signal_time')
     interval_code = INTERVAL_TO_CODE.get('1h')
 
     def _historical_price_lookup(lookup_pair: str) -> float | None:
@@ -608,8 +615,71 @@ def _compute_pnl_gbp(row: dict, conn) -> float | None:
             ).fetchone()
         return float(r[0]) if r else None
 
-    gbp_amount = convert_currency(pnl_quote, quote, 'GBP', _historical_price_lookup)
-    return round(gbp_amount, 2) if gbp_amount is not None else None
+    converted_amount = convert_currency(pnl_quote, quote, currency, _historical_price_lookup)
+    return round(converted_amount, 2) if converted_amount is not None else None
+
+
+def _latest_close_for_pair(
+    conn,
+    pair: str,
+    as_of: dt_datetime | date | None = None,
+) -> float | None:
+    """Return the latest cached hourly close for *pair* at or before *as_of*."""
+
+    from .db import INTERVAL_TO_CODE, TICKER_TO_CODE
+
+    ticker_code = TICKER_TO_CODE.get(f"{pair[:3]}{pair[3:]}=X")
+    if ticker_code is None:
+        return None
+
+    interval_code = INTERVAL_TO_CODE.get('1h')
+    if interval_code is None:
+        return None
+
+    if as_of is None:
+        row = conn.execute(
+            "SELECT close FROM ohlc WHERE ticker = %s AND interval = %s ORDER BY ts DESC LIMIT 1",
+            (ticker_code, interval_code),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT close FROM ohlc WHERE ticker = %s AND interval = %s AND ts <= %s ORDER BY ts DESC LIMIT 1",
+            (ticker_code, interval_code, as_of),
+        ).fetchone()
+    return float(row[0]) if row else None
+
+
+def _compute_unrealized_open_pnl(
+    conn,
+    *,
+    as_of: dt_datetime | date | None = None,
+    to_currency: str = 'GBP',
+) -> float:
+    """Sum unrealized P&L for currently open trades."""
+
+    cursor = conn.execute(
+        "SELECT * FROM detected_signal WHERE open_units IS NOT NULL AND open_units > 0 AND closed_at IS NULL",
+    )
+    total = 0.0
+    for row in cursor.fetchall():
+        d = _row_to_dict(cursor, row)
+        pair = d.get('pair')
+        if not isinstance(pair, str) or len(pair) != 6:
+            continue
+        market_price = _latest_close_for_pair(conn, pair, as_of=as_of)
+        if market_price is None:
+            continue
+        pnl_amount = _compute_pnl_gbp(
+            d,
+            conn,
+            current_price=market_price,
+            as_of=as_of,
+            to_currency=to_currency,
+        )
+        if pnl_amount is None:
+            continue
+        total += pnl_amount
+    return round(total, 2)
 
 
 def _enrich_pnl(d: dict, conn) -> None:
@@ -618,6 +688,23 @@ def _enrich_pnl(d: dict, conn) -> None:
     pnl_r = _compute_pnl_r(d)
     d['pnl_r'] = pnl_r
     d['pnl_gbp'] = _compute_pnl_gbp(d, conn)
+
+
+def _attach_equity(
+    snapshot: dict,
+    conn,
+    *,
+    as_of: dt_datetime | date,
+    to_currency: str,
+) -> None:
+    """Add equity derived from open trades to *snapshot*."""
+
+    open_unrealized = _compute_unrealized_open_pnl(
+        conn,
+        as_of=as_of,
+        to_currency=to_currency,
+    )
+    snapshot['equity'] = snapshot['balance'] + open_unrealized
 
 
 def load_live_diary_trades(
@@ -723,16 +810,21 @@ def load_daily_snapshots(*, db_path: str | None = None) -> list[dict]:
         conn.close()
 
 
-def get_or_fetch_today_snapshot(*, db_path: str | None = None) -> dict | None:
-    """Return today's snapshot, fetching from IBKR if missing and market is open."""
+def get_or_fetch_today_snapshot(
+    *,
+    db_path: str | None = None,
+    force_refresh: bool = False,
+) -> dict | None:
+    """Return today's snapshot, optionally refreshing from IBKR before returning."""
 
     import datetime as _dt
     from . import ibkr
 
     today = date.today()
     db_path = _ensure_table(db_path)
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
 
-    # Check if we already have today's row
+    # Existing snapshots are useful as a fallback and as a base currency anchor.
     conn = _connect(db_path)
     try:
         row = conn.execute(
@@ -743,31 +835,66 @@ def get_or_fetch_today_snapshot(*, db_path: str | None = None) -> dict | None:
     finally:
         conn.close()
 
-    if row is not None:
-        return {
+    if row is not None and not force_refresh:
+        snapshot = {
             'date': str(today),
             'balance': float(row[0]),
             'daily_pnl_gbp': float(row[1]) if row[1] is not None else None,
             'currency': row[2],
         }
+        conn = _connect(db_path)
+        try:
+            _attach_equity(
+                snapshot,
+                conn,
+                as_of=now_utc,
+                to_currency=snapshot.get('currency') or 'GBP',
+            )
+        finally:
+            conn.close()
+        return snapshot
+
+    cached_row = None if row is None else {
+        'date': str(today),
+        'balance': float(row[0]),
+        'daily_pnl_gbp': float(row[1]) if row[1] is not None else None,
+        'currency': row[2],
+    }
+
+    def _attach_today_equity(snapshot: dict | None) -> dict | None:
+        if snapshot is None:
+            return None
+        conn = _connect(db_path)
+        try:
+            _attach_equity(
+                snapshot,
+                conn,
+                as_of=now_utc,
+                to_currency=snapshot.get('currency') or 'GBP',
+            )
+        finally:
+            conn.close()
+        return snapshot
+
+    cached_row = _attach_today_equity(cached_row)
 
     # Only fetch on weekdays during plausible market hours (Sun 22:00 – Fri 22:00 UTC)
     now_utc = _dt.datetime.now(_dt.timezone.utc)
     weekday = now_utc.weekday()  # Mon=0 … Sun=6
     if weekday == 5:  # Saturday — market closed
-        return None
+        return cached_row
     if weekday == 6 and now_utc.hour < 22:  # Sunday before open
-        return None
+        return cached_row
     if weekday == 4 and now_utc.hour >= 22:  # Friday after close
-        return None
+        return cached_row
 
     try:
         balance, currency = ibkr.fetch_account_net_liquidation()
     except Exception:
-        return None
+        return cached_row
 
     if balance is None:
-        return None
+        return cached_row
 
     currency = currency or 'GBP'
 
@@ -780,12 +907,23 @@ def get_or_fetch_today_snapshot(*, db_path: str | None = None) -> dict | None:
 
     record_daily_snapshot(balance, currency, daily_pnl, today, db_path=db_path)
 
-    return {
+    snapshot = {
         'date': str(today),
         'balance': float(balance),
         'daily_pnl_gbp': daily_pnl,
         'currency': currency,
     }
+    conn = _connect(db_path)
+    try:
+        _attach_equity(
+            snapshot,
+            conn,
+            as_of=now_utc,
+            to_currency=currency,
+        )
+    finally:
+        conn.close()
+    return snapshot
 
 
 def _merge_row(existing: dict | None, **updates) -> dict:
@@ -1059,8 +1197,14 @@ def reconcile_detected_signal_orders(
     *,
     signal_ids: Iterable[str] | None = None,
     db_path: str | None = None,
+    live_position_keys: set[str] | None = None,
 ) -> list[dict]:
-    """Reconcile live detected signals with broker fills and parent order status."""
+    """Reconcile live detected signals with broker fills and parent order status.
+
+    *live_position_keys* is a set of ``"PAIR:DIRECTION"`` strings for
+    positions that currently exist at IBKR.  Signals matching a live
+    position are never marked closed — IBKR is the source of truth.
+    """
 
     from . import ibkr
 
@@ -1201,11 +1345,20 @@ def reconcile_detected_signal_orders(
             close_source = existing.get('close_source')
             pnl_pips = existing.get('pnl_pips')
 
+            # Skip bracket-close resolution if the position still exists at IBKR.
+            # IBKR is the source of truth — a position that is still live should
+            # never be marked closed based on stale fill records.
+            _sig_pos_key = f"{existing['pair']}:{existing['direction']}"
+            _position_still_live = (
+                live_position_keys is not None and _sig_pos_key in live_position_keys
+            )
+
             if (
                 open_units > 0
                 and not order_found
                 and closed_at is None
                 and status in ('OPEN', 'PARTIAL', 'EXIT_SIGNAL')
+                and not _position_still_live
             ):
                 tp_order_id = (
                     int(existing['take_profit_order_id'])

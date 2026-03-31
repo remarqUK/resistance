@@ -10,7 +10,7 @@
 
 /* ── Constants ───────────────────────────────────────────────────────── */
 
-const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
 const PRICE_DISPLAY_DECIMALS = 5;
 
 /* ── Formatting helpers ──────────────────────────────────────────────── */
@@ -31,6 +31,7 @@ function formatDateLabel(dateKey) {
     year: "numeric",
     month: "short",
     day: "2-digit",
+    timeZone: "UTC",
   });
 }
 
@@ -38,6 +39,7 @@ function formatMonthLabel(date) {
   return date.toLocaleDateString(undefined, {
     month: "long",
     year: "numeric",
+    timeZone: "UTC",
   });
 }
 
@@ -46,17 +48,17 @@ function parseDateKey(value) {
   if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
     return new Date(NaN);
   }
-  return new Date(y, m - 1, d);
+  return new Date(Date.UTC(y, m - 1, d));
 }
 
 function formatDateKey(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
 function isIsoDate(value) {
   if (!value || typeof value !== "string") return false;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00`);
+  const parsed = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(parsed.getTime()) && formatDateKey(parsed) === value;
 }
 
@@ -88,17 +90,18 @@ function formatTime(isoTime) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    timeZone: "UTC",
   });
 }
 
 /* ── Calendar rendering ──────────────────────────────────────────────── */
 
 function monthStartFromDate(date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }
 
 function monthKeyFromDate(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 function getMonthRange(map) {
@@ -113,23 +116,25 @@ function getMonthRange(map) {
 function renderMonth(monthDate) {
   const monthKey = monthKeyFromDate(monthDate);
   const monthStart = monthStartFromDate(monthDate);
-  const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
-  const firstWeekday = (monthStart.getDay() + 6) % 7;
-  const lastWeekday = (monthEnd.getDay() + 6) % 7;
+  const monthEnd = new Date(Date.UTC(monthDate.getUTCFullYear(), monthDate.getUTCMonth() + 1, 0));
+  const firstWeekday = monthStart.getUTCDay();  // Sun=0 start
+  const lastWeekday = monthEnd.getUTCDay();
   const gridStart = new Date(monthStart);
-  gridStart.setDate(1 - firstWeekday);
+  gridStart.setUTCDate(1 - firstWeekday);
   const gridEnd = new Date(monthEnd);
-  gridEnd.setDate(monthEnd.getDate() + (6 - lastWeekday));
+  // Pad to Friday (day 5); if lastWeekday is already Sat(6) pad wraps to next Fri
+  const padDays = lastWeekday <= 5 ? (5 - lastWeekday) : 6;
+  gridEnd.setUTCDate(monthEnd.getUTCDate() + padDays);
 
   const header = `<div class="diary-weekdays">${WEEKDAY_LABELS.map((d) => `<div>${d}</div>`).join("")}</div>`;
   const weeks = [];
-  for (let c = new Date(gridStart); c <= gridEnd; c.setDate(c.getDate() + 7)) {
+  for (let c = new Date(gridStart); c <= gridEnd; c.setUTCDate(c.getUTCDate() + 7)) {
     const week = [];
     for (let i = 0; i < 7; i++) {
       const day = new Date(c);
-      day.setDate(c.getDate() + i);
-      if (day.getDay() === 0) continue;
-      week.push(renderDay(day, monthDate.getMonth()));
+      day.setUTCDate(c.getUTCDate() + i);
+      if (day.getUTCDay() === 6) continue;
+      week.push(renderDay(day, monthDate.getUTCMonth()));
     }
     weeks.push(`<div class="diary-week">${week.join("")}</div>`);
   }
@@ -144,7 +149,7 @@ function renderMonth(monthDate) {
 }
 
 function renderDay(dayDate, activeMonth) {
-  const isCurrentMonth = dayDate.getMonth() === activeMonth;
+  const isCurrentMonth = dayDate.getUTCMonth() === activeMonth;
   const dateKey = formatDateKey(dayDate);
   const dayState = isCurrentMonth ? dateMap.get(dateKey) : null;
   const isSelected = dateKey === selectedDate;
@@ -154,20 +159,20 @@ function renderDay(dayDate, activeMonth) {
   if (hasTrades) cls.push("has-trades");
   if (isSelected) cls.push("selected");
   if (hasTrades) {
-    if (dayState.total_pnl_r > 0) cls.push("up");
-    else if (dayState.total_pnl_r < 0) cls.push("down");
+    if (dayState.total_pnl_gbp > 0) cls.push("up");
+    else if (dayState.total_pnl_gbp < 0) cls.push("down");
   }
 
   if (!isCurrentMonth) {
-    return `<div class="${cls.join(" ")}"><span class="diary-day-number">${dayDate.getDate()}</span></div>`;
+    return `<div class="${cls.join(" ")}"><span class="diary-day-number">${dayDate.getUTCDate()}</span></div>`;
   }
   if (!hasTrades) {
-    return `<div class="${cls.join(" ")} no-trades"><span class="diary-day-number">${dayDate.getDate()}</span><span class="diary-day-count">No trades</span></div>`;
+    return `<div class="${cls.join(" ")} no-trades"><span class="diary-day-number">${dayDate.getUTCDate()}</span><span class="diary-day-count">No trades</span></div>`;
   }
 
   return `
     <button class="${cls.join(" ")}" data-date="${dateKey}" type="button">
-      <span class="diary-day-number">${dayDate.getDate()}</span>
+      <span class="diary-day-number">${dayDate.getUTCDate()}</span>
       <span class="diary-day-count">${dayState.count} trade${dayState.count === 1 ? "" : "s"}</span>
       <span class="diary-day-pl">${formatSigned(dayState.total_pnl_r, 2, "R")}</span>
       <span class="diary-day-pl">\u00a3${formatSigned(dayState.total_pnl_gbp, 2, "")}</span>

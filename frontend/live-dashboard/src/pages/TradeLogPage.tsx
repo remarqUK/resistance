@@ -17,6 +17,7 @@ function formatSignalTime(value?: string) {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    timeZone: 'UTC',
   });
 }
 
@@ -177,7 +178,14 @@ export function TradeLogPage() {
                         }}
                       title="Click to review trade"
                     >
-                      <td>{formatSignalTime(row.signal_time)}</td>
+                      <td>
+                        {formatSignalTime(row.signal_time)}
+                        {isClosed && row.closed_at ? (
+                          <div style={{ fontSize: '0.72rem', color: '#8b949e', marginTop: '2px' }}>
+                            closed {formatSignalTime(row.closed_at)}
+                          </div>
+                        ) : null}
+                      </td>
                       <td>{row.pair}</td>
                       <td className={`dir-${row.direction || ''}`}>{row.direction}</td>
                       <td className={`status-${row.status || ''}`}>{row.status}</td>

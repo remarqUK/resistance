@@ -151,7 +151,7 @@ async function invokeDashboardAction({
         await onSuccess({ response, payload, message: finalMessage });
       } else {
         pushLog({
-          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
           level: successLogLevel,
           message: finalMessage,
         });
@@ -162,7 +162,7 @@ async function invokeDashboardAction({
   } catch (error) {
     const message = error?.message || "Request failed.";
     pushLog({
-      ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
       level: "error",
       message,
     });
@@ -326,7 +326,7 @@ function renderTransactionCountdown() {
   const minutes = Math.floor(remainingSeconds / 60);
   const seconds = remainingSeconds % 60;
   const countdown = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-  const nextLabel = nextHour.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const nextLabel = nextHour.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
 
   els.nextTransactionTimer.textContent = countdown;
   els.nextTransactionAt.textContent = `at ${nextLabel}`;
@@ -348,6 +348,7 @@ function formatTimestamp(isoString) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    timeZone: "UTC",
   });
 }
 
@@ -363,6 +364,7 @@ function formatDateOnly(isoString) {
     year: "numeric",
     month: "short",
     day: "2-digit",
+    timeZone: "UTC",
   });
 }
 
@@ -554,7 +556,7 @@ function updateRerunBacktestButton() {
   if (previousBacktestStatus !== status) {
     if ((previousBacktestStatus === "starting" || previousBacktestStatus === "running") && status === "complete") {
       pushLog({
-        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
         level: "success",
         message: "Backtest rerun completed.",
       });
@@ -563,7 +565,7 @@ function updateRerunBacktestButton() {
       && (status === "error" || status === "canceled")
     ) {
       pushLog({
-        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
         level: "warning",
         message: `Backtest rerun ${status}.`,
       });
@@ -829,7 +831,7 @@ function renderWatchlist() {
     const rNear = row.resistance_dist_pct != null && row.resistance_dist_pct <= NEAR_THRESHOLD;
     return `
       <tr>
-        <td><a href="/chart?pair=${encodeURIComponent(row.pair)}" target="_blank" class="pair-main pair-link" title="Live chart ${escapeHtml(row.pair)}">${escapeHtml(row.pair)}</a></td>
+        <td><a href="/live-trade?pair=${encodeURIComponent(row.pair)}" target="_blank" class="pair-main pair-link" title="Live chart ${escapeHtml(row.pair)}">${escapeHtml(row.pair)}</a></td>
         <td>${renderBadge(row.state)}</td>
         <td class="price">${formatNumber(row.price, PRICE_DISPLAY_DECIMALS)}</td>
         <td class="price${sNear ? " zone-near" : ""}">${escapeHtml(row.support_text || "–")}</td>
@@ -1030,7 +1032,7 @@ async function toggleExecutionPaused() {
     }
   } catch (error) {
     pushLog({
-      ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
       level: "error",
       message: error.message || "Unable to update execution mode",
     });
@@ -1061,7 +1063,7 @@ function connect() {
     } catch (_error) {
       setConnection("error", "Malformed dashboard message");
       pushLog({
-        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
         level: "error",
         message: "Received malformed dashboard message",
       });
@@ -1102,7 +1104,7 @@ function connect() {
       state.summary = message.summary || state.summary;
       renderSummary();
       pushLog({
-        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
         level: "error",
         message: message.message || "Unknown live dashboard error",
       });
@@ -1154,7 +1156,7 @@ if (stopBtn) {
       stopBtn.textContent = "Stop Server";
       const message = error?.message || "Unable to send shutdown request.";
       pushLog({
-        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
         level: "error",
         message,
       });
@@ -1179,7 +1181,7 @@ if (fillCacheBtn) {
       successMessage: "Cache fill started.",
       onSuccess: ({ message }) => {
         pushLog({
-          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
           level: "success",
           message,
         });
@@ -1205,7 +1207,7 @@ if (rerunBacktestBtn) {
       successMessage: "Backtest rerun started.",
       onSuccess: ({ message }) => {
         pushLog({
-          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
           level: "success",
           message,
         });

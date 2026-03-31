@@ -1,4 +1,5 @@
 import unittest
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 import pandas as pd
@@ -304,6 +305,67 @@ class LiveHistoryTests(unittest.TestCase):
         self.assertEqual(row['remaining_units'], 0)
         self.assertEqual(row['fill_count'], 2)
         self.assertAlmostEqual(row['opened_price'], 1.10032)
+
+    def test_today_snapshot_includes_open_unrealized(self):
+        signal = _signal('EURUSD')
+        plan = _plan('EURUSD')
+
+        record_detected_signals(
+            [signal],
+            [plan],
+            execute_orders=True,
+            db_path=self.db_path,
+        )
+        record_execution_results(
+            [signal],
+            [plan],
+            [
+                ExecutionResult(
+                    pair='EURUSD',
+                    direction='LONG',
+                    units=10000,
+                    status='Submitted',
+                    order_id=101,
+                ),
+            ],
+            db_path=self.db_path,
+        )
+        claim_signal_for_position(
+            'EURUSD',
+            'LONG',
+            opened_price=1.1000,
+            open_units=10000,
+            db_path=self.db_path,
+        )
+
+        from fx_sr.db import INTERVAL_TO_CODE, TICKER_TO_CODE
+
+        market_time = datetime.now(timezone.utc)
+
+        with live_history_module.db_transaction(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO account_daily_snapshot (snapshot_date, net_liquidation, daily_pnl_gbp, currency) "
+                "VALUES (%s, %s, %s, %s)",
+                (date.today(), 10000.0, 0.0, 'USD'),
+            )
+            conn.execute(
+                "INSERT INTO ohlc (ticker, interval, ts, open, high, low, close, volume) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    TICKER_TO_CODE['EURUSD=X'],
+                    INTERVAL_TO_CODE['1h'],
+                    market_time,
+                    1.1000,
+                    1.1010,
+                    1.1000,
+                    1.1010,
+                    0,
+                ),
+            )
+
+        snapshot = live_history_module.get_or_fetch_today_snapshot(db_path=self.db_path)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot['equity'], 10010.0)
 
     def test_repeated_detection_does_not_downgrade_open_trade(self):
         signal = _signal('GBPUSD')

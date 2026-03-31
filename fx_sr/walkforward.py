@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 from typing import Callable, Optional
 
 import pandas as pd
@@ -10,7 +11,6 @@ import pandas as pd
 from .execution import build_execution_plan, build_modeled_execution_quote
 from .ibkr import ExecutionQuote
 from .levels import SRZone
-from .portfolio import is_pair_cooldown_active
 from .strategy import (
     Signal,
     StrategyParams,
@@ -107,6 +107,66 @@ class WalkForwardResult:
     open_trade: Optional[Trade]
 
 
+def _next_bar_submit_time(bar_time: pd.Timestamp) -> pd.Timestamp:
+    """Return UTC submission time for a signal generated from a completed bar."""
+
+    ts = pd.Timestamp(bar_time)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+    return ts + pd.Timedelta(hours=1)
+
+
+def resolve_entry_signal_for_bar(
+    *,
+    hourly_df: pd.DataFrame,
+    bar_idx: int,
+    pair: str,
+    params: StrategyParams,
+    current_bar_time: pd.Timestamp,
+    nearest_support: Optional[SRZone],
+    nearest_resistance: Optional[SRZone],
+    execution_mode: str,
+    minute_df: pd.DataFrame | None = None,
+    align_signal_time: bool = False,
+) -> tuple[Optional[Signal], Optional[pd.Timestamp]]:
+    """Resolve a candidate signal and its preferred submit timestamp for a bar."""
+
+    if execution_mode not in {'next_bar', 'intrabar'}:
+        execution_mode = 'next_bar'
+
+    intrabar_submit_time = None
+    signal: Optional[Signal] = None
+    if execution_mode == 'intrabar':
+        intrabar_signal = find_intrabar_signal(
+            current_bar_time,
+            minute_df,
+            pair,
+            params,
+            nearest_support,
+            nearest_resistance,
+        )
+        if intrabar_signal is not None:
+            signal, intrabar_submit_time = intrabar_signal
+
+    if signal is None:
+        signal = select_entry_signal(
+            hourly_df=hourly_df,
+            bar_idx=bar_idx,
+            pair=pair,
+            params=params,
+            support_zone=nearest_support,
+            resistance_zone=nearest_resistance,
+        )
+        if signal is not None and execution_mode == 'next_bar':
+            intrabar_submit_time = _next_bar_submit_time(current_bar_time)
+            if align_signal_time:
+                signal = replace(signal, time=intrabar_submit_time)
+
+    return signal, intrabar_submit_time
+
+
 def run_walk_forward(
     hourly_df: pd.DataFrame,
     *,
@@ -116,15 +176,22 @@ def run_walk_forward(
     zone_provider: Callable[[pd.Timestamp, object, int], list[SRZone]],
     execution_quote_provider: Callable[[Signal, pd.Timestamp, int, pd.Series], tuple[Optional[ExecutionQuote], str]] | None = None,
     minute_df: pd.DataFrame | None = None,
-    execution_mode: str = 'next_bar',
+    execution_mode: str = 'intrabar',
     on_bar: Callable[[WalkForwardBar], None] | None = None,
     force_close_end: bool = True,
+    is_entry_blocked: Callable[[pd.Timestamp], bool] | None = None,
 ) -> WalkForwardResult:
     """Run the shared per-bar execution loop for one pair.
 
     Signals are generated from completed hourly candles and queued for execution
     on the next bar's open, which is the earliest point at which live code could
     have acted on the prior candle's close.
+
+    *is_entry_blocked* is an optional callback ``(bar_time) -> bool`` that
+    gates new entries.  When provided and returning True, signal generation
+    is skipped for that bar.  Use this to inject sequencing constraints
+    (e.g. cooldown between trades) without coupling portfolio policy into
+    the walk-forward engine.
     """
 
     trades: list[Trade] = []
@@ -132,8 +199,6 @@ def run_walk_forward(
     pending_signal: Optional[Signal] = None
     pending_signal_submit_time: Optional[pd.Timestamp] = None
     current_zones: list[SRZone] = []
-    last_trade_exit_time: pd.Timestamp | None = None
-    last_trade_pnl_r: float | None = None
     last_zone_date = None
     trade_entry_bar = 0
 
@@ -186,8 +251,6 @@ def run_walk_forward(
                     pip,
                 )
                 trades.append(exit_trade)
-                last_trade_exit_time = current_time
-                last_trade_pnl_r = exit_trade.pnl_r
                 current_trade = None
                 if on_bar is not None:
                     on_bar(
@@ -281,8 +344,6 @@ def run_walk_forward(
                     pip,
                 )
                 trades.append(exit_trade)
-                last_trade_exit_time = current_time
-                last_trade_pnl_r = exit_trade.pnl_r
                 current_trade = None
                 if on_bar is not None:
                     on_bar(
@@ -302,44 +363,31 @@ def run_walk_forward(
                     )
                 continue
 
-        if current_trade is None and not is_pair_cooldown_active(
-            current_time,
-            last_exit_time=last_trade_exit_time,
-            last_pnl_r=last_trade_pnl_r,
-            params=params,
+        if current_trade is None and not (
+            is_entry_blocked is not None and is_entry_blocked(current_time)
         ):
-            signal = None
-            intrabar_submit_time = None
-            if execution_mode == 'intrabar':
-                intrabar_signal = find_intrabar_signal(
-                    current_time,
-                    minute_df,
-                    pair,
-                    params,
-                    nearest_support,
-                    nearest_resistance,
-                )
-                if intrabar_signal is not None:
-                    signal, intrabar_submit_time = intrabar_signal
-
-            if signal is None:
-                signal = select_entry_signal(
-                    hourly_df=hourly_df,
-                    bar_idx=i,
-                    pair=pair,
-                    params=params,
-                    support_zone=nearest_support,
-                    resistance_zone=nearest_resistance,
-                )
+            signal, intrabar_submit_time = resolve_entry_signal_for_bar(
+                hourly_df=hourly_df,
+                bar_idx=i,
+                pair=pair,
+                params=params,
+                current_bar_time=current_time,
+                nearest_support=nearest_support,
+                nearest_resistance=nearest_resistance,
+                execution_mode=execution_mode,
+                minute_df=minute_df,
+                align_signal_time=False,
+            )
 
             if signal is not None:
                 if execution_mode == 'intrabar':
-                    if intrabar_submit_time is None:
-                        submit_time = intrabar_execution_time(current_time, minute_df)
-                    else:
-                        submit_time = intrabar_submit_time
+                    submit_time = (
+                        intrabar_submit_time
+                        if intrabar_submit_time is not None
+                        else intrabar_execution_time(current_time, minute_df)
+                    )
                 else:
-                    submit_time = pd.Timestamp(current_time) + pd.Timedelta(hours=1)
+                    submit_time = _next_bar_submit_time(current_time)
 
                 if execution_quote_provider is not None:
                     quote, _quote_note = execution_quote_provider(

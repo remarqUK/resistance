@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 from typing import Optional
 
@@ -41,7 +41,7 @@ class ActivityLog:
         self._entries: deque[str] = deque(maxlen=self.maxlen)
 
     def add(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
         self._entries.append(f"[dim]{timestamp}[/dim]  {message}")
 
     def lines(self, limit: int = 10) -> list[str]:
@@ -59,7 +59,7 @@ def _countdown_seconds(next_scan_at: Optional[datetime]) -> Optional[int]:
 
     if next_scan_at is None:
         return None
-    return max(0, int((next_scan_at - datetime.now()).total_seconds()))
+    return max(0, int((next_scan_at - datetime.now(timezone.utc)).total_seconds()))
 
 
 def _state_text(row: PairScanRow) -> Text:
@@ -493,7 +493,7 @@ def run_live_dashboard(
     )
 
     snapshot: Optional[MonitorSnapshot] = None
-    next_scan_at = datetime.now()
+    next_scan_at = datetime.now(timezone.utc)
     last_error: Optional[str] = None
     last_countdown: Optional[int] = None
 
@@ -515,7 +515,7 @@ def run_live_dashboard(
             vertical_overflow="visible",
         ) as live:
             while True:
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 if now >= next_scan_at:
                     live.update(
                         _build_dashboard(
@@ -550,7 +550,7 @@ def run_live_dashboard(
                         last_error = str(exc)
                         activity_log.add(f"[red bold]Scan failed[/red bold] {exc}")
 
-                    next_scan_at = datetime.now() + timedelta(seconds=interval)
+                    next_scan_at = datetime.now(timezone.utc) + timedelta(seconds=interval)
                     last_countdown = None
                     live.update(
                         _build_dashboard(

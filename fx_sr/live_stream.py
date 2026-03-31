@@ -31,8 +31,8 @@ from .strategy import (
     check_price_exit,
     get_tradeable_zones,
     is_pair_fully_blocked,
-    select_entry_signal,
 )
+from .walkforward import resolve_entry_signal_for_bar
 
 
 def check_tick_exit(
@@ -184,13 +184,16 @@ class StreamingScanner:
         if hourly_df.empty:
             return None
 
-        signal = select_entry_signal(
+        signal, _ = resolve_entry_signal_for_bar(
             hourly_df=hourly_df,
             bar_idx=len(hourly_df) - 1,
             pair=pair,
             params=self.params,
-            support_zone=support,
-            resistance_zone=resistance,
+            current_bar_time=hourly_df.index[-1],
+            nearest_support=support,
+            nearest_resistance=resistance,
+            execution_mode='next_bar',
+            align_signal_time=False,
         )
 
         return signal

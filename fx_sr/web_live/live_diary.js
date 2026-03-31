@@ -52,7 +52,7 @@ function buildRows(trades) {
   const _hhmm = (iso) => {
     if (!iso) return "";
     const d = new Date(iso);
-    return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",hour12:false});
+    return isNaN(d) ? "" : d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"UTC"});
   };
   const totalGbp = trades.reduce((sum, t) => sum + (Number(t.pnl_gbp) || 0), 0);
   const rows = trades.map((t, i) => {
@@ -140,12 +140,12 @@ function loadDateTrades(date) {
     bodyEl.innerHTML = `<div style="color:var(--muted);font-size:0.84rem;padding:8px 0">No trades for this date.</div>`;
     return;
   }
-  const r = dayData.total_pnl_r;
-  const cls = r > 0 ? "up" : r < 0 ? "down" : "";
+  const gbp = dayData.total_pnl_gbp;
+  const cls = gbp > 0 ? "up" : gbp < 0 ? "down" : "";
   selectedDateEl.textContent = `${formatDateLabel(date)} \u00b7 ${dayData.count} trade${dayData.count === 1 ? "" : "s"}`;
   summaryEl.innerHTML = `
     <strong>${date}</strong> \u2014 ${dayData.count} trade${dayData.count === 1 ? "" : "s"} (W/L ${dayData.wins}/${dayData.losses})
-    \u00b7 R: <span class="${cls}">${formatSigned(r, 2, "R")}</span>
+    \u00b7 R: <span class="${cls}">${formatSigned(dayData.total_pnl_r, 2, "R")}</span>
     \u00b7 <span class="${cls}">\u00a3${formatSigned(dayData.total_pnl_gbp, 2, "")}</span>
   `;
   buildRows(dayData.trades);
@@ -166,7 +166,7 @@ function renderCalendar() {
   const months = [];
   while (monthKeyFromDate(cursor) >= startMonth) {
     months.push(renderMonth(cursor));
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1);
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() - 1, 1));
   }
   calendarEl.innerHTML = months.join("");
   monthRangeEl.textContent = `${formatMonthLabel(range.end)} \u2014 ${formatMonthLabel(range.start)} (${dateMap.size} trading days)`;

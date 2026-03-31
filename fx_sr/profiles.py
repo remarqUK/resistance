@@ -374,6 +374,9 @@ PROFILES = {
         'dd_risk_start': 5.0,
         'dd_risk_full': 18.0,
         'dd_risk_floor': 0.5,
+
+        # Live scan lookback: walk last N hourly bars (matches max_hold_bars for full parity)
+        'scan_lookback_bars': 72,
     },
 
     'high_volume_v2': {

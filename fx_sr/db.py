@@ -419,6 +419,39 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
             recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key          TEXT PRIMARY KEY,
+            value_text   TEXT,
+            value_int    BIGINT,
+            value_float  DOUBLE PRECISION,
+            value_ts     TIMESTAMPTZ,
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS order_audit_log (
+            id              BIGSERIAL PRIMARY KEY,
+            event_ts        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            function_name   TEXT NOT NULL,
+            pair            TEXT,
+            direction       TEXT,
+            action          TEXT NOT NULL,
+            request_json    TEXT,
+            response_json   TEXT,
+            error           TEXT,
+            duration_ms     DOUBLE PRECISION,
+            order_ids       TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_order_audit_log_ts
+        ON order_audit_log (event_ts DESC)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_order_audit_log_pair
+        ON order_audit_log (pair, event_ts DESC)
+    """)
 
 
 def _escape_sql_value(value: str) -> str:
@@ -721,15 +754,87 @@ def init_db(db_path: str | None = None) -> None:
             conn.close()
 
 
+# ---------------------------------------------------------------------------
+# app_settings helpers
+# ---------------------------------------------------------------------------
+
+def get_setting(
+    key: str,
+    *,
+    db_path: str | None = None,
+) -> dict | None:
+    """Return a setting row as dict with value_text/value_int/value_float/value_ts, or None."""
+    if db_path is None:
+        db_path = get_db_path()
+    init_db(db_path)
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value_text, value_int, value_float, value_ts, updated_at "
+            "FROM app_settings WHERE key = %s",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            'value_text': row[0],
+            'value_int': row[1],
+            'value_float': row[2],
+            'value_ts': row[3],
+            'updated_at': row[4],
+        }
+    finally:
+        conn.close()
+
+
+def set_setting(
+    key: str,
+    *,
+    value_text: str | None = None,
+    value_int: int | None = None,
+    value_float: float | None = None,
+    value_ts: datetime | pd.Timestamp | str | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Upsert a setting row."""
+    if db_path is None:
+        db_path = get_db_path()
+    init_db(db_path)
+    ts_val = None
+    if value_ts is not None:
+        ts_val = _to_utc_timestamp(pd.Timestamp(value_ts)).isoformat()
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value_text, value_int, value_float, value_ts, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value_text  = EXCLUDED.value_text,
+                value_int   = EXCLUDED.value_int,
+                value_float = EXCLUDED.value_float,
+                value_ts    = EXCLUDED.value_ts,
+                updated_at  = NOW()
+            """,
+            (key, value_text, value_int, value_float, ts_val),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _normalize_ts(ts: datetime | pd.Timestamp | str) -> str:
     """Convert a timestamp-like value to stable UTC string representation."""
+    return str(_to_utc_timestamp(ts))
+
+
+def _to_utc_timestamp(ts: datetime | pd.Timestamp | str) -> pd.Timestamp:
+    """Normalize a timestamp-like value to a UTC-aware pandas timestamp."""
 
     timestamp = pd.Timestamp(ts)
     if timestamp.tzinfo is None:
-        timestamp = timestamp.tz_localize('UTC')
-    else:
-        timestamp = timestamp.tz_convert('UTC')
-    return str(timestamp)
+        return timestamp.tz_localize('UTC')
+    return timestamp.tz_convert('UTC')
 
 
 def _ticker_to_db_value(conn: _CompatConnection, ticker: str) -> int:
@@ -989,13 +1094,18 @@ def save_ohlc(
         db_path = get_db_path()
     init_db(db_path)
 
+    now_utc = pd.Timestamp.now(tz='UTC')
     conn = _connect(db_path)
     try:
         db_ticker = _ticker_to_db_value(conn, ticker)
         db_interval = _interval_to_db_value(conn, interval)
         rows = []
         for ts, row in df.iterrows():
-            ts_str = _normalize_ts(ts)
+            ts_utc = _to_utc_timestamp(ts)
+            if ts_utc > now_utc:
+                # Avoid persisting future bars that can appear from timezone/skew issues.
+                continue
+            ts_str = str(ts_utc)
             rows.append(
                 (
                     db_ticker,

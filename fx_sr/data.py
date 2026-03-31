@@ -10,7 +10,7 @@ Data sources (in priority order):
 2. IBKR TWS / Gateway
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -326,7 +326,7 @@ def fetch_daily_data(
     client_id: int | None = None,
 ) -> pd.DataFrame:
     """Fetch daily OHLC data, preferring PostgreSQL cache when it is fresh."""
-    end = datetime.now()
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
 
     cached = pd.DataFrame()
@@ -359,7 +359,7 @@ def fetch_hourly_data(
     client_id: int | None = None,
 ) -> pd.DataFrame:
     """Fetch 1-hour OHLC data, preferring PostgreSQL cache when it is fresh."""
-    end = datetime.now()
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
 
     cached = pd.DataFrame()
@@ -485,7 +485,7 @@ def fetch_minute_data_cached(
     client_id: int | None = None,
 ) -> pd.DataFrame:
     """Fetch 1-minute OHLC data, with PostgreSQL caching."""
-    end = datetime.now()
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=days)
 
     cached = load_ohlc(ticker_symbol, '1m', start, end)

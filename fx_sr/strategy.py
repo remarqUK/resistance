@@ -160,10 +160,14 @@ class StrategyParams:
     # Margin enforcement (FCA UK retail)
     enforce_margin: bool = True               # enable margin and min-size checks
     margin_cushion_pct: float = 10.0          # keep 10% margin buffer to avoid liquidation
+    margin_slots: int = 5                     # divide margin into N equal slots for concurrent positions
     min_order_units: int = 1000               # IBKR odd-lot minimum
     # IBKR commission model
     commission_bps: float = 0.20              # basis points per side (0.20 = 0.002%)
     commission_min_usd: float = 2.00          # USD minimum per order per side
+    # Live scan lookback — must cover max_hold_bars so any trade the backtest
+    # would still be holding is also found by the live walk-forward.
+    scan_lookback_bars: int = 72              # walk last N hourly bars (matches max_hold_bars = 3 days)
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -220,6 +224,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         prefer_l2_submit_quote=merged.get('prefer_l2_submit_quote', True),
         enforce_margin=merged.get('enforce_margin', True),
         margin_cushion_pct=merged.get('margin_cushion_pct', 10.0),
+        margin_slots=merged.get('margin_slots', 5),
         min_order_units=merged.get('min_order_units', 1000),
         commission_bps=merged.get('commission_bps', 0.20),
         commission_min_usd=merged.get('commission_min_usd', 2.00),
@@ -227,6 +232,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         tp_zone_cap_min_rr=merged.get('tp_zone_cap_min_rr', 0.6),
         breakeven_r=merged.get('breakeven_r', 0.0),
         zone_exhaustion_quality_decay=merged.get('zone_exhaustion_quality_decay', False),
+        scan_lookback_bars=merged.get('scan_lookback_bars', 72),
     )
 
 

@@ -84,7 +84,7 @@ class LiveExecutionTests(unittest.TestCase):
                 execute_orders=True,
                 existing_pairs=set(),
                 pending_pairs=set(),
-                params=StrategyParams(max_correlated_trades=2),
+                params=StrategyParams(max_correlated_trades=2, margin_slots=1, margin_cushion_pct=0.0),
                 tracked_positions={},
                 balance=10000.0,
                 risk_pct=0.02,
@@ -130,7 +130,7 @@ class LiveExecutionTests(unittest.TestCase):
                 execute_orders=True,
                 existing_pairs=set(),
                 pending_pairs=set(),
-                params=StrategyParams(max_correlated_trades=2),
+                params=StrategyParams(max_correlated_trades=2, margin_slots=1, margin_cushion_pct=0.0),
                 tracked_positions={},
                 balance=10000.0,
                 risk_pct=0.02,
@@ -578,8 +578,8 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
 
         submit_mock.assert_not_called()
 
-    def test_skips_when_no_bracket_ids_on_signal(self):
-        """Signal was never bracketed (e.g. external position) — skip."""
+    def test_skips_when_no_tp_sl_prices(self):
+        """Signal has no TP/SL prices at all — skip."""
         from fx_sr.positions import _resubmit_missing_brackets
 
         signal_row = {
@@ -590,8 +590,8 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
             'stop_loss_order_id': None,
             'submitted_tp_price': None,
             'submitted_sl_price': None,
-            'tp_price': 1.1050,
-            'sl_price': 1.0950,
+            'tp_price': None,
+            'sl_price': None,
         }
 
         with patch(
@@ -603,6 +603,48 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
             _resubmit_missing_brackets(signal_row, ibkr_size=10000)
 
         submit_mock.assert_not_called()
+
+    def test_resubmits_using_trade_fallback_when_no_signal(self):
+        """Position has no signal but trade has TP/SL — resubmit from trade."""
+        from fx_sr.positions import _resubmit_missing_brackets
+        from fx_sr.strategy import Trade
+
+        trade = Trade(
+            entry_time=pd.Timestamp('2026-03-30 08:00', tz='UTC'),
+            entry_price=1.1000,
+            direction='LONG',
+            sl_price=1.0950,
+            tp_price=1.1050,
+            zone_upper=1.1010,
+            zone_lower=1.0990,
+            zone_strength='major',
+            risk=0.0050,
+        )
+
+        with patch(
+            'fx_sr.positions.ibkr.fetch_open_order_pairs',
+            return_value=set(),
+        ), patch(
+            'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
+            return_value={
+                'take_profit_order_id': 200,
+                'stop_loss_order_id': 201,
+                'take_profit_price': 1.1050,
+                'stop_loss_price': 1.0950,
+            },
+        ) as submit_mock:
+            _resubmit_missing_brackets(
+                None, ibkr_size=10000,
+                trade=trade, pair='EURUSD', direction='LONG',
+            )
+
+        submit_mock.assert_called_once_with(
+            pair='EURUSD',
+            direction='LONG',
+            quantity=10000,
+            take_profit_price=1.1050,
+            stop_loss_price=1.0950,
+        )
 
 
 if __name__ == '__main__':

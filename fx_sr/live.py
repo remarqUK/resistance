@@ -38,9 +38,8 @@ from .strategy import (
     Signal,
     get_tradeable_zones,
     is_pair_fully_blocked,
-    select_entry_signal,
 )
-from .intrabar import find_intrabar_signal
+from .walkforward import resolve_entry_signal_for_bar, run_walk_forward, slice_daily_window
 from .sizing import (
     PositionSizePlan,
     build_position_size_plan,
@@ -287,6 +286,7 @@ NEAR_ZONE_THRESHOLD_PCT = 0.30
 _LIVE_DAILY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
 _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
+_WALK_FORWARD_CACHE: Dict[str, tuple[str, str, Optional[Signal]]] = {}  # pair -> (hourly_bucket, zone_bucket, signal)
 
 
 @dataclass
@@ -362,7 +362,8 @@ def _get_live_zones(
     if cached and cached[0] == bucket:
         zones = cached[1]
     else:
-        zones = detect_zones(daily_df)
+        daily_window = slice_daily_window(daily_df, daily_df.index[-1], days)
+        zones = detect_zones(daily_window)
         _LIVE_ZONE_CACHE[cache_key] = (bucket, zones)
 
     if zone_cache is not None:
@@ -439,30 +440,6 @@ def _completed_live_hourly_data(
         current_hour = current_hour.tz_convert(index.tz)
 
     return hourly_df[index < current_hour]
-
-
-def _live_submit_time(signal_time: pd.Timestamp) -> pd.Timestamp:
-    """Return the earliest live submit time for a completed hourly signal bar."""
-
-    ts = pd.Timestamp(signal_time)
-    if ts.tzinfo is None:
-        ts = ts.tz_localize('UTC')
-    else:
-        ts = ts.tz_convert('UTC')
-    return ts + pd.Timedelta(hours=1)
-
-
-def _align_live_signal_time(signal: Optional[Signal]) -> Optional[Signal]:
-    """Stamp live signals at the next-hour submit time.
-
-    Live evaluates a completed 1H bar and can only act once that bar has closed.
-    The stored signal timestamp therefore represents the earliest submit hour,
-    matching the backtest execution contract.
-    """
-
-    if signal is None:
-        return None
-    return replace(signal, time=_live_submit_time(signal.time))
 
 
 def load_closed_trade_summaries() -> list:
@@ -852,34 +829,108 @@ def _scan_pair(
             None,
         )
 
-    signal: Optional[Signal] | None = None
+    minute_df: Optional[pd.DataFrame]
+    minute_df = None
     if execution_mode == 'intrabar':
         minute_df = _get_live_minute_data(
             pair_info['ticker'],
             days=2,
             minute_data_cache=minute_data_cache,
         )
-        intrabar_signal = find_intrabar_signal(
-            scan_df.index[-1],
-            minute_df,
-            pair_id,
-            params=params,
-            support_zone=nearest_support,
-            resistance_zone=nearest_resistance,
-        )
-        signal = intrabar_signal[0] if intrabar_signal is not None else None
 
-    if signal is None:
-        signal = select_entry_signal(
-            hourly_df=scan_df,
-            bar_idx=len(scan_df) - 1,
+    # Mini walk-forward: process the last scan_lookback_bars of hourly data
+    # sequentially, exactly like the backtest does.  This catches signals on
+    # earlier bars that a single-bar check would miss.
+    #
+    # Cache the result so we don't re-run 72 bars every scan cycle.
+    # Key includes hourly bucket, last bar timestamp, AND latest minute
+    # timestamp (for intrabar mode where minute data evolves within the hour).
+    hourly_bucket = _current_hour_bucket()
+    last_bar_key = str(scan_df.index[-1])
+    minute_freshness = ''
+    if minute_df is not None and not minute_df.empty:
+        minute_freshness = str(minute_df.index[-1])
+    wf_cache_key = f"{hourly_bucket}:{last_bar_key}:{minute_freshness}:{execution_mode}:{params.scan_lookback_bars}"
+    wf_cached = _WALK_FORWARD_CACHE.get(pair_id)
+    if wf_cached is not None and wf_cached[0] == wf_cache_key:
+        signal = wf_cached[1]
+    else:
+        pip = float(pair_info.get('pip', 0.0001))
+        walkforward_bars = min(int(params.scan_lookback_bars), len(scan_df))
+        wf_df = scan_df.iloc[-walkforward_bars:]
+
+        # Date-aware zone provider: re-derive zones per bar date from the
+        # sliding daily window, matching the backtest's zone_provider exactly.
+        _wf_zone_cache: Dict[str, list] = {}
+        def _wf_zone_provider(_current_time, current_date, _bar_index):
+            date_key = str(current_date)
+            if date_key in _wf_zone_cache:
+                return _wf_zone_cache[date_key]
+            import pandas as _pd
+            bar_date = _pd.Timestamp(current_date)
+            if hasattr(_current_time, 'tzinfo') and _current_time.tzinfo:
+                bar_date = bar_date.tz_localize(_current_time.tzinfo)
+            daily_window = slice_daily_window(daily_df, bar_date, zone_history_days)
+            if len(daily_window) < 20:
+                _wf_zone_cache[date_key] = []
+                return []
+            bar_zones = detect_zones(daily_window)
+            _wf_zone_cache[date_key] = bar_zones
+            return bar_zones
+
+        # Sequencing gate: enforce per-pair cooldown between trades within
+        # the walk-forward, based on admitted (finalized) trades only.
+        # Uses a mutable list so the on_bar callback can update it.
+        from .portfolio import is_pair_cooldown_active as _cooldown_check
+        _last_exit = [None, None]  # [exit_time, pnl_r]
+
+        def _on_wf_bar(bar):
+            if bar.exit_trade is not None:
+                _last_exit[0] = bar.bar_time
+                _last_exit[1] = bar.exit_trade.pnl_r
+
+        def _is_entry_blocked(bar_time):
+            if _last_exit[0] is None:
+                return False
+            return _cooldown_check(
+                bar_time,
+                last_exit_time=_last_exit[0],
+                last_pnl_r=_last_exit[1],
+                params=params,
+            )
+
+        wf_result = run_walk_forward(
+            wf_df,
             pair=pair_id,
             params=params,
-            support_zone=nearest_support,
-            resistance_zone=nearest_resistance,
+            pip=pip,
+            zone_provider=_wf_zone_provider,
+            minute_df=minute_df,
+            execution_mode=execution_mode,
+            force_close_end=False,
+            on_bar=_on_wf_bar,
+            is_entry_blocked=_is_entry_blocked,
         )
-        if execution_mode == 'next_bar':
-            signal = _align_live_signal_time(signal)
+
+        # If the walk-forward has an open trade at the current bar, build a
+        # signal from it so the execution pipeline can reprice with a live quote.
+        signal: Optional[Signal] = None
+        if wf_result.open_trade is not None:
+            trade = wf_result.open_trade
+            signal = Signal(
+                time=trade.entry_time,
+                pair=pair_id,
+                direction=trade.direction,
+                entry_price=trade.entry_price,
+                sl_price=trade.sl_price,
+                tp_price=trade.tp_price,
+                zone_upper=trade.zone_upper,
+                zone_lower=trade.zone_lower,
+                zone_strength=trade.zone_strength,
+                zone_type='support' if trade.direction == 'LONG' else 'resistance',
+                quality_score=trade.quality_score,
+            )
+        _WALK_FORWARD_CACHE[pair_id] = (wf_cache_key, signal)
 
     if signal:
         note = f"{signal.zone_type.title()} reversal ({signal.zone_strength})"
@@ -1099,20 +1150,17 @@ def build_live_size_plans(
         hourly_data_cache=hourly_data_cache,
     )
 
-    # Use cached excess liquidity (refreshed every 5 min, not per cycle)
+    # Compute per-slot margin budget: same logic as execute_signal_plans.
     available_margin: Optional[float] = None
-    if params.enforce_margin:
-        excess_liq = _account_cache.get_excess_liquidity()
-        available_margin = excess_liq if excess_liq is not None else balance
+    display_margin_cushion_pct: float = params.margin_cushion_pct
+    if params.enforce_margin and balance is not None:
+        usable = float(balance) * (1.0 - params.margin_cushion_pct / 100.0)
+        per_slot_margin = usable / max(params.margin_slots, 1)
+        available_margin = per_slot_margin
+        display_margin_cushion_pct = 0.0  # cushion already baked into slot budget
 
-    batch_margin_used = 0.0
     plans: List[Optional[PositionSizePlan]] = []
     for signal in signals:
-        current_margin = (
-            max(0.0, available_margin - batch_margin_used)
-            if available_margin is not None
-            else None
-        )
         plan = build_position_size_plan(
             pair=signal.pair,
             direction=signal.direction,
@@ -1126,13 +1174,11 @@ def build_live_size_plans(
             ),
             account_currency=account_currency,
             price_lookup=price_lookup,
-            available_margin=current_margin,
-            margin_cushion_pct=params.margin_cushion_pct,
+            available_margin=available_margin,
+            margin_cushion_pct=display_margin_cushion_pct,
             enforce_margin=params.enforce_margin,
             min_order_units=params.min_order_units,
         )
-        if plan is not None and plan.margin_required is not None:
-            batch_margin_used += plan.margin_required
         plans.append(plan)
     return plans
 
@@ -1247,6 +1293,7 @@ def _prepare_execution_plan(
     params: StrategyParams,
     price_lookup: Callable[[str], Optional[float]],
     available_margin: Optional[float] = None,
+    margin_cushion_pct: Optional[float] = None,
 ) -> tuple[Optional[PreparedExecutionPlan], str]:
     """Reprice a signal from a fresh live quote and rebuild size for submit time."""
 
@@ -1280,7 +1327,7 @@ def _prepare_execution_plan(
         account_currency=size_plan.account_currency,
         price_lookup=quote_price_lookup,
         available_margin=available_margin,
-        margin_cushion_pct=params.margin_cushion_pct,
+        margin_cushion_pct=margin_cushion_pct if margin_cushion_pct is not None else params.margin_cushion_pct,
         enforce_margin=params.enforce_margin,
         min_order_units=params.min_order_units,
     )
@@ -1320,6 +1367,15 @@ def execute_signal_plans(
     if not execute_orders or not signals:
         return []
 
+    # Pre-flight margin check: refuse all new entries if the account is
+    # near its margin limit.  This prevents the cascade where multiple
+    # signals submit simultaneously and each one gets rejected by IBKR.
+    excess_liq, _ = ibkr.fetch_excess_liquidity()
+    if excess_liq is not None and excess_liq <= 0:
+        print(f"    Halting execution: insufficient margin "
+              f"(excess liquidity={excess_liq:.2f})")
+        return []
+
     if params is None:
         params = StrategyParams()
     if execution_mode not in {'next_bar', 'intrabar'}:
@@ -1348,11 +1404,15 @@ def execute_signal_plans(
         if slot_risk_amount is not None and params.use_correlation_filter
         else None
     )
-    # Fetch available margin for repricing margin checks
+    # Compute per-slot margin budget: divide usable margin equally across slots.
+    # Cushion is applied here so downstream clamp_units_to_margin gets cushion=0.
     exec_available_margin: Optional[float] = None
-    if params.enforce_margin:
-        excess_liq = _account_cache.get_excess_liquidity()
-        exec_available_margin = excess_liq if excess_liq is not None else balance
+    exec_margin_cushion_pct: float = params.margin_cushion_pct
+    if params.enforce_margin and balance is not None:
+        usable = float(balance) * (1.0 - params.margin_cushion_pct / 100.0)
+        per_slot_margin = usable / max(params.margin_slots, 1)
+        exec_available_margin = per_slot_margin
+        exec_margin_cushion_pct = 0.0  # cushion already baked into slot budget
 
     results: list[Optional[ExecutionResult]] = [None] * len(signals)
     planned: dict[int, PreparedExecutionPlan] = {}
@@ -1481,6 +1541,7 @@ def execute_signal_plans(
             params,
             price_lookup,
             available_margin=exec_available_margin,
+            margin_cushion_pct=exec_margin_cushion_pct,
         )
         if prepared_plan is None:
             results[idx] = ExecutionResult(
@@ -1531,8 +1592,6 @@ def execute_signal_plans(
 
         planned[idx] = prepared_plan
         planned_reserved_risk += float(prepared_plan.size_plan.risk_amount)
-        if exec_available_margin is not None and prepared_plan.size_plan.margin_required is not None:
-            exec_available_margin = max(0.0, exec_available_margin - prepared_plan.size_plan.margin_required)
         exposures.append(
             CorrelationExposure(
                 pair=signal.pair,
@@ -1665,7 +1724,8 @@ def show_zones(pair_id: str, pair_info: dict, zone_history_days: int = DEFAULT_Z
     if daily_df.empty:
         return f"  No data available for {pair_info['name']}"
 
-    zones = detect_zones(daily_df)
+    daily_window = slice_daily_window(daily_df, daily_df.index[-1], zone_history_days)
+    zones = detect_zones(daily_window)
     current_price = float(daily_df['Close'].iloc[-1])
     decimals = pair_info.get('decimals', 5)
     nearest_sup, nearest_res = get_nearest_zones(zones, current_price, major_only=False)
@@ -1709,7 +1769,7 @@ def run_monitor_cycle(
     if execution_mode not in {'next_bar', 'intrabar'}:
         execution_mode = 'next_bar'
 
-    scan_started_at = datetime.now()
+    scan_started_at = datetime.now(timezone.utc)
     buffer = io.StringIO()
     stdout_context = redirect_stdout(buffer) if capture_output else nullcontext()
 
@@ -1801,7 +1861,20 @@ def run_monitor_cycle(
             ibkr_account=ibkr_acct,
         )
         if execute_orders:
-            reconcile_detected_signal_orders(signal_ids=signal_ids)
+            # Fetch live positions first so reconciliation never closes
+            # a signal whose position still exists at IBKR.
+            live_pos_keys: set[str] | None = None
+            if track_positions:
+                ibkr_positions = ibkr.fetch_positions()
+                if ibkr_positions is not None:
+                    live_pos_keys = set()
+                    for pos in ibkr_positions:
+                        d = 'LONG' if pos['size'] > 0 else 'SHORT'
+                        live_pos_keys.add(f"{pos['pair']}:{d}")
+            reconcile_detected_signal_orders(
+                signal_ids=signal_ids,
+                live_position_keys=live_pos_keys,
+            )
             if track_positions:
                 tracked = sync_positions(params, zone_history_days)
 
@@ -1835,7 +1908,7 @@ def run_monitor_cycle(
             )
 
     messages = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()] if capture_output else []
-    scan_completed_at = datetime.now()
+    scan_completed_at = datetime.now(timezone.utc)
     return MonitorSnapshot(
         scan_started_at=scan_started_at,
         scan_completed_at=scan_completed_at,

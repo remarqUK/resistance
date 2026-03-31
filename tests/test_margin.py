@@ -244,3 +244,34 @@ class TestSizingMinimumEnforcement:
         # With enforce_margin=False and min_order_units default, units > 0 is ok
         if plan is not None:
             assert plan.units > 0
+
+
+_MINIMAL_PROFILE = {
+    'rr_ratio': 2.0,
+    'sl_buffer_pct': 0.1,
+    'early_exit_r': 0.5,
+    'spread_pips': 1.0,
+    'stop_slippage_pips': 0.5,
+    'cooldown_bars': 4,
+    'momentum_lookback': 3,
+    'max_correlated_trades': 2,
+    'min_entry_candle_body_pct': 0.3,
+}
+
+
+class TestMarginSlots:
+    def test_strategy_params_has_margin_slots_default(self):
+        from fx_sr.strategy import StrategyParams
+        params = StrategyParams()
+        assert params.margin_slots == 5
+
+    def test_params_from_profile_reads_margin_slots(self):
+        from fx_sr.strategy import params_from_profile
+        profile = {**_MINIMAL_PROFILE, 'margin_slots': 3}
+        params = params_from_profile(profile)
+        assert params.margin_slots == 3
+
+    def test_params_from_profile_defaults_margin_slots(self):
+        from fx_sr.strategy import params_from_profile
+        params = params_from_profile(_MINIMAL_PROFILE)
+        assert params.margin_slots == 5

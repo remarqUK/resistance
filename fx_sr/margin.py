@@ -14,10 +14,12 @@ from .sizing import split_pair, convert_currency, PriceLookup
 # FCA major currencies — any pair composed entirely of these gets 30:1
 MAJOR_CURRENCIES = frozenset({'USD', 'EUR', 'JPY', 'GBP', 'CAD', 'CHF'})
 
-# Conservative margin rates — IBKR initial margin is typically higher than
-# the FCA minimum (3.33%).  Using 5% for all pairs as a safe floor.
-MARGIN_RATE_MAJOR = 1.0 / 20.0   # 5.00%  (FCA min is 3.33% but IBKR charges ~4.6%)
-MARGIN_RATE_MINOR = 1.0 / 15.0   # 6.67%  (FCA min is 5%)
+# IBKR margin rates for odd-lot FX orders (< 25K base currency).
+# Odd lots are routed outside IdealPro and carry significantly higher
+# margin requirements than round lots.  Empirical observation shows
+# ~12% for majors and ~15% for minors on a UK retail FCA account.
+MARGIN_RATE_MAJOR = 0.12   # 12%  (odd-lot; IdealPro round-lot is ~5%)
+MARGIN_RATE_MINOR = 0.15   # 15%  (odd-lot; IdealPro round-lot is ~6.67%)
 
 # IBKR minimum order sizes (base currency units)
 MIN_UNITS_ODD_LOT = 1_000
@@ -34,17 +36,18 @@ class MarginRequirement:
     pair: str
     units: int
     notional_account: float      # position value in account currency
-    margin_rate: float           # 0.0333 or 0.05
+    margin_rate: float           # 0.12 or 0.15 (odd-lot rates)
     margin_required: float       # notional_account * margin_rate
     is_odd_lot: bool             # True if units < 25,000
     is_below_minimum: bool       # True if units < 1,000
 
 
 def get_margin_rate(pair: str) -> float:
-    """Return the FCA UK retail margin rate for a pair.
+    """Return the IBKR odd-lot margin rate for a pair.
 
-    Major pairs (both currencies in USD/EUR/JPY/GBP/CAD/CHF): 3.33% (30:1).
-    All others (involving AUD, NZD, etc.): 5% (20:1).
+    Major pairs (both currencies in USD/EUR/JPY/GBP/CAD/CHF): 12%.
+    All others (involving AUD, NZD, etc.): 15%.
+    These reflect empirical IBKR charges for sub-25K odd-lot FX orders.
     """
     base, quote = split_pair(pair)
     if base in MAJOR_CURRENCIES and quote in MAJOR_CURRENCIES:

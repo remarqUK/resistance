@@ -102,6 +102,7 @@ class LiveDashboardHub:
         port: int,
         execution_mode: str = 'next_bar',
         chart_tf: str = '1h',
+        hourly_days: int = 1,
     ) -> None:
         self.pairs = pairs
         self.params = params
@@ -118,6 +119,7 @@ class LiveDashboardHub:
         self.port = port
         self.execution_mode = _normalize_execution_mode(execution_mode)
         self.chart_tf = chart_tf
+        self.hourly_days = hourly_days
 
         self._pair_rows: dict[str, PairScanRow] = {}
         self._tracked: dict[str, dict] = {}
@@ -306,6 +308,7 @@ class LiveDashboardHub:
             hourly_data_cache={self.pairs[pair]['ticker']: hourly_df},
             execution_mode=self.execution_mode,
             portfolio_state=self._portfolio_state,
+            hourly_days=self.hourly_days,
         )
         return (
             rows[0] if rows else None,
@@ -2257,6 +2260,7 @@ class LiveDashboardHub:
             hourly_data_cache=hourly_cache,
             execution_mode=self.execution_mode,
             portfolio_state=portfolio_state,
+            hourly_days=self.hourly_days,
         )
         return signals, pair_rows, closed_trades
 
@@ -3159,6 +3163,7 @@ def run_live_web_app(
     open_browser: bool,
     execution_mode: str,
     chart_tf: str = '1h',
+    hourly_days: int = 1,
 ) -> None:
     """Run the browser-based live dashboard server."""
 
@@ -3179,6 +3184,7 @@ def run_live_web_app(
         port=port,
         execution_mode=execution_mode,
         chart_tf=chart_tf,
+        hourly_days=hourly_days,
     )
     from .replay import handle_replay, handle_replay_bars, handle_replay_dates, handle_replay_refresh, handle_replay_presets
     from .replay import (

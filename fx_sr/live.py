@@ -14,7 +14,7 @@ from typing import Callable, Dict, List, Optional, Set
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
-from .execution import build_execution_plan
+from .execution import build_execution_plan, historical_execution_quote
 from .levels import detect_zones, get_nearest_zones, SRZone, is_price_in_zone
 from .live_history import (
     load_detected_signal_stats,
@@ -693,6 +693,7 @@ def _scan_pair(
     execution_mode: str = 'next_bar',
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
+    hourly_days: int = 1,
 ) -> tuple[PairScanRow, Optional[Signal]]:
     """Scan one pair and return a watchlist row plus optional signal."""
 
@@ -731,7 +732,7 @@ def _scan_pair(
 
     hourly_df = _get_live_hourly_data(
         pair_info['ticker'],
-        days=3,
+        days=max(hourly_days, 1),
         hourly_data_cache=hourly_data_cache,
     )
     if execution_mode == 'intrabar':
@@ -865,14 +866,28 @@ def _scan_pair(
                 return []
             return detect_zones(daily_window)
 
-        # Match backtest exactly: full hourly data, no cooldown callback,
-        # force_close_end=True, no is_entry_blocked.
+        # Execution quote provider: identical to backtest — resolve quotes
+        # from minute data at submit time, falling back to hourly bar Open.
+        def _wf_execution_quote_provider(signal, submit_time, _bar_index, row):
+            return historical_execution_quote(
+                signal.pair,
+                submit_time,
+                params,
+                minute_df=minute_df,
+                l2_snapshots=None,
+                allow_h1_fallback=True,
+                fallback_mid_price=float(row['Open']),
+            )
+
+        # Match backtest exactly: full hourly data, same quote provider,
+        # force_close_end=True, no cooldown callback.
         wf_result = run_walk_forward(
             scan_df,
             pair=pair_id,
             params=params,
             pip=pip,
             zone_provider=_wf_zone_provider,
+            execution_quote_provider=_wf_execution_quote_provider,
             minute_df=minute_df,
             execution_mode=execution_mode,
             force_close_end=True,
@@ -934,6 +949,7 @@ def collect_scan_rows(
     execution_mode: str = 'next_bar',
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
+    hourly_days: int = 1,
 ) -> tuple[List[Signal], List[PairScanRow]]:
     """Collect structured pair rows and the executable signals among them."""
 
@@ -981,6 +997,7 @@ def collect_scan_rows(
             execution_mode=execution_mode,
             portfolio_state=portfolio_state,
             closed_trades=closed_trades,
+            hourly_days=hourly_days,
         )
         pair_rows.append(row)
         if signal:
@@ -1781,6 +1798,7 @@ def run_monitor_cycle(
     execute_orders: bool = False,
     capture_output: bool = False,
     execution_mode: str = 'next_bar',
+    hourly_days: int = 1,
 ) -> MonitorSnapshot:
     """Execute one full live-monitor cycle and return a structured snapshot."""
 
@@ -1839,6 +1857,7 @@ def run_monitor_cycle(
             minute_data_cache=minute_data_cache,
             execution_mode=execution_mode,
             portfolio_state=portfolio_state,
+            hourly_days=hourly_days,
         )
 
         record_pair_scan_log(pair_rows)
@@ -2026,6 +2045,7 @@ def _live_monitor_plain(
     strategy_label: Optional[str],
     client_id: Optional[int],
     execution_mode: str = 'next_bar',
+    hourly_days: int = 1,
 ) -> None:
     """Fallback monitor loop for non-interactive terminals."""
 
@@ -2049,6 +2069,7 @@ def _live_monitor_plain(
                 execute_orders=execute_orders,
                 capture_output=False,
                 execution_mode=execution_mode,
+                hourly_days=hourly_days,
             )
             _display_snapshot_plain(snapshot, strategy_label, client_id)
             print(f"\n  Next scan in {interval}s...")
@@ -2070,6 +2091,7 @@ def live_monitor(
     strategy_label: Optional[str] = None,
     client_id: Optional[int] = None,
     execution_mode: str = 'next_bar',
+    hourly_days: int = 1,
 ) -> None:
     """Continuously monitor for opportunities and open positions."""
 
@@ -2094,6 +2116,7 @@ def live_monitor(
             strategy_label=strategy_label,
             client_id=client_id,
             execution_mode=execution_mode,
+            hourly_days=hourly_days,
         )
         return
 
@@ -2110,4 +2133,5 @@ def live_monitor(
         strategy_label=strategy_label,
         client_id=client_id,
         execution_mode=execution_mode,
+        hourly_days=hourly_days,
     )

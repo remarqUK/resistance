@@ -1537,6 +1537,7 @@ def cmd_live(args):
 
     from fx_sr.live_web import run_live_web_app
 
+    hourly_days = getattr(args, 'days', None) or profile.get('hourly_days', 1)
     run_live_web_app(
         pairs=pairs,
         params=params,
@@ -1553,6 +1554,7 @@ def cmd_live(args):
         open_browser=not args.no_browser,
         execution_mode=execution_mode,
         chart_tf=chart_tf,
+        hourly_days=hourly_days,
     )
 
 

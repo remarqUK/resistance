@@ -829,87 +829,53 @@ def _scan_pair(
             None,
         )
 
-    minute_df: Optional[pd.DataFrame]
-    minute_df = None
+    # Minute data for intrabar signal detection — match the hourly window
+    # so every bar in the walk-forward has minute data available.
+    minute_df: Optional[pd.DataFrame] = None
+    hourly_span_days = max(3, len(scan_df) // 24 + 1)
     if execution_mode == 'intrabar':
         minute_df = _get_live_minute_data(
             pair_info['ticker'],
-            days=2,
+            days=hourly_span_days,
             minute_data_cache=minute_data_cache,
         )
 
-    # Mini walk-forward: process the last scan_lookback_bars of hourly data
-    # sequentially, exactly like the backtest does.  This catches signals on
-    # earlier bars that a single-bar check would miss.
-    #
-    # Cache the result so we don't re-run 72 bars every scan cycle.
-    # Key includes hourly bucket, last bar timestamp, AND latest minute
-    # timestamp (for intrabar mode where minute data evolves within the hour).
+    # Walk-forward: process the full hourly data sequentially, exactly like
+    # the backtest does.  Cache the result so we don't re-run every scan cycle.
     hourly_bucket = _current_hour_bucket()
     last_bar_key = str(scan_df.index[-1])
     minute_freshness = ''
     if minute_df is not None and not minute_df.empty:
         minute_freshness = str(minute_df.index[-1])
-    wf_cache_key = f"{hourly_bucket}:{last_bar_key}:{minute_freshness}:{execution_mode}:{params.scan_lookback_bars}"
+    wf_cache_key = f"{hourly_bucket}:{last_bar_key}:{minute_freshness}:{execution_mode}"
     wf_cached = _WALK_FORWARD_CACHE.get(pair_id)
     if wf_cached is not None and wf_cached[0] == wf_cache_key:
         signal = wf_cached[1]
     else:
         pip = float(pair_info.get('pip', 0.0001))
-        walkforward_bars = min(int(params.scan_lookback_bars), len(scan_df))
-        wf_df = scan_df.iloc[-walkforward_bars:]
 
-        # Date-aware zone provider: re-derive zones per bar date from the
-        # sliding daily window, matching the backtest's zone_provider exactly.
-        _wf_zone_cache: Dict[str, list] = {}
+        # Zone provider: identical to backtest — re-derive zones per bar date
+        # from the sliding daily window.
         def _wf_zone_provider(_current_time, current_date, _bar_index):
-            date_key = str(current_date)
-            if date_key in _wf_zone_cache:
-                return _wf_zone_cache[date_key]
-            import pandas as _pd
-            bar_date = _pd.Timestamp(current_date)
+            bar_date = pd.Timestamp(current_date)
             if hasattr(_current_time, 'tzinfo') and _current_time.tzinfo:
                 bar_date = bar_date.tz_localize(_current_time.tzinfo)
             daily_window = slice_daily_window(daily_df, bar_date, zone_history_days)
             if len(daily_window) < 20:
-                _wf_zone_cache[date_key] = []
                 return []
-            bar_zones = detect_zones(daily_window)
-            _wf_zone_cache[date_key] = bar_zones
-            return bar_zones
+            return detect_zones(daily_window)
 
-        # Sequencing gate: enforce per-pair cooldown between trades within
-        # the walk-forward, based on admitted (finalized) trades only.
-        # Uses a mutable list so the on_bar callback can update it.
-        from .portfolio import is_pair_cooldown_active as _cooldown_check
-        _last_exit = [None, None]  # [exit_time, pnl_r]
-
-        def _on_wf_bar(bar):
-            if bar.exit_trade is not None:
-                _last_exit[0] = bar.bar_time
-                _last_exit[1] = bar.exit_trade.pnl_r
-
-        def _is_entry_blocked(bar_time):
-            if _last_exit[0] is None:
-                return False
-            return _cooldown_check(
-                bar_time,
-                last_exit_time=_last_exit[0],
-                last_pnl_r=_last_exit[1],
-                params=params,
-            )
-
+        # Match backtest exactly: full hourly data, no cooldown callback,
+        # force_close_end=True, no is_entry_blocked.
         wf_result = run_walk_forward(
-            wf_df,
+            scan_df,
             pair=pair_id,
             params=params,
             pip=pip,
             zone_provider=_wf_zone_provider,
             minute_df=minute_df,
             execution_mode=execution_mode,
-            force_close_end=False,
-            on_bar=_on_wf_bar,
-            is_entry_blocked=_is_entry_blocked,
+            force_close_end=True,
         )
 
         # If the walk-forward has an open trade at the current bar, build a

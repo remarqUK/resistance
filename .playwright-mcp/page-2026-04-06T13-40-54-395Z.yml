@@ -1,0 +1,17 @@
+- generic [ref=e5]:
+  - generic [ref=e6]:
+    - generic [ref=e7]: FX support / resistance
+    - heading "Live Trade Review" [level=1] [ref=e8]
+  - generic [ref=e9]:
+    - link "Back to Live Board" [ref=e10] [cursor=pointer]:
+      - /url: /
+    - link "Live Trades" [ref=e11] [cursor=pointer]:
+      - /url: /trade-log
+    - link "Live Diary" [ref=e12] [cursor=pointer]:
+      - /url: /live-diary
+    - link "Backtest Trades" [ref=e13] [cursor=pointer]:
+      - /url: /backtest-trades
+    - link "Backtest Diary" [ref=e14] [cursor=pointer]:
+      - /url: /backtest-diary
+    - link "Strategy Replay" [ref=e15] [cursor=pointer]:
+      - /url: /replay

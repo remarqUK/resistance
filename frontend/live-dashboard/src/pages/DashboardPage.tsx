@@ -19,6 +19,7 @@ const INITIAL_STATE: DashboardState = {
   alerts: [],
   executions: [],
   log: [],
+  currency_balances: {},
 };
 
 const FILL_ENDPOINTS = ['/api/fill', '/fill', '/fill-cache', '/fill_cache'];
@@ -87,6 +88,7 @@ const RESTART_ICON = '\u21BA';
 const STOP_ICON = '\u23F9';
 const AUDIT_LOG_ICON = '\uD83D\uDCCB';  // clipboard/log icon
 const HEALTH_ICON = '\uD83E\uDE7A';    // stethoscope icon
+const STATEMENT_ICON = '\uD83D\uDCB0';  // money bag icon
 
 function badgeClass(value: any) {
   const token = String(value || 'muted').toLowerCase().replaceAll(/[^a-z0-9]+/g, '-');
@@ -407,6 +409,7 @@ function normalizeState(payload: Partial<DashboardState> | undefined, previousSi
     alerts: payload?.alerts || [],
     executions: payload?.executions || [],
     log: payload?.log || [],
+    currency_balances: payload?.currency_balances || {},
   };
 }
 
@@ -566,7 +569,32 @@ function ExecutionMiniChart({ execution }: { execution: ExecutionRow }) {
   );
 }
 
-const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, slPrice, tpPrice }: { pair: string; entryPrice?: number; slPrice?: number; tpPrice?: number }) {
+const CurrencyBalanceWarning = memo(function CurrencyBalanceWarning({ balances, baseCurrency }: { balances: Record<string, number>; baseCurrency: string }) {
+  const nonBase = Object.entries(balances)
+    .filter(([c, v]) => c !== baseCurrency && Math.abs(v) > 50)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+  if (!nonBase.length) return null;
+  return (
+    <section className="panel" style={{ marginBottom: '12px', background: 'rgba(178,59,41,0.06)', border: '1px solid rgba(178,59,41,0.2)' }}>
+      <div className="panel-subhead" style={{ color: '#b23b29' }}>Residual Currency Balances</div>
+      <div style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: '8px' }}>
+        Convert in TWS to avoid interest charges and FX exposure.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '6px 12px', fontSize: '0.82rem' }}>
+        {nonBase.map(([currency, amount]) => (
+          <div key={currency}>
+            <span style={{ fontWeight: 600 }}>{currency}</span>{' '}
+            <span style={{ color: amount >= 0 ? '#1f7a49' : '#b23b29' }}>
+              {amount >= 0 ? '+' : ''}{Number(amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+});
+
+const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, slPrice, tpPrice, decimals = 4 }: { pair: string; entryPrice?: number; slPrice?: number; tpPrice?: number; decimals?: number }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
@@ -601,11 +629,22 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, sl
         });
         chartRef.current = chart;
 
-        const series = chart.addCandlestickSeries({
+        const seriesOpts: any = {
           upColor: '#1f7a49', downColor: '#b23b29',
           borderUpColor: '#1f7a49', borderDownColor: '#b23b29',
           wickUpColor: '#1f7a49', wickDownColor: '#b23b29',
-        });
+          priceFormat: { type: 'price', precision: decimals, minMove: 1 / Math.pow(10, decimals) },
+        };
+        // Constrain Y-axis to SL-TP range
+        if (slPrice != null && tpPrice != null && !isNaN(slPrice) && !isNaN(tpPrice)) {
+          const lo = Math.min(slPrice, tpPrice);
+          const hi = Math.max(slPrice, tpPrice);
+          const pad = (hi - lo) * 0.10;
+          seriesOpts.autoscaleInfoProvider = () => ({
+            priceRange: { minValue: lo - pad, maxValue: hi + pad },
+          });
+        }
+        const series = chart.addCandlestickSeries(seriesOpts);
         seriesRef.current = series;
 
         if (data.bars?.length) {
@@ -616,20 +655,21 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, sl
 
         const line = (price: any, color: string, title: string, style?: number) => {
           if (price == null || isNaN(Number(price))) return;
-          series.createPriceLine({ price: Number(price), color, lineWidth: 1, lineStyle: style ?? chartApi.LineStyle.Dashed, axisLabelVisible: true, title });
+          series.createPriceLine({ price: Number(price), color, lineWidth: 1, lineStyle: style ?? chartApi.LineStyle.Dotted, axisLabelVisible: true, title });
         };
         line(entryPrice, '#d4a017', 'Entry', chartApi.LineStyle.Solid);
         line(slPrice, '#b23b29', 'SL');
         line(tpPrice, '#1f7a49', 'TP');
 
-        // Zone bands
+        // Zone bands (exclude from auto-scale so SL/TP constrain the Y range)
+        const bandScaleOpt = (slPrice != null && tpPrice != null) ? { autoscaleInfoProvider: () => null } : {};
         if (data.support) {
-          const band = chart.addBaselineSeries({ baseValue: { type: 'price', price: data.support.lower }, topFillColor1: 'rgba(31,122,73,0.10)', topFillColor2: 'rgba(31,122,73,0.10)', topLineColor: 'transparent', bottomFillColor1: 'transparent', bottomFillColor2: 'transparent', bottomLineColor: 'transparent', lineWidth: 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+          const band = chart.addBaselineSeries({ baseValue: { type: 'price', price: data.support.lower }, topFillColor1: 'rgba(31,122,73,0.10)', topFillColor2: 'rgba(31,122,73,0.10)', topLineColor: 'transparent', bottomFillColor1: 'transparent', bottomFillColor2: 'transparent', bottomLineColor: 'transparent', lineWidth: 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...bandScaleOpt });
           const pad = 365*24*3600; const now = Math.floor(Date.now()/1000);
           band.setData([{ time: now-pad, value: data.support.upper }, { time: now+pad, value: data.support.upper }]);
         }
         if (data.resistance) {
-          const band = chart.addBaselineSeries({ baseValue: { type: 'price', price: data.resistance.lower }, topFillColor1: 'rgba(178,59,41,0.10)', topFillColor2: 'rgba(178,59,41,0.10)', topLineColor: 'transparent', bottomFillColor1: 'transparent', bottomFillColor2: 'transparent', bottomLineColor: 'transparent', lineWidth: 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+          const band = chart.addBaselineSeries({ baseValue: { type: 'price', price: data.resistance.lower }, topFillColor1: 'rgba(178,59,41,0.10)', topFillColor2: 'rgba(178,59,41,0.10)', topLineColor: 'transparent', bottomFillColor1: 'transparent', bottomFillColor2: 'transparent', bottomLineColor: 'transparent', lineWidth: 0, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...bandScaleOpt });
           const pad = 365*24*3600; const now = Math.floor(Date.now()/1000);
           band.setData([{ time: now-pad, value: data.resistance.upper }, { time: now+pad, value: data.resistance.upper }]);
         }
@@ -825,6 +865,11 @@ export function DashboardPage() {
   const [selectedExecutionKey, setSelectedExecutionKey] = useState<string | null>(null);
   const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
   const [closingPositionKey, setClosingPositionKey] = useState<string | null>(null);
+  const [showStatement, setShowStatement] = useState(false);
+  const [statementData, setStatementData] = useState<any>(null);
+  const [statementLoading, setStatementLoading] = useState(false);
+  const [statementError, setStatementError] = useState('');
+  const [reconciliation, setReconciliation] = useState<any[]>([]);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -1024,6 +1069,23 @@ export function DashboardPage() {
     }
   }, [pushLog]);
 
+  useEffect(() => {
+    if (!showStatement) return;
+    setStatementLoading(true);
+    setStatementError('');
+    Promise.all([
+      fetch('/api/daily-statement').then(r => r.json()),
+      fetch('/api/daily-reconciliation').then(r => r.json()),
+    ])
+      .then(([stmtData, reconData]) => {
+        if (stmtData.error) setStatementError(stmtData.error);
+        else setStatementData(stmtData);
+        if (reconData.rows) setReconciliation(reconData.rows);
+      })
+      .catch(e => setStatementError(e.message || 'Failed to load'))
+      .finally(() => setStatementLoading(false));
+  }, [showStatement]);
+
   const closeTrackedPosition = useCallback(async (position: PositionRow) => {
     const positionKey = `${position.pair}:${position.direction}`;
     if (closingPositionKey === positionKey) {
@@ -1167,7 +1229,7 @@ export function DashboardPage() {
       <header className="hero">
         <div className="hero-title-row">
           <div>
-            <h1><span className="eyebrow">FX support / resistance scanner</span>Forex Sentinel</h1>
+            <h1><span className="eyebrow">FX support / resistance scanner</span>Forex IBKR</h1>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
             <NavLinks current="/" orientation="horizontal" />
@@ -1192,6 +1254,16 @@ export function DashboardPage() {
           >
             {AUDIT_LOG_ICON}
           </a>
+          <button
+            type="button"
+            className="toolbar-btn hero-top-action-link"
+            onClick={() => setShowStatement(true)}
+            title="Daily account statement"
+            aria-label="Daily account statement"
+            style={{ fontSize: '1.05rem' }}
+          >
+            {STATEMENT_ICON}
+          </button>
           {summary.execution_available ? (
             <button
               id="trade-toggle-btn"
@@ -1315,6 +1387,7 @@ export function DashboardPage() {
           </section>
         </section>
         <section className="side-column">
+          <CurrencyBalanceWarning balances={viewState.currency_balances} baseCurrency={viewState.summary?.account_currency || 'GBP'} />
           <section className="panel">
             <div className="panel-subhead">Tracked Positions</div>
             <div id="positions-list" className="stack-list compact-list">
@@ -1396,6 +1469,7 @@ export function DashboardPage() {
                           entryPrice={position.entry_price}
                           slPrice={position.sl_price}
                           tpPrice={position.tp_price}
+                          decimals={dec}
                         />
                       </div>
                     ) : null}
@@ -1550,6 +1624,125 @@ export function DashboardPage() {
           </section>
         </section>
       </main>
+
+      {showStatement ? (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={() => setShowStatement(false)}
+        >
+          <div
+            style={{ background: 'var(--card-bg, #fffaf2)', borderRadius: '12px', padding: '20px 24px', maxWidth: 680, width: '95%', maxHeight: '85vh', overflow: 'auto', boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h2 style={{ margin: 0, fontSize: '1.1rem' }}>Daily Account Statement</h2>
+              <button type="button" className="toolbar-btn" onClick={() => setShowStatement(false)}>Close</button>
+            </div>
+
+            {/* Daily P&L Reconciliation — always shown if available */}
+            {reconciliation.length ? (
+              <div style={{ marginBottom: '18px' }}>
+                <h3 style={{ fontSize: '0.88rem', margin: '0 0 8px' }}>Daily P&L Reconciliation</h3>
+                <table className="data-table" style={{ width: '100%', fontSize: '0.8rem' }}>
+                  <thead><tr><th>Date</th><th style={{ textAlign: 'right' }}>Balance</th><th style={{ textAlign: 'right' }}>Trade P&L</th><th style={{ textAlign: 'right' }}>Actual Change</th><th style={{ textAlign: 'right' }}>Hidden Cost</th></tr></thead>
+                  <tbody>
+                    {reconciliation.slice(-7).map((r: any) => (
+                      <tr key={r.date}>
+                        <td>{r.date}</td>
+                        <td style={{ textAlign: 'right' }}>{Number(r.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                        <td style={{ textAlign: 'right', color: r.trade_pnl >= 0 ? '#1f7a49' : '#b23b29' }}>{r.trade_pnl >= 0 ? '+' : ''}{r.trade_pnl.toFixed(2)}</td>
+                        <td style={{ textAlign: 'right', color: r.actual_change >= 0 ? '#1f7a49' : '#b23b29' }}>{r.actual_change >= 0 ? '+' : ''}{r.actual_change.toFixed(2)}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 700, color: r.hidden_cost >= -5 ? 'var(--muted)' : '#b23b29' }}>{r.hidden_cost >= 0 ? '+' : ''}{r.hidden_cost.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+
+            {statementLoading ? <div style={{ padding: '32px 0', textAlign: 'center', color: 'var(--muted)' }}>Loading statement from IBKR... (5-10s)</div> : null}
+            {statementError ? <div style={{ padding: '16px 0', color: '#b23b29' }}>Error: {statementError}</div> : null}
+
+            {!statementLoading && !statementError && statementData ? (() => {
+              const t = statementData.totals || {};
+              const live = statementData.live || {};
+              return (
+                <div style={{ fontSize: '0.84rem' }}>
+                  {/* Summary */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '10px', marginBottom: '18px', padding: '12px', background: 'rgba(91,75,58,0.04)', borderRadius: '8px' }}>
+                    <div><div style={{ color: 'var(--muted)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Realized P&L</div><div style={{ fontWeight: 700, color: t.total_realized_pnl >= 0 ? '#1f7a49' : '#b23b29' }}>{t.total_realized_pnl >= 0 ? '+' : ''}{t.total_realized_pnl?.toFixed(2)}</div></div>
+                    <div><div style={{ color: 'var(--muted)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Commissions</div><div style={{ fontWeight: 700, color: '#b23b29' }}>-{t.total_commissions?.toFixed(2)}</div></div>
+                    <div><div style={{ color: 'var(--muted)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Interest</div><div style={{ fontWeight: 700, color: t.total_interest >= 0 ? '#1f7a49' : '#b23b29' }}>{t.total_interest?.toFixed(2)}</div></div>
+                    <div><div style={{ color: 'var(--muted)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Fees</div><div style={{ fontWeight: 700, color: '#b23b29' }}>-{t.total_fees?.toFixed(2)}</div></div>
+                    {live.current_equity != null ? <div><div style={{ color: 'var(--muted)', fontSize: '0.72rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Current Equity</div><div style={{ fontWeight: 700 }}>{live.account_currency || '\u00a3'}{Number(live.current_equity).toFixed(2)}</div></div> : null}
+                  </div>
+
+                  {/* Cash Transactions */}
+                  {statementData.cash_transactions?.length ? (
+                    <div style={{ marginBottom: '16px' }}>
+                      <h3 style={{ fontSize: '0.88rem', margin: '0 0 8px' }}>Cash Transactions</h3>
+                      <table className="data-table" style={{ width: '100%', fontSize: '0.8rem' }}>
+                        <thead><tr><th>Type</th><th>Description</th><th>Currency</th><th style={{ textAlign: 'right' }}>Amount</th></tr></thead>
+                        <tbody>
+                          {statementData.cash_transactions.map((tx: any, i: number) => (
+                            <tr key={i}>
+                              <td>{tx.type}</td>
+                              <td style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }} title={tx.description}>{tx.description}</td>
+                              <td>{tx.currency}</td>
+                              <td style={{ textAlign: 'right', color: tx.amount >= 0 ? '#1f7a49' : '#b23b29' }}>{tx.amount >= 0 ? '+' : ''}{Number(tx.amount).toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+
+                  {/* Interest */}
+                  {statementData.interest?.length ? (
+                    <div style={{ marginBottom: '16px' }}>
+                      <h3 style={{ fontSize: '0.88rem', margin: '0 0 8px' }}>Interest Accruals</h3>
+                      <table className="data-table" style={{ width: '100%', fontSize: '0.8rem' }}>
+                        <thead><tr><th>Currency</th><th>Date</th><th style={{ textAlign: 'right' }}>Amount</th></tr></thead>
+                        <tbody>
+                          {statementData.interest.map((row: any, i: number) => (
+                            <tr key={i}>
+                              <td>{row.currency}</td>
+                              <td>{row.date}</td>
+                              <td style={{ textAlign: 'right', color: row.amount >= 0 ? '#1f7a49' : '#b23b29' }}>{row.amount >= 0 ? '+' : ''}{Number(row.amount).toFixed(4)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+
+                  {/* Trades */}
+                  {statementData.trades?.length ? (
+                    <div>
+                      <h3 style={{ fontSize: '0.88rem', margin: '0 0 8px' }}>Trades ({statementData.trades.length})</h3>
+                      <table className="data-table" style={{ width: '100%', fontSize: '0.8rem' }}>
+                        <thead><tr><th>Pair</th><th>Side</th><th>Qty</th><th>Price</th><th style={{ textAlign: 'right' }}>Commission</th><th style={{ textAlign: 'right' }}>P&L</th></tr></thead>
+                        <tbody>
+                          {statementData.trades.map((t: any, i: number) => (
+                            <tr key={i}>
+                              <td>{t.pair}</td>
+                              <td>{t.side}</td>
+                              <td>{Number(t.quantity).toLocaleString()}</td>
+                              <td>{t.price}</td>
+                              <td style={{ textAlign: 'right', color: '#b23b29' }}>-{Number(t.commission).toFixed(2)}</td>
+                              <td style={{ textAlign: 'right', color: t.realized_pnl >= 0 ? '#1f7a49' : '#b23b29' }}>{t.realized_pnl >= 0 ? '+' : ''}{Number(t.realized_pnl).toFixed(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })() : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

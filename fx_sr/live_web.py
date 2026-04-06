@@ -128,6 +128,7 @@ class LiveDashboardHub:
         self._early_exit_active: dict[str, dict] = {}  # pair:direction -> alert dict, cleared when price recovers
         self._execution_results = deque(maxlen=EXECUTION_LIMIT)
         self._last_quotes: dict[str, float] = {}
+        self._currency_balances: dict[str, float] = {}
         self._log: deque[dict] = deque(maxlen=LOG_LIMIT)
         self._active_signal_meta: dict[str, dict[str, str]] = {}
 
@@ -1114,7 +1115,11 @@ class LiveDashboardHub:
                     'pair': pair,
                     'direction': trade.direction,
                     'size': size,
+                    'signal_id': info.get('signal_id'),
                     'entry_price': trade.entry_price,
+                    'entry_time': pd.Timestamp(trade.entry_time).isoformat()
+                    if getattr(trade, 'entry_time', None) is not None
+                    else None,
                     'sl_price': trade.sl_price,
                     'tp_price': trade.tp_price,
                     'current_price': current_price,
@@ -1476,6 +1481,7 @@ class LiveDashboardHub:
             'alerts': self._serialize_alerts(),
             'executions': self._serialize_executions(),
             'log': list(self._log),
+            'currency_balances': dict(self._currency_balances),
         }
 
     async def set_execution_paused(self, paused: bool) -> dict:
@@ -2413,9 +2419,11 @@ class LiveDashboardHub:
                         if env_currency:
                             currency = env_currency.upper()
 
-                    return tracked, balance, currency, closed_rows
+                    cash_balances = ibkr.fetch_cash_balances()
 
-                tracked, balance, currency, closed_rows = await self._loop.run_in_executor(
+                    return tracked, balance, currency, closed_rows, cash_balances
+
+                tracked, balance, currency, closed_rows, cash_balances = await self._loop.run_in_executor(
                     self._scan_executor,
                     _housekeeping,
                 )
@@ -2427,6 +2435,8 @@ class LiveDashboardHub:
                         self.balance = balance
                     if currency is not None:
                         self.account_currency = currency
+                    if cash_balances:
+                        self._currency_balances = cash_balances
                     if closed_rows:
                         for row in closed_rows:
                             summary = closed_trade_summary_from_row(row)
@@ -2572,6 +2582,61 @@ async def _account_history_api(_request: web.Request) -> web.Response:
             snapshots[-1] = today
 
     return web.json_response({'snapshots': snapshots})
+
+
+async def _daily_reconciliation_api(request: web.Request) -> web.Response:
+    """Return daily P&L reconciliation: trade P&L vs actual equity change."""
+    from .live_history import load_daily_snapshots
+    try:
+        snapshots = load_daily_snapshots()
+        rows = []
+        for i in range(1, len(snapshots)):
+            cur = snapshots[i]
+            prev = snapshots[i - 1]
+            bal = cur.get('balance') or 0
+            prev_bal = prev.get('balance') or 0
+            trade_pnl = cur.get('daily_pnl_gbp') or 0
+            actual_change = bal - prev_bal
+            rows.append({
+                'date': str(cur.get('date', '')),
+                'balance': round(bal, 2),
+                'prev_balance': round(prev_bal, 2),
+                'trade_pnl': round(float(trade_pnl), 2),
+                'actual_change': round(actual_change, 2),
+                'hidden_cost': round(actual_change - float(trade_pnl), 2),
+            })
+        return web.json_response({'rows': rows[-14:]})
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def _daily_statement_api(request: web.Request) -> web.Response:
+    """Return IBKR daily account statement via Flex Query."""
+    from . import ibkr
+    hub: LiveDashboardHub = request.app['hub']
+    try:
+        statement = await asyncio.get_event_loop().run_in_executor(
+            None, ibkr.fetch_flex_daily_statement)
+        statement['live'] = {
+            'current_equity': hub.balance,
+            'account_currency': hub.account_currency,
+        }
+        return web.json_response(statement)
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def _debug_positions_api(request: web.Request) -> web.Response:
+    """Return in-memory position tracking state for diagnostics."""
+    hub: LiveDashboardHub = request.app['hub']
+    async with hub._lock:
+        return web.json_response({
+            'track_positions': hub.track_positions,
+            'tracked_count': len(hub._tracked),
+            'tracked_keys': sorted(hub._tracked.keys()),
+            'snapshot_keys': sorted(hub._position_snapshots.keys()),
+            'last_quote_pairs': sorted(hub._last_quotes.keys()),
+        })
 
 
 async def _position_health_api(request: web.Request) -> web.Response:
@@ -2757,16 +2822,43 @@ async def _live_diary_api(_request: web.Request) -> web.Response:
 
 
 async def _live_trade_api(request: web.Request) -> web.Response:
-    """Load a single live trade payload by signal id."""
+    """Load a live trade payload by signal id (preferred), falling back to latest open trade."""
 
     signal_id = (request.query.get('signal_id') or '').strip()
-    if not signal_id:
+    pair = (request.query.get('pair') or '').strip().upper() or None
+    direction = (request.query.get('direction') or '').strip().upper() or None
+
+    trade = None
+
+    if signal_id:
+        trade = load_detected_signal(signal_id)
+        if trade is not None:
+            return web.json_response({'trade': trade})
+
+    if trade is None and not pair:
+        if signal_id:
+            return web.json_response({'error': 'Trade not found'}, status=404)
         return web.json_response({'error': 'Missing signal_id query parameter'}, status=400)
 
-    trade = load_detected_signal(signal_id)
-    if trade is None:
+    if direction and direction not in {'LONG', 'SHORT'}:
+        return web.json_response({'error': 'Invalid direction query parameter'}, status=400)
+
+    from .live_history import load_detected_signals
+
+    signals = load_detected_signals(pair=pair, limit=80)
+    if direction:
+        signals = [
+            t for t in signals
+            if str(t.get('direction') or '').upper() == direction
+        ]
+    if not signals:
         return web.json_response({'error': 'Trade not found'}, status=404)
 
+    open_signals = [
+        t for t in signals
+        if str(t.get('status') or '').upper() in {'OPEN', 'PARTIAL'}
+    ]
+    trade = open_signals[0] if open_signals else signals[0]
     return web.json_response({'trade': trade})
 
 
@@ -3226,6 +3318,9 @@ def run_live_web_app(
     app.router.add_get('/api/order-audit-log', _order_audit_log_api)
     app.router.add_get('/position-health', _index)
     app.router.add_get('/api/position-health', _position_health_api)
+    app.router.add_get('/api/debug/positions', _debug_positions_api)
+    app.router.add_get('/api/daily-statement', _daily_statement_api)
+    app.router.add_get('/api/daily-reconciliation', _daily_reconciliation_api)
     app.router.add_get('/api/replay', handle_replay)
     app.router.add_get('/api/replay/bars', handle_replay_bars)
     app.router.add_get('/api/replay/dates', handle_replay_dates)

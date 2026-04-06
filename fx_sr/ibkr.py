@@ -1301,6 +1301,34 @@ def fetch_account_net_liquidation() -> tuple[Optional[float], Optional[str]]:
             return None, None
 
 
+def fetch_cash_balances() -> dict[str, float]:
+    """Return cash balances by currency from IBKR account summary.
+
+    Returns dict like ``{'GBP': 8934.99, 'USD': 64727.55, 'CHF': -63051.07}``.
+    Excludes the BASE aggregate row and near-zero balances.
+    """
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return {}
+        try:
+            summary = ib.accountSummary()
+        except Exception as exc:
+            print(f"    Warning: failed to read cash balances: {exc}")
+            return {}
+
+    balances: dict[str, float] = {}
+    for item in summary:
+        if getattr(item, 'tag', None) == 'CashBalance' and getattr(item, 'currency', '') != 'BASE':
+            try:
+                val = float(item.value)
+            except (ValueError, TypeError):
+                continue
+            if abs(val) > 0.001:
+                balances[item.currency] = val
+    return balances
+
+
 def fetch_excess_liquidity() -> tuple[Optional[float], Optional[str]]:
     """Read ExcessLiquidity from the TWS account summary.
 
@@ -1463,8 +1491,8 @@ def whatif_margin_check(
             return None
 
 
-def fetch_open_order_pairs() -> set[str]:
-    """Return pairs with active FX orders that are not terminal.
+def fetch_open_order_counts() -> dict[str, int]:
+    """Return a dict of pair → count of active FX orders that are not terminal.
 
     Uses ``reqAllOpenOrders`` to see orders across all client sessions,
     not just the current one.  This is critical after a gateway restart
@@ -1475,13 +1503,12 @@ def fetch_open_order_pairs() -> set[str]:
     with _IBKR_LOCK:
         ib, connected = _get_connection()
         if not connected:
-            return set()
+            return {}
 
         try:
-            # reqAllOpenOrders sees orders from ALL client IDs, not just ours.
             trades = ib.reqAllOpenOrders()
 
-            result = set()
+            counts: dict[str, int] = {}
             for trade in trades:
                 status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
                 if status in terminal_statuses:
@@ -1489,11 +1516,16 @@ def fetch_open_order_pairs() -> set[str]:
 
                 pair_id = _contract_to_pair(getattr(trade, 'contract', None))
                 if pair_id:
-                    result.add(pair_id)
-            return result
+                    counts[pair_id] = counts.get(pair_id, 0) + 1
+            return counts
         except Exception as e:
             print(f"    Warning: failed to read IBKR open orders: {e}")
-            return set()
+            return {}
+
+
+def fetch_open_order_pairs() -> set[str]:
+    """Return pairs with active FX orders that are not terminal."""
+    return set(fetch_open_order_counts().keys())
 
 
 def fetch_fx_fills(
@@ -1829,16 +1861,35 @@ def submit_fx_market_bracket_order(
     take_profit_price: float,
     stop_loss_price: float,
     order_ref: str = '',
+    submit_bid: Optional[float] = None,
+    submit_ask: Optional[float] = None,
 ) -> Optional[dict]:
-    """Submit a market-entry FX bracket order with attached TP/SL protection."""
+    """Submit OCA bracket (TP + SL) first, then a market entry order.
+
+    Brackets-first approach:
+      Phase 1 – verify TP/SL are safely away from market, then place them
+                as an OCA pair.
+      Phase 2 – place the market entry order.
+      Phase 3 – if partial fill, resize brackets to match filled quantity.
+      Cleanup – if entry fails or doesn't fill, cancel the brackets.
+
+    *submit_bid* / *submit_ask* are the caller's latest quote, used to
+    verify that TP/SL prices are not immediately marketable before placing
+    them as naked exit orders.
+
+    Note: between bracket placement and entry fill there is a small
+    window where the exit orders are live without a position.  If the
+    market moves to one of those prices in that window, IBKR will
+    execute it and open an unintended position.  The orphan sweep in
+    ``sync_positions()`` is the safety net for this scenario.
+    """
 
     if quantity <= 0:
         return None
 
     _audit_start = time.monotonic()
 
-    # Pre-flight margin check via whatIf: ask IBKR whether the full
-    # bracket (entry + TP + SL) is affordable before placing anything.
+    # Pre-flight margin check via whatIf for the entry direction.
     margin = whatif_margin_check(pair, direction, quantity)
     if margin is not None and (margin.get('margin_exceeded') or margin.get('would_liquidate')):
         print(f"    Skipping bracket order for {pair}: "
@@ -1865,8 +1916,13 @@ def submit_fx_market_bracket_order(
         if not connected:
             return None
 
+        # Track bracket order IDs so the outer except can cancel them
+        # if an exception occurs after phase 1 succeeds.
+        tp_order_id = None
+        sl_order_id = None
+
         try:
-            from ib_async import LimitOrder, MarketOrder, StopOrder
+            from ib_async import MarketOrder
 
             contract = _make_contract(pair)
             ib.qualifyContracts(contract)
@@ -1879,63 +1935,137 @@ def submit_fx_market_bracket_order(
                 contract=contract,
             )
 
-            action = 'BUY' if direction == 'LONG' else 'SELL'
-            reverse_action = 'SELL' if action == 'BUY' else 'BUY'
+            # ── Guard: verify TP/SL are safely away from market ──────
+            # The brackets are placed before any position exists.  If a
+            # price is already marketable, IBKR would execute it and open
+            # an unintended position.
+            if submit_bid is not None and submit_ask is not None:
+                if direction == 'LONG':
+                    # TP is SELL LIMIT — must be above ask; SL is SELL STOP — must be below bid
+                    if rounded_take_profit_price <= submit_ask:
+                        log_order_event(
+                            function_name='submit_fx_market_bracket_order',
+                            pair=pair, direction=direction, action='submit',
+                            request_data={'tp': float(rounded_take_profit_price), 'ask': submit_ask},
+                            error='TP price at or below ask — would fill immediately as naked exit',
+                            duration_ms=(time.monotonic() - _audit_start) * 1000,
+                        )
+                        return None
+                    if rounded_stop_loss_price >= submit_bid:
+                        log_order_event(
+                            function_name='submit_fx_market_bracket_order',
+                            pair=pair, direction=direction, action='submit',
+                            request_data={'sl': float(rounded_stop_loss_price), 'bid': submit_bid},
+                            error='SL price at or above bid — would fill immediately as naked exit',
+                            duration_ms=(time.monotonic() - _audit_start) * 1000,
+                        )
+                        return None
+                else:
+                    # TP is BUY LIMIT — must be below bid; SL is BUY STOP — must be above ask
+                    if rounded_take_profit_price >= submit_bid:
+                        log_order_event(
+                            function_name='submit_fx_market_bracket_order',
+                            pair=pair, direction=direction, action='submit',
+                            request_data={'tp': float(rounded_take_profit_price), 'bid': submit_bid},
+                            error='TP price at or above bid — would fill immediately as naked exit',
+                            duration_ms=(time.monotonic() - _audit_start) * 1000,
+                        )
+                        return None
+                    if rounded_stop_loss_price <= submit_ask:
+                        log_order_event(
+                            function_name='submit_fx_market_bracket_order',
+                            pair=pair, direction=direction, action='submit',
+                            request_data={'sl': float(rounded_stop_loss_price), 'ask': submit_ask},
+                            error='SL price at or above ask — would fill immediately as naked exit',
+                            duration_ms=(time.monotonic() - _audit_start) * 1000,
+                        )
+                        return None
 
-            parent_order_id = ib.client.getReqId()
-            parent = MarketOrder(
+            # ── Phase 1: place brackets (TP + SL) ─────────────────────
+            oca_result = _submit_oca_bracket(
+                ib, contract, pair, direction, int(quantity),
+                rounded_take_profit_price, rounded_stop_loss_price,
+                order_ref,
+            )
+            if oca_result is None:
+                log_order_event(
+                    function_name='submit_fx_market_bracket_order',
+                    pair=pair,
+                    direction=direction,
+                    action='submit_bracket',
+                    request_data={
+                        'quantity': quantity,
+                        'rounded_tp': float(rounded_take_profit_price),
+                        'rounded_sl': float(rounded_stop_loss_price),
+                    },
+                    error='OCA bracket placement failed',
+                    duration_ms=(time.monotonic() - _audit_start) * 1000,
+                )
+                return None
+
+            tp_order_id = oca_result['take_profit_order_id']
+            sl_order_id = oca_result['stop_loss_order_id']
+            oca_group = oca_result.get('oca_group')
+
+            log_order_event(
+                function_name='submit_fx_market_bracket_order',
+                pair=pair,
+                direction=direction,
+                action='submit_bracket',
+                request_data={
+                    'quantity': quantity,
+                    'rounded_tp': float(rounded_take_profit_price),
+                    'rounded_sl': float(rounded_stop_loss_price),
+                    'oca_group': oca_group,
+                },
+                response_data={
+                    'tp_order_id': tp_order_id,
+                    'sl_order_id': sl_order_id,
+                },
+                order_ids=[tp_order_id, sl_order_id],
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
+
+            # ── Phase 2: place entry market order ──────────────────────
+            action = 'BUY' if direction == 'LONG' else 'SELL'
+
+            entry_order_id = ib.client.getReqId()
+            entry_order = MarketOrder(
                 action,
                 int(quantity),
-                orderId=parent_order_id,
+                orderId=entry_order_id,
                 orderRef=order_ref,
-                tif='GTC',
-                transmit=False,
-            )
-            take_profit = LimitOrder(
-                reverse_action,
-                int(quantity),
-                float(rounded_take_profit_price),
-                orderId=ib.client.getReqId(),
-                parentId=parent_order_id,
-                orderRef=f'{order_ref}:tp' if order_ref else '',
-                tif='GTC',
-                transmit=False,
-            )
-            stop_loss = StopOrder(
-                reverse_action,
-                int(quantity),
-                float(rounded_stop_loss_price),
-                orderId=ib.client.getReqId(),
-                parentId=parent_order_id,
-                orderRef=f'{order_ref}:sl' if order_ref else '',
                 tif='GTC',
                 transmit=True,
             )
 
-            parent_trade = ib.placeOrder(contract, parent)
-            tp_trade = ib.placeOrder(contract, take_profit)
-            sl_trade = ib.placeOrder(contract, stop_loss)
+            entry_trade = ib.placeOrder(contract, entry_order)
 
             # Wait up to 5 seconds for the market order to fill
             fill_timeout = 5
             for _ in range(fill_timeout):
                 if hasattr(ib, 'sleep'):
                     ib.sleep(1)
-                parent_status = getattr(parent_trade, 'orderStatus', None)
-                status_str = getattr(parent_status, 'status', '') or ''
+                entry_status = getattr(entry_trade, 'orderStatus', None)
+                status_str = getattr(entry_status, 'status', '') or ''
                 if status_str in ('Filled', 'Cancelled', 'Inactive', 'ApiCancelled'):
                     break
 
-            # If the market order didn't fill, cancel the entire bracket
-            parent_status = getattr(parent_trade, 'orderStatus', None)
-            status_str = getattr(parent_status, 'status', '') or ''
-            filled = float(getattr(parent_status, 'filled', 0) or 0)
+            entry_status = getattr(entry_trade, 'orderStatus', None)
+            status_str = getattr(entry_status, 'status', '') or ''
+            filled = float(getattr(entry_status, 'filled', 0) or 0)
             if status_str not in ('Filled',) and filled <= 0:
+                # Entry failed — cancel the brackets we placed in phase 1
                 print(f"    Warning: {pair} market order not filled after {fill_timeout}s "
-                      f"(status={status_str}), cancelling bracket")
+                      f"(status={status_str}), cancelling brackets")
+                bracket_ids = {
+                    int(oid) for oid in (tp_order_id, sl_order_id)
+                    if oid is not None
+                }
+                if bracket_ids:
+                    cancel_orders(bracket_ids, suppress_not_found=True)
                 try:
-                    for _trade_obj in (parent_trade, tp_trade, sl_trade):
-                        ib.cancelOrder(getattr(_trade_obj, 'order', _trade_obj))
+                    ib.cancelOrder(getattr(entry_trade, 'order', entry_trade))
                     if hasattr(ib, 'sleep'):
                         ib.sleep(1)
                 except Exception:
@@ -1944,26 +2074,21 @@ def submit_fx_market_bracket_order(
                     function_name='submit_fx_market_bracket_order',
                     pair=pair,
                     direction=direction,
-                    action='submit',
+                    action='submit_entry',
                     request_data={
                         'quantity': quantity,
-                        'take_profit_price': take_profit_price,
-                        'stop_loss_price': stop_loss_price,
                         'order_ref': order_ref,
-                        'rounded_tp': float(rounded_take_profit_price),
-                        'rounded_sl': float(rounded_stop_loss_price),
                     },
-                    error=f'market order not filled after {fill_timeout}s (status={status_str})',
+                    error=f'market order not filled after {fill_timeout}s (status={status_str}); brackets cancelled',
                     duration_ms=(time.monotonic() - _audit_start) * 1000,
                 )
                 return None
 
-            parent_live_order = getattr(parent_trade, 'order', None)
-            parent_status = getattr(parent_trade, 'orderStatus', None)
-            tp_live_order = getattr(tp_trade, 'order', None)
-            sl_live_order = getattr(sl_trade, 'order', None)
-            total_units = _extract_order_total_units(parent_live_order, parent_status)
-            filled_units, remaining_units = _extract_order_fill_state(parent_live_order, parent_status)
+            # Extract entry fill state
+            entry_live_order = getattr(entry_trade, 'order', None)
+            entry_status = getattr(entry_trade, 'orderStatus', None)
+            total_units = _extract_order_total_units(entry_live_order, entry_status)
+            filled_units, remaining_units = _extract_order_fill_state(entry_live_order, entry_status)
             if total_units <= 0.0:
                 total_units = float(quantity)
                 if filled_units <= 0.0:
@@ -1973,47 +2098,99 @@ def submit_fx_market_bracket_order(
                 function_name='submit_fx_market_bracket_order',
                 pair=pair,
                 direction=direction,
-                action='submit',
+                action='submit_entry',
                 request_data={
                     'quantity': quantity,
-                    'take_profit_price': take_profit_price,
-                    'stop_loss_price': stop_loss_price,
                     'order_ref': order_ref,
-                    'rounded_tp': float(rounded_take_profit_price),
-                    'rounded_sl': float(rounded_stop_loss_price),
                 },
                 response_data={
-                    'order_id': getattr(parent_live_order, 'orderId', None),
-                    'status': getattr(parent_status, 'status', None),
-                    'avg_fill_price': getattr(parent_status, 'avgFillPrice', None),
+                    'order_id': getattr(entry_live_order, 'orderId', None),
+                    'status': getattr(entry_status, 'status', None),
+                    'avg_fill_price': getattr(entry_status, 'avgFillPrice', None),
                     'filled_units': filled_units,
-                    'tp_order_id': getattr(tp_live_order, 'orderId', None),
-                    'sl_order_id': getattr(sl_live_order, 'orderId', None),
                 },
-                order_ids=[
-                    getattr(parent_live_order, 'orderId', None),
-                    getattr(tp_live_order, 'orderId', None),
-                    getattr(sl_live_order, 'orderId', None),
-                ],
+                order_ids=[getattr(entry_live_order, 'orderId', None)],
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
+
+            # ── Phase 3: resize brackets on partial fill ───────────────
+            actual_filled = int(filled_units) if filled_units and filled_units > 0 else int(quantity)
+            if actual_filled < int(quantity):
+                # Cancel oversized brackets and resubmit at filled quantity.
+                old_bracket_ids = {
+                    int(oid) for oid in (tp_order_id, sl_order_id)
+                    if oid is not None
+                }
+                if old_bracket_ids:
+                    cancel_orders(old_bracket_ids, suppress_not_found=True)
+                resized = _submit_oca_bracket(
+                    ib, contract, pair, direction, actual_filled,
+                    rounded_take_profit_price, rounded_stop_loss_price,
+                    order_ref,
+                )
+                if resized is not None:
+                    tp_order_id = resized['take_profit_order_id']
+                    sl_order_id = resized['stop_loss_order_id']
+                    log_order_event(
+                        function_name='submit_fx_market_bracket_order',
+                        pair=pair, direction=direction,
+                        action='resize_bracket',
+                        request_data={
+                            'original_qty': int(quantity),
+                            'filled_qty': actual_filled,
+                            'oca_group': resized.get('oca_group'),
+                        },
+                        response_data={
+                            'tp_order_id': tp_order_id,
+                            'sl_order_id': sl_order_id,
+                        },
+                        order_ids=[tp_order_id, sl_order_id],
+                        duration_ms=(time.monotonic() - _audit_start) * 1000,
+                    )
+                else:
+                    # Resize failed — brackets are gone, position unprotected.
+                    # Caller's _ensure_protection_orders_live will catch this.
+                    tp_order_id = None
+                    sl_order_id = None
+                    log_order_event(
+                        function_name='submit_fx_market_bracket_order',
+                        pair=pair, direction=direction,
+                        action='resize_bracket',
+                        request_data={
+                            'original_qty': int(quantity),
+                            'filled_qty': actual_filled,
+                        },
+                        error='bracket resize failed after partial fill',
+                        duration_ms=(time.monotonic() - _audit_start) * 1000,
+                    )
+
             return {
                 'pair': pair,
                 'direction': direction,
                 'quantity': int(quantity),
-                'order_id': getattr(parent_live_order, 'orderId', None),
-                'status': getattr(parent_status, 'status', None),
-                'broker_status': getattr(parent_status, 'status', None),
-                'avg_fill_price': getattr(parent_status, 'avgFillPrice', None),
+                'order_id': getattr(entry_live_order, 'orderId', None),
+                'status': getattr(entry_status, 'status', None),
+                'broker_status': getattr(entry_status, 'status', None),
+                'avg_fill_price': getattr(entry_status, 'avgFillPrice', None),
                 'filled_units': filled_units,
                 'remaining_units': remaining_units,
                 'total_units': total_units,
-                'take_profit_order_id': getattr(tp_live_order, 'orderId', None),
-                'stop_loss_order_id': getattr(sl_live_order, 'orderId', None),
+                'take_profit_order_id': tp_order_id,
+                'stop_loss_order_id': sl_order_id,
                 'take_profit_price': float(rounded_take_profit_price),
                 'stop_loss_price': float(rounded_stop_loss_price),
             }
         except Exception as e:
+            # Cancel any brackets placed in phase 1 before the exception.
+            orphan_ids = {
+                int(oid) for oid in (tp_order_id, sl_order_id)
+                if oid is not None
+            }
+            if orphan_ids:
+                try:
+                    cancel_orders(orphan_ids, suppress_not_found=True)
+                except Exception:
+                    pass
             log_order_event(
                 function_name='submit_fx_market_bracket_order',
                 pair=pair,
@@ -2030,6 +2207,117 @@ def submit_fx_market_bracket_order(
             )
             print(f"    Warning: failed to submit FX bracket order for {pair}: {e}")
             return None
+
+
+def _submit_oca_bracket(
+    ib,
+    contract,
+    pair: str,
+    direction: str,
+    quantity: int,
+    rounded_tp: float,
+    rounded_sl: float,
+    order_ref: str = '',
+) -> Optional[dict]:
+    """Submit OCA-linked TP limit + SL stop orders.
+
+    Returns a dict with ``take_profit_order_id``, ``stop_loss_order_id``,
+    ``take_profit_price``, ``stop_loss_price``, and ``oca_group`` — or
+    ``None`` on failure.  The caller must already hold ``_IBKR_LOCK`` and
+    have a live *ib* connection with a qualified *contract*.
+    """
+    from ib_async import LimitOrder, StopOrder
+
+    close_action = 'SELL' if direction == 'LONG' else 'BUY'
+    oca_group = f'bracket_{pair}_{ib.client.getReqId()}'
+
+    tp_order = LimitOrder(
+        close_action,
+        int(quantity),
+        float(rounded_tp),
+        orderId=ib.client.getReqId(),
+        orderRef=f'{order_ref}:tp' if order_ref else ':tp',
+        tif='GTC',
+        ocaGroup=oca_group,
+        ocaType=1,
+        transmit=True,
+    )
+    sl_order = StopOrder(
+        close_action,
+        int(quantity),
+        float(rounded_sl),
+        orderId=ib.client.getReqId(),
+        orderRef=f'{order_ref}:sl' if order_ref else ':sl',
+        tif='GTC',
+        ocaGroup=oca_group,
+        ocaType=1,
+        transmit=True,
+    )
+
+    # Capture any Error 202 reasons during placement
+    _placement_errors: list[str] = []
+    _orig_error = ib._onError
+
+    def _capture_error(reqId, errorCode, errorString, contract=None):
+        if errorCode == 202:
+            _placement_errors.append(
+                f'reqId={reqId} errorCode={errorCode} reason={errorString!r}'
+            )
+        _orig_error(reqId, errorCode, errorString, contract)
+
+    ib.errorEvent -= _orig_error
+    ib.errorEvent += _capture_error
+
+    try:
+        tp_trade = ib.placeOrder(contract, tp_order)
+        sl_trade = ib.placeOrder(contract, sl_order)
+
+        # Allow IBKR to process and send back status/errors
+        if hasattr(ib, 'sleep'):
+            ib.sleep(2)
+
+        tp_live = getattr(tp_trade, 'order', None)
+        sl_live = getattr(sl_trade, 'order', None)
+
+        tp_id = getattr(tp_live, 'orderId', None)
+        sl_id = getattr(sl_live, 'orderId', None)
+        if tp_id is None or sl_id is None:
+            return None
+
+        # Verify both orders survived — check for immediate cancellation
+        tp_status = getattr(getattr(tp_trade, 'orderStatus', None), 'status', '') or ''
+        sl_status = getattr(getattr(sl_trade, 'orderStatus', None), 'status', '') or ''
+        terminal = {'Cancelled', 'ApiCancelled', 'Inactive'}
+
+        if tp_status in terminal or sl_status in terminal:
+            reason_detail = '; '.join(_placement_errors) if _placement_errors else 'unknown'
+            print(f"    OCA bracket rejected: TP status={tp_status}, SL status={sl_status}, "
+                  f"errors=[{reason_detail}]")
+            # Cancel the surviving leg to avoid orphans
+            surviving = set()
+            if tp_status not in terminal and tp_id is not None:
+                surviving.add(int(tp_id))
+            if sl_status not in terminal and sl_id is not None:
+                surviving.add(int(sl_id))
+            if surviving:
+                try:
+                    from ib_async import Order as _Order
+                    for oid in surviving:
+                        ib.cancelOrder(_Order(orderId=oid))
+                except Exception:
+                    pass
+            return None
+
+        return {
+            'take_profit_order_id': tp_id,
+            'stop_loss_order_id': sl_id,
+            'take_profit_price': float(rounded_tp),
+            'stop_loss_price': float(rounded_sl),
+            'oca_group': oca_group,
+        }
+    finally:
+        ib.errorEvent -= _capture_error
+        ib.errorEvent += _orig_error
 
 
 def submit_bracket_for_existing_position(
@@ -2084,8 +2372,6 @@ def submit_bracket_for_existing_position(
             return None
 
         try:
-            from ib_async import LimitOrder, StopOrder
-
             contract = _make_contract(pair)
             ib.qualifyContracts(contract)
             rounded_tp, rounded_sl = _round_bracket_exit_prices(
@@ -2093,46 +2379,21 @@ def submit_bracket_for_existing_position(
                 ib=ib, contract=contract,
             )
 
-            close_action = 'SELL' if direction == 'LONG' else 'BUY'
             ref_prefix = f'{order_ref}:rebracket' if order_ref else 'rebracket'
-            oca_group = f'rebracket_{pair}_{ib.client.getReqId()}'
-
-            tp_order = LimitOrder(
-                close_action,
-                int(quantity),
-                float(rounded_tp),
-                orderId=ib.client.getReqId(),
-                orderRef=f'{ref_prefix}:tp',
-                tif='GTC',
-                ocaGroup=oca_group,
-                ocaType=1,
-                transmit=False,
+            oca_result = _submit_oca_bracket(
+                ib, contract, pair, direction, quantity,
+                rounded_tp, rounded_sl, ref_prefix,
             )
-            sl_order = StopOrder(
-                close_action,
-                int(quantity),
-                float(rounded_sl),
-                orderId=ib.client.getReqId(),
-                orderRef=f'{ref_prefix}:sl',
-                tif='GTC',
-                ocaGroup=oca_group,
-                ocaType=1,
-                transmit=True,
-            )
-
-            tp_trade = ib.placeOrder(contract, tp_order)
-            sl_trade = ib.placeOrder(contract, sl_order)
-
-            tp_live = getattr(tp_trade, 'order', None)
-            sl_live = getattr(sl_trade, 'order', None)
+            if oca_result is None:
+                raise RuntimeError('OCA bracket submission returned None')
 
             result = {
                 'pair': pair,
                 'direction': direction,
-                'take_profit_order_id': getattr(tp_live, 'orderId', None),
-                'stop_loss_order_id': getattr(sl_live, 'orderId', None),
-                'take_profit_price': float(rounded_tp),
-                'stop_loss_price': float(rounded_sl),
+                'take_profit_order_id': oca_result['take_profit_order_id'],
+                'stop_loss_order_id': oca_result['stop_loss_order_id'],
+                'take_profit_price': oca_result['take_profit_price'],
+                'stop_loss_price': oca_result['stop_loss_price'],
             }
             log_order_event(
                 function_name='submit_bracket_for_existing_position',
@@ -2145,15 +2406,15 @@ def submit_bracket_for_existing_position(
                     'stop_loss_price': stop_loss_price,
                     'rounded_tp': float(rounded_tp),
                     'rounded_sl': float(rounded_sl),
-                    'oca_group': oca_group,
+                    'oca_group': oca_result.get('oca_group'),
                 },
                 response_data={
-                    'tp_order_id': getattr(tp_live, 'orderId', None),
-                    'sl_order_id': getattr(sl_live, 'orderId', None),
+                    'tp_order_id': oca_result['take_profit_order_id'],
+                    'sl_order_id': oca_result['stop_loss_order_id'],
                 },
                 order_ids=[
-                    getattr(tp_live, 'orderId', None),
-                    getattr(sl_live, 'orderId', None),
+                    oca_result['take_profit_order_id'],
+                    oca_result['stop_loss_order_id'],
                 ],
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
@@ -2260,29 +2521,16 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
 # ---------------------------------------------------------------------------
 
 _FLEX_BASE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService"
+_FLEX_TOKEN = "51883655659468721467564"
 _FLEX_QUERY_ID = 1449104
+_FLEX_DAILY_STATEMENT_QUERY_ID = 1454993
 
 
-def fetch_flex_commissions(
-    token: str = None,
-    query_id: int = None,
-    *,
-    max_wait: int = 30,
-) -> list[dict]:
-    """Fetch historical FX trade commissions via IBKR Flex Query.
+def _fetch_flex_xml(token: str, query_id: int, max_wait: int = 30) -> ET.Element:
+    """Execute IBKR Flex Query and return parsed XML root element.
 
-    Returns a list of dicts (one per execution leg) with keys:
-        pair, trade_date, side, quantity, price, commission,
-        commission_currency, net_cash, realized_pnl, order_id, exec_id
-
-    Credentials fall back to env vars IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID.
+    Three-step process: SendRequest → poll GetStatement → return XML.
     """
-    token = token or os.environ.get("IBKR_FLEX_TOKEN", "")
-    query_id = query_id or int(os.environ.get("IBKR_FLEX_QUERY_ID", _FLEX_QUERY_ID))
-
-    if not token:
-        raise ValueError("IBKR Flex token required — pass token= or set IBKR_FLEX_TOKEN")
-
     # Step 1: request the report
     send_url = f"{_FLEX_BASE_URL}.SendRequest?t={token}&q={query_id}&v=3"
     with urllib.request.urlopen(send_url, timeout=15) as resp:
@@ -2304,7 +2552,6 @@ def fetch_flex_commissions(
             raw = resp.read()
 
         root = ET.fromstring(raw)
-        # If still generating, IBKR returns a FlexStatementResponse with Status
         if root.tag == "FlexStatementResponse":
             poll_status = root.findtext("Status", "")
             if poll_status == "Statement generation in progress":
@@ -2314,6 +2561,31 @@ def fetch_flex_commissions(
                 continue
             raise RuntimeError(f"Flex GetStatement failed: {poll_status} — {root.findtext('ErrorMessage', '')}")
         break  # got the actual report
+
+    return root
+
+
+def fetch_flex_commissions(
+    token: str = None,
+    query_id: int = None,
+    *,
+    max_wait: int = 30,
+) -> list[dict]:
+    """Fetch historical FX trade commissions via IBKR Flex Query.
+
+    Returns a list of dicts (one per execution leg) with keys:
+        pair, trade_date, side, quantity, price, commission,
+        commission_currency, net_cash, realized_pnl, order_id, exec_id
+
+    Credentials fall back to env vars IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID.
+    """
+    token = token or os.environ.get("IBKR_FLEX_TOKEN", _FLEX_TOKEN)
+    query_id = query_id or int(os.environ.get("IBKR_FLEX_QUERY_ID", _FLEX_QUERY_ID))
+
+    if not token:
+        raise ValueError("IBKR Flex token required — pass token= or set IBKR_FLEX_TOKEN")
+
+    root = _fetch_flex_xml(token, query_id, max_wait=max_wait)
 
     # Parse Trade elements
     results: list[dict] = []
@@ -2362,5 +2634,101 @@ def fetch_flex_commissions(
 
     results.sort(key=lambda r: r["trade_date"] or pd.Timestamp.min)
     return results
+
+
+def fetch_flex_daily_statement(
+    query_id: int | None = None,
+    max_wait: int = 30,
+) -> dict:
+    """Fetch daily account statement from IBKR Flex Query.
+
+    Returns structured dict with trades, interest, fees, and cash summary.
+    Requires a Flex Query configured with Trade, InterestAccrual,
+    CashTransaction sections.  Set IBKR_FLEX_DAILY_STATEMENT_QUERY_ID.
+    """
+    token = os.environ.get("IBKR_FLEX_TOKEN", _FLEX_TOKEN).strip()
+    if not token:
+        raise ValueError("IBKR_FLEX_TOKEN not set")
+    if query_id is None:
+        query_id = int(os.environ.get("IBKR_FLEX_DAILY_STATEMENT_QUERY_ID", _FLEX_DAILY_STATEMENT_QUERY_ID))
+
+    root = _fetch_flex_xml(token, query_id, max_wait=max_wait)
+
+    # Parse trades
+    trades: list[dict] = []
+    total_commissions = 0.0
+    total_realized_pnl = 0.0
+    for el in root.iter("Trade"):
+        raw_comm = el.get("ibCommission", "0") or "0"
+        try:
+            comm = abs(float(raw_comm))
+        except ValueError:
+            comm = 0.0
+        raw_pnl = el.get("fifoPnlRealized")
+        try:
+            pnl = float(raw_pnl) if raw_pnl is not None else 0.0
+        except ValueError:
+            pnl = 0.0
+        total_commissions += comm
+        total_realized_pnl += pnl
+        symbol = el.get("symbol", "").replace(".", "")
+        trades.append({
+            "pair": symbol,
+            "date": el.get("tradeDate", el.get("reportDate", "")),
+            "side": el.get("buySell", ""),
+            "quantity": float(el.get("quantity", 0) or 0),
+            "price": float(el.get("tradePrice", 0) or 0),
+            "commission": comm,
+            "commission_currency": el.get("ibCommissionCurrency", ""),
+            "realized_pnl": pnl,
+        })
+
+    # Parse interest accruals
+    interest: list[dict] = []
+    total_interest = 0.0
+    for el in root.iter("InterestAccrual"):
+        raw_amt = el.get("endingAccrualBalance") or el.get("accruedInterest") or "0"
+        try:
+            amt = float(raw_amt)
+        except ValueError:
+            amt = 0.0
+        total_interest += amt
+        interest.append({
+            "currency": el.get("currency", ""),
+            "amount": amt,
+            "date": el.get("toDate", el.get("reportDate", "")),
+        })
+
+    # Parse cash transactions (fees, interest payments, deposits, etc.)
+    cash_transactions: list[dict] = []
+    total_fees = 0.0
+    for el in root.iter("CashTransaction"):
+        raw_amt = el.get("amount", "0") or "0"
+        try:
+            amt = float(raw_amt)
+        except ValueError:
+            amt = 0.0
+        tx_type = el.get("type", "")
+        if "fee" in tx_type.lower() or "commission" in tx_type.lower():
+            total_fees += abs(amt)
+        cash_transactions.append({
+            "type": tx_type,
+            "currency": el.get("currency", ""),
+            "amount": amt,
+            "description": el.get("description", ""),
+            "date": el.get("reportDate", el.get("dateTime", "")),
+        })
+
+    return {
+        "trades": trades,
+        "interest": interest,
+        "cash_transactions": cash_transactions,
+        "totals": {
+            "total_commissions": round(total_commissions, 4),
+            "total_interest": round(total_interest, 4),
+            "total_fees": round(total_fees, 4),
+            "total_realized_pnl": round(total_realized_pnl, 4),
+        },
+    }
 
 

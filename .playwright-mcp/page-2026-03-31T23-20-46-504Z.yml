@@ -1,0 +1,80 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]: Connecting to server...
+    - generic [ref=e6]: Connecting...
+  - banner [ref=e8]:
+    - generic [ref=e9]:
+      - heading "FX support / resistance scanner Forex Sentinel" [level=1] [ref=e11]:
+        - generic [ref=e12]: FX support / resistance scanner
+        - text: Forex Sentinel
+      - generic [ref=e13]:
+        - generic [ref=e14]:
+          - link "Live Trades" [ref=e15] [cursor=pointer]:
+            - /url: /trade-log
+          - link "Live Diary" [ref=e16] [cursor=pointer]:
+            - /url: /live-diary
+          - link "Backtest Trades" [ref=e17] [cursor=pointer]:
+            - /url: /backtest-trades
+          - link "Backtest Diary" [ref=e18] [cursor=pointer]:
+            - /url: /backtest-diary
+          - link "Strategy Replay" [ref=e19] [cursor=pointer]:
+            - /url: /replay
+        - generic [ref=e20]:
+          - link "Position health" [ref=e21] [cursor=pointer]:
+            - /url: /position-health
+            - text: 🩺
+          - link "Order audit log" [ref=e22] [cursor=pointer]:
+            - /url: /order-audit-log
+            - text: 📋
+          - button "Re-run Backtest" [ref=e23] [cursor=pointer]: ↩
+          - button "Rebuild UI" [ref=e24] [cursor=pointer]: ↻
+          - button "Restart" [ref=e25] [cursor=pointer]: ↺
+          - button "Stop" [ref=e26] [cursor=pointer]: ⏹
+  - main [ref=e27]:
+    - generic [ref=e28]:
+      - generic [ref=e29]:
+        - article [ref=e30]:
+          - text: Scan state
+          - strong [ref=e31]: Starting
+          - generic [ref=e32]: 0 / 0 pairs
+        - article [ref=e33]:
+          - text: Signals
+          - strong [ref=e34]: "0"
+          - generic [ref=e35]: 0 pending blockers
+        - article [ref=e36]:
+          - text: Tracked positions
+          - strong [ref=e37]: "0"
+          - generic [ref=e38]: Scan only
+      - generic [ref=e41]: Account equity & daily P&L (GBP)
+      - table [ref=e44]:
+        - rowgroup [ref=e45]:
+          - row "Pair State Price Support Resistance Setup Signal" [ref=e46]:
+            - columnheader "Pair" [ref=e47]
+            - columnheader "State" [ref=e48]
+            - columnheader "Price" [ref=e49]
+            - columnheader "Support" [ref=e50]
+            - columnheader "Resistance" [ref=e51]
+            - columnheader "Setup" [ref=e52]
+            - columnheader "Signal" [ref=e53]
+        - rowgroup [ref=e54]:
+          - row "Waiting for first scan." [ref=e55]:
+            - cell "Waiting for first scan." [ref=e56]
+    - generic [ref=e57]:
+      - generic [ref=e58]:
+        - generic [ref=e59]: Tracked Positions
+        - generic [ref=e61]: No tracked positions.
+      - generic [ref=e62]:
+        - generic [ref=e63]: Active Signals
+        - generic [ref=e65]: No active signals.
+      - generic [ref=e68]:
+        - generic [ref=e69]: Transactions
+        - generic [ref=e70]:
+          - button "All" [ref=e71] [cursor=pointer]
+          - button "Open" [ref=e72] [cursor=pointer]
+          - button "Closed" [ref=e73] [cursor=pointer]
+        - generic [ref=e75]: No execution activity in the last 72 hours.
+      - generic [ref=e76]:
+        - generic [ref=e78]:
+          - paragraph [ref=e79]: Flow
+          - heading "Event log" [level=2] [ref=e80]
+        - generic [ref=e82]: No events yet.

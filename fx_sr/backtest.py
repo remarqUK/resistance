@@ -107,10 +107,22 @@ def _load_cached_data_window(
             f'({len(df)} rows; expected at least {window_rows})'
         )
 
-    start_tolerance = {
-        '1d': pd.Timedelta(days=2),
+    base_start_tolerance = {
+        '1d': pd.Timedelta(days=3),
         '1h': pd.Timedelta(hours=6),
     }.get(interval, pd.Timedelta(hours=1))
+    # FX markets close Fri 21:00–Sun 21:00 UTC; if the start window lands on a
+    # weekend there's legitimately no data for up to ~48 h.  Widen tolerance.
+    start_weekday = start.weekday()  # 0=Mon … 6=Sun
+    if start_weekday == 5:       # Saturday – up to ~47 h gap to Sun 21:00
+        weekend_pad = pd.Timedelta(hours=48)
+    elif start_weekday == 6:     # Sunday before market open
+        weekend_pad = pd.Timedelta(hours=24)
+    elif start_weekday == 4 and start.hour >= 21:  # Fri after close
+        weekend_pad = pd.Timedelta(hours=48)
+    else:
+        weekend_pad = pd.Timedelta(0)
+    start_tolerance = base_start_tolerance + weekend_pad
     stale_tolerance = {
         '1d': pd.Timedelta(days=3),
         '1h': pd.Timedelta(hours=3),

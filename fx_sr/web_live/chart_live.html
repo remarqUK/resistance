@@ -40,22 +40,37 @@
   <script>
     const params = new URLSearchParams(window.location.search);
     const signalId = params.get('signal_id') || '';
-    let pair = params.get('pair') || '';
-    let direction = params.get('direction') || null;
-    let entryPrice = parseFloat(params.get('entry_price')) || null;
-    let entryTime = params.get('entry_time') || null;
-    let exitPrice = parseFloat(params.get('exit_price')) || null;
-    let exitTime = params.get('exit_time') || null;
-    let sl = parseFloat(params.get('sl')) || null;
-    let tp = parseFloat(params.get('tp')) || null;
+    function parseFirstParam(names) {
+      for (const name of names) {
+        const value = params.get(name);
+        if (value !== null && value !== '') return value;
+      }
+      return null;
+    }
+    function normalizeDecimal(value) {
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    function parseFloatParam(names) {
+      const raw = parseFirstParam(names);
+      return raw === null || raw === '' ? null : normalizeDecimal(raw);
+    }
+    let pair = parseFirstParam(['pair']) || '';
+    let direction = parseFirstParam(['direction', 'dir']) || null;
+    let entryPrice = parseFloatParam(['entry_price', 'entryPrice', 'entry', 'opened_price']);
+    let entryTime = parseFirstParam(['entry_time', 'entryTime', 'opened_at', 'signal_time']);
+    let exitPrice = parseFloatParam(['exit_price', 'exitPrice', 'closed_price']);
+    let exitTime = parseFirstParam(['exit_time', 'exitTime', 'closed_at']);
+    let sl = parseFloatParam(['sl', 'sl_price', 'stop_loss', 'stop']);
+    let tp = parseFloatParam(['tp', 'tp_price', 'take_profit']);
 
     function updatePairHeader() {
       if (pair) {
         document.getElementById('pair-name').textContent = pair;
-        document.title = `${pair} - Live Chart`;
+        document.title = `IBKR - ${pair} - Live Chart`;
       } else {
         document.getElementById('pair-name').textContent = 'No pair specified';
-        document.title = 'Live Chart';
+        document.title = 'IBKR - Live Chart';
       }
     }
 
@@ -289,17 +304,16 @@
       }
     }
 
-    function normalizeDecimal(value) {
-      const parsed = parseFloat(value);
-      return Number.isFinite(parsed) ? parsed : null;
-    }
-
     function loadTradeFromSignalId() {
-      if (!signalId) {
+      if (!signalId && !pair) {
         return Promise.resolve();
       }
 
-      return fetch(`/api/live-trade?signal_id=${encodeURIComponent(signalId)}`)
+      const endpoint = signalId
+        ? `/api/live-trade?signal_id=${encodeURIComponent(signalId)}`
+        : `/api/live-trade?pair=${encodeURIComponent(pair)}${direction ? '&direction=' + encodeURIComponent(direction.toUpperCase()) : ''}`;
+
+      return fetch(endpoint)
         .then((response) => {
           if (!response.ok) {
             return null;
@@ -381,7 +395,7 @@
           price: sl,
           color: '#b23b29',
           lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
           axisLabelVisible: true,
           title: 'SL',
         });
@@ -391,7 +405,7 @@
           price: tp,
           color: '#1f7a49',
           lineWidth: 1,
-          lineStyle: LightweightCharts.LineStyle.Dashed,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
           axisLabelVisible: true,
           title: 'TP',
         });
@@ -432,7 +446,7 @@
     }
 
     // Init
-    (signalId ? loadTradeFromSignalId() : Promise.resolve())
+    (signalId || pair ? loadTradeFromSignalId() : Promise.resolve())
       .then(function () {
         initChart();
         return loadChartData();

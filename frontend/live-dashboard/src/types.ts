@@ -122,6 +122,7 @@ export interface DashboardState {
   alerts: AlertRow[];
   executions: ExecutionRow[];
   log: LogEntry[];
+  currency_balances: Record<string, number>;
 }
 
 export interface TradeLogResponse {

@@ -1,0 +1,18 @@
+[   14894ms] Uncaught Error: Cannot update oldest data, last time=[object Object], new time=[object Object]
+    at Eb (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:146649)
+    at Jb (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:157748)
+    at update (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:152649)
+    at updateLivePrice (http://127.0.0.1:8765/chart?pair=GBPCAD&signal_id=GBPCAD%3ALONG%3A0a32e203db2c7493671b:281:21)
+    at <anonymous> (http://127.0.0.1:8765/chart?pair=GBPCAD&signal_id=GBPCAD%3ALONG%3A0a32e203db2c7493671b:141:10)
+[   14903ms] Uncaught Error: Cannot update oldest data, last time=[object Object], new time=[object Object]
+    at Eb (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:146649)
+    at Jb (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:157748)
+    at update (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:152649)
+    at updateLivePrice (http://127.0.0.1:8765/chart?pair=GBPCAD&signal_id=GBPCAD%3ALONG%3A0a32e203db2c7493671b:270:21)
+    at <anonymous> (http://127.0.0.1:8765/chart?pair=GBPCAD&signal_id=GBPCAD%3ALONG%3A0a32e203db2c7493671b:147:19)
+[   15424ms] Uncaught Error: Cannot update oldest data, last time=[object Object], new time=[object Object]
+    at Eb (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:146649)
+    at Jb (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:157748)
+    at update (https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js:6:152649)
+    at updateLivePrice (http://127.0.0.1:8765/chart?pair=GBPCAD&signal_id=GBPCAD%3ALONG%3A0a32e203db2c7493671b:270:21)
+    at <anonymous> (http://127.0.0.1:8765/chart?pair=GBPCAD&signal_id=GBPCAD%3ALONG%3A0a32e203db2c7493671b:147:19)

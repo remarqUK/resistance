@@ -60,6 +60,8 @@ from . import ibkr
 
 _ACCOUNT_REFRESH_INTERVAL = 300  # 5 minutes
 
+_PROTECTION_TERMINAL_STATUSES = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE'}
+
 
 def _per_slot_margin(balance: float, margin_cushion_pct: float, margin_slots: int) -> float:
     """Compute the per-position margin budget from account balance."""
@@ -251,6 +253,41 @@ def _format_zone_band(zone: Optional[SRZone], decimals: int) -> str:
     if zone is None:
         return "-"
     return f"{zone.lower:.{decimals}f}-{zone.upper:.{decimals}f}"
+
+
+def _ensure_protection_orders_live(
+    pair: str,
+    take_profit_order_id: Optional[int],
+    stop_loss_order_id: Optional[int],
+) -> tuple[bool, str]:
+    """Validate both TP/SL child orders are present and not terminal."""
+
+    if not take_profit_order_id:
+        return False, 'missing take profit order id'
+    if not stop_loss_order_id:
+        return False, 'missing stop loss order id'
+
+    tp_order_id = int(take_profit_order_id)
+    sl_order_id = int(stop_loss_order_id)
+
+    snapshots = ibkr.fetch_fx_order_statuses(
+        {tp_order_id, sl_order_id},
+        pair=pair,
+    )
+    status_by_order = {
+        int(snap['order_id']): str(snap.get('status') or '').upper()
+        for snap in snapshots
+        if snap.get('order_id') is not None
+    }
+
+    for label, order_id in (('take-profit', tp_order_id), ('stop-loss', sl_order_id)):
+        status = status_by_order.get(order_id)
+        if status is None:
+            return False, f"{label} order {order_id} missing after submit"
+        if status in _PROTECTION_TERMINAL_STATUSES:
+            return False, f"{label} order {order_id} terminal ({status})"
+
+    return True, ''
 
 
 def _distance_to_zone_pct(
@@ -906,7 +943,7 @@ def _scan_pair(
             execution_quote_provider=_wf_execution_quote_provider,
             minute_df=minute_df,
             execution_mode=execution_mode,
-            force_close_end=True,
+            force_close_end=False,
             snapshot_source='live',
         )
 
@@ -1677,6 +1714,8 @@ def execute_signal_plans(
             take_profit_price=prepared.take_profit_price,
             stop_loss_price=prepared.stop_price,
             order_ref=order_ref,
+            submit_bid=quote.bid,
+            submit_ask=quote.ask,
         )
         # Adjust running margin total so subsequent signals in this cycle see reduced availability
         if order is not None and plan.margin_required:
@@ -1703,10 +1742,64 @@ def execute_signal_plans(
         remaining_units = order.get('remaining_units')
         if remaining_units is not None:
             remaining_units = int(max(abs(float(remaining_units)), 0.0))
+        tp_order_id = order.get('take_profit_order_id')
+        sl_order_id = order.get('stop_loss_order_id')
+        parent_order_id = order.get('order_id')
         broker_status = order.get('broker_status') or order.get('status')
         result_status = order.get('status') or 'SUBMITTED'
         submitted_tp_price = float(order.get('take_profit_price', prepared.take_profit_price))
         submitted_sl_price = float(order.get('stop_loss_price', prepared.stop_price))
+        protected, protection_note = _ensure_protection_orders_live(
+            signal.pair,
+            tp_order_id,
+            sl_order_id,
+        )
+        if not protected:
+            # If a partial fill happened, flatten immediately so no position
+            # can remain without protective exits.
+            cancel_ids = {
+                int(abs(oid))
+                for oid in (parent_order_id, tp_order_id, sl_order_id)
+                if oid is not None
+            }
+            if cancel_ids:
+                ibkr.cancel_orders(cancel_ids, suppress_not_found=True)
+
+            if filled_units > 0:
+                recovery_direction = 'SHORT' if signal.direction == 'LONG' else 'LONG'
+                try:
+                    ibkr.submit_fx_market_order(
+                        pair=signal.pair,
+                        direction=recovery_direction,
+                        quantity=filled_units,
+                        order_ref=f'{order_ref}:unprotected-close',
+                    )
+                except Exception:
+                    pass
+
+            results[idx] = ExecutionResult(
+                signal.pair,
+                signal.direction,
+                plan.units,
+                'FAILED',
+                order_id=parent_order_id,
+                take_profit_order_id=tp_order_id,
+                stop_loss_order_id=sl_order_id,
+                avg_fill_price=order.get('avg_fill_price'),
+                filled_units=filled_units,
+                remaining_units=remaining_units,
+                broker_status=broker_status,
+                submitted_entry_price=prepared.entry_price,
+                submitted_tp_price=submitted_tp_price,
+                submitted_sl_price=submitted_sl_price,
+                submit_bid=quote.bid,
+                submit_ask=quote.ask,
+                submit_spread=quote.spread,
+                quote_source=quote.source,
+                quote_time=quote.captured_at,
+                note=f'failed protective attachment: {protection_note}',
+            )
+            continue
         note = f"risk {plan.account_currency} {plan.risk_amount:,.2f}; {quote.source} quote @ {prepared.entry_price:.5f}; order submitted"
         if filled_units > 0:
             if remaining_units is None:
@@ -1725,8 +1818,8 @@ def execute_signal_plans(
             plan.units,
             result_status,
             order_id=order.get('order_id'),
-            take_profit_order_id=order.get('take_profit_order_id'),
-            stop_loss_order_id=order.get('stop_loss_order_id'),
+            take_profit_order_id=tp_order_id,
+            stop_loss_order_id=sl_order_id,
             avg_fill_price=order.get('avg_fill_price'),
             filled_units=filled_units,
             remaining_units=remaining_units,

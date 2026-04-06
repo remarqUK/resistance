@@ -1,0 +1,37 @@
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]: FX support / resistance
+      - heading "Trade Log" [level=1] [ref=e8]
+      - paragraph [ref=e9]: Live signal and execution history. Filter by pair or broker status without leaving the dashboard stack.
+    - generic [ref=e10]:
+      - link "Back to Live Board" [ref=e11] [cursor=pointer]:
+        - /url: /
+      - link "Live Diary" [ref=e12] [cursor=pointer]:
+        - /url: /live-diary
+      - link "Backtest Trades" [ref=e13] [cursor=pointer]:
+        - /url: /backtest-trades
+      - link "Backtest Diary" [ref=e14] [cursor=pointer]:
+        - /url: /backtest-diary
+      - link "Strategy Replay" [ref=e15] [cursor=pointer]:
+        - /url: /replay
+  - generic [ref=e16]:
+    - generic [ref=e17]:
+      - generic [ref=e18]:
+        - generic [ref=e19]: Ticker
+        - combobox "Ticker" [ref=e20]:
+          - option "All pairs" [selected]
+      - generic [ref=e21]:
+        - generic [ref=e22]: Status
+        - combobox "Status" [ref=e23]:
+          - option "All statuses" [selected]
+          - option "Submitted"
+          - option "Open"
+          - option "Filled"
+          - option "Closed"
+          - option "Cancelled"
+          - option "Failed"
+          - option "Skipped"
+          - option "Detected"
+      - button "Refresh" [ref=e24] [cursor=pointer]
+    - generic [ref=e25]: No signals recorded yet

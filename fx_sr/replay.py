@@ -1152,7 +1152,42 @@ async def handle_replay_bars(request: web.Request) -> web.Response:
             'close': round(float(row['Close']), decimals),
         })
 
-    return web.json_response({'bars': bars})
+    support = None
+    resistance = None
+    try:
+        # Nearest major support/resistance on the requested date window.
+        # Use the last replay close as reference when available.
+        zone_end = pd.Timestamp(bars[-1]['time'])
+        zone_start = zone_end.normalize() - pd.Timedelta(days=DEFAULT_ZONE_HISTORY_DAYS + 20)
+        daily_df = db.load_ohlc(ticker, '1d', start=zone_start, end=zone_end)
+        if not daily_df.empty:
+            zones = detect_zones(daily_df)
+            from .strategy import get_tradeable_zones
+
+            ref_price = bars[-1]['close']
+            if isinstance(ref_price, (float, int)) and zones:
+                nearest_support, nearest_resistance = get_tradeable_zones(zones, float(ref_price))
+                if nearest_support is not None:
+                    support = {
+                        'lower': round(float(nearest_support.lower), decimals),
+                        'upper': round(float(nearest_support.upper), decimals),
+                        'strength': nearest_support.strength,
+                    }
+                if nearest_resistance is not None:
+                    resistance = {
+                        'lower': round(float(nearest_resistance.lower), decimals),
+                        'upper': round(float(nearest_resistance.upper), decimals),
+                        'strength': nearest_resistance.strength,
+                    }
+    except Exception:
+        support = None
+        resistance = None
+
+    return web.json_response({
+        'bars': bars,
+        'support': support,
+        'resistance': resistance,
+    })
 
 
 async def handle_replay_dates(request: web.Request) -> web.Response:

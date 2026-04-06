@@ -4,15 +4,36 @@
 
   var DECIMALS = 5;
   var params = new URLSearchParams(window.location.search);
-  var pair = params.get('pair') || '';
-  var signalId = params.get('signal_id') || '';
-  var direction = (params.get('direction') || '').toUpperCase();
-  var entryPrice = parseFloat(params.get('entry_price')) || null;
-  var entryTime = params.get('entry_time') || null;
-  var exitPrice = parseFloat(params.get('exit_price')) || null;
-  var exitTime = params.get('exit_time') || null;
-  var sl = parseFloat(params.get('sl')) || null;
-  var tp = parseFloat(params.get('tp')) || null;
+  function parseFirstParam(names) {
+    if (!Array.isArray(names)) {
+      return null;
+    }
+    for (var i = 0; i < names.length; i += 1) {
+      var value = params.get(names[i]);
+      if (value === null || value === '') {
+        continue;
+      }
+      return value;
+    }
+    return null;
+  }
+
+  function parseFloatParam(names) {
+    var raw = parseFirstParam(names);
+    if (raw === null || raw === '') return null;
+    var parsed = parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  var pair = parseFirstParam(['pair']) || '';
+  var signalId = parseFirstParam(['signal_id']) || '';
+  var direction = (parseFirstParam(['direction', 'dir']) || '').toUpperCase();
+  var entryPrice = parseFloatParam(['entry_price', 'entryPrice', 'entry', 'opened_price']);
+  var entryTime = parseFirstParam(['entry_time', 'entryTime', 'opened_at', 'signal_time']);
+  var exitPrice = parseFloatParam(['exit_price', 'exitPrice', 'closed_price']);
+  var exitTime = parseFirstParam(['exit_time', 'exitTime', 'closed_at']);
+  var sl = parseFloatParam(['sl', 'sl_price', 'stop_loss', 'stop']);
+  var tp = parseFloatParam(['tp', 'tp_price', 'take_profit']);
 
   function _row(label, value) {
     return '<div class="info-row"><span class="info-label">' + label + '</span><span>' + value + '</span></div>';
@@ -34,30 +55,49 @@
     if (!trade) return;
     if (trade.pair) pair = String(trade.pair).toUpperCase();
     if (trade.direction) direction = String(trade.direction).toUpperCase();
-    entryPrice = normalizeDecimal(trade.opened_price);
-    if (entryPrice == null) {
-      entryPrice = normalizeDecimal(trade.entry_price);
+    var candidateEntryPrice = normalizeDecimal(trade.opened_price);
+    if (candidateEntryPrice == null) {
+      candidateEntryPrice = normalizeDecimal(trade.entry_price);
     }
-    if (entryPrice == null) {
-      entryPrice = normalizeDecimal(trade.submitted_entry_price);
+    if (candidateEntryPrice == null) {
+      candidateEntryPrice = normalizeDecimal(trade.submitted_entry_price);
     }
-    entryTime = trade.opened_at || trade.signal_time || null;
-    exitPrice = normalizeDecimal(trade.closed_price);
-    exitTime = trade.closed_at || null;
-    sl = normalizeDecimal(trade.submitted_sl_price);
-    if (sl == null) {
-      sl = normalizeDecimal(trade.sl_price);
+    if (candidateEntryPrice != null) {
+      entryPrice = candidateEntryPrice;
     }
-    tp = normalizeDecimal(trade.submitted_tp_price);
-    if (tp == null) {
-      tp = normalizeDecimal(trade.tp_price);
+
+    if (trade.opened_at || trade.signal_time) {
+      entryTime = trade.opened_at || trade.signal_time || null;
+    }
+    var candidateExitPrice = normalizeDecimal(trade.closed_price);
+    if (candidateExitPrice != null) {
+      exitPrice = candidateExitPrice;
+    }
+    if (trade.closed_at) {
+      exitTime = trade.closed_at;
+    }
+
+    var candidateSl = normalizeDecimal(trade.submitted_sl_price);
+    if (candidateSl == null) {
+      candidateSl = normalizeDecimal(trade.sl_price);
+    }
+    if (candidateSl != null) {
+      sl = candidateSl;
+    }
+
+    var candidateTp = normalizeDecimal(trade.submitted_tp_price);
+    if (candidateTp == null) {
+      candidateTp = normalizeDecimal(trade.tp_price);
+    }
+    if (candidateTp != null) {
+      tp = candidateTp;
     }
   }
 
   function setPageTitle() {
     document.title = (pair && direction)
-      ? pair + ' ' + direction + ' - Live Trade'
-      : (pair ? pair + ' - Live Trade Review' : 'Live Trade Review');
+      ? 'IBKR - ' + pair + ' ' + direction + ' - Live Trade'
+      : (pair ? 'IBKR - ' + pair + ' - Live Trade Review' : 'IBKR - Live Trade Review');
   }
 
   function formatPrice(v) {
@@ -150,7 +190,12 @@
         }
 
         // S/R zone bands
-        window.fxChartCore.addZoneBands(chart, data.support, data.resistance, data.bars || []);
+        var zoneSeries = window.fxChartCore.addZoneBands(chart, data.support, data.resistance, data.bars || []);
+        for (var i = 0; i < zoneSeries.length; i++) {
+          if (zoneSeries[i] && zoneSeries[i].applyOptions) {
+            zoneSeries[i].applyOptions({ autoscaleInfoProvider: function () { return null; } });
+          }
+        }
       })
       .catch(function () {
         var banner = document.getElementById('error-banner');
@@ -159,6 +204,48 @@
           banner.style.display = 'block';
         }
       });
+  }
+
+  function setYAxisToTradeTargets() {
+    if (!candleSeries) return;
+
+    var levels = [];
+    if (sl != null) levels.push(sl);
+    if (tp != null) levels.push(tp);
+    if (!levels.length && entryPrice != null) levels.push(entryPrice);
+    if (exitPrice != null) levels.push(exitPrice);
+
+    var finiteLevels = levels.filter(function (value) {
+      return Number.isFinite(value);
+    });
+    if (!finiteLevels.length) return;
+
+    var min = Math.min.apply(Math, finiteLevels);
+    var max = Math.max.apply(Math, finiteLevels);
+    if (min === max) {
+      var tick = Math.pow(10, -DECIMALS);
+      min -= tick;
+      max += tick;
+    }
+
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) return;
+    candleSeries.applyOptions({
+      autoscaleInfoProvider: function () {
+        return {
+          priceRange: {
+            minValue: min,
+            maxValue: max,
+          },
+          margins: {
+            above: 0,
+            below: 0,
+          },
+        };
+      }
+    });
+    if (chart && chart.priceScale) {
+      chart.priceScale('right').applyOptions({ autoScale: true });
+    }
   }
 
   function addTradeOverlay() {
@@ -199,26 +286,26 @@
       axisLabelVisible: true,
       title: 'Entry',
     });
-    if (sl) {
-      candleSeries.createPriceLine({
-        price: sl,
-        color: '#b23b29',
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: 'SL',
-      });
-    }
-    if (tp) {
-      candleSeries.createPriceLine({
-        price: tp,
-        color: '#1f7a49',
-        lineWidth: 1,
-        lineStyle: LightweightCharts.LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: 'TP',
-      });
-    }
+      if (sl) {
+        candleSeries.createPriceLine({
+          price: sl,
+          color: '#b23b29',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: 'SL',
+        });
+      }
+      if (tp) {
+        candleSeries.createPriceLine({
+          price: tp,
+          color: '#1f7a49',
+          lineWidth: 1,
+          lineStyle: LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: true,
+          title: 'TP',
+        });
+      }
     if (exitPrice) {
       candleSeries.createPriceLine({
         price: exitPrice,
@@ -230,27 +317,54 @@
       });
     }
 
-    // Scroll to trade
-    if (entryTime) {
+    // Scroll to trade — show ~60 bars of context around the trade
+    if (entryTime && candleSeries) {
       var entryTs = Math.floor(new Date(entryTime).getTime() / 1000);
       var exitTs = exitTime ? Math.floor(new Date(exitTime).getTime() / 1000) : entryTs;
-      var midpoint = (entryTs + exitTs) / 2;
-      var halfSpan = Math.max((exitTs - entryTs) / 2, 12 * 3600);
-      chart.timeScale().setVisibleRange({
-        from: midpoint - halfSpan * 2,
-        to: midpoint + halfSpan * 2,
-      });
+
+      // Check if the trade falls within the loaded chart data range
+      var barData = candleSeries.data ? candleSeries.data() : null;
+      var chartStart = barData && barData.length ? barData[0].time : null;
+      var chartEnd = barData && barData.length ? barData[barData.length - 1].time : null;
+      var tradeInRange = chartStart != null && chartEnd != null
+        && entryTs >= chartStart - 3600 && entryTs <= chartEnd + 3600;
+
+      if (tradeInRange) {
+        var tradeDuration = exitTs - entryTs;
+        var barWidth = 60; // 1-minute bars
+        var minPad = 30 * barWidth;
+        var halfSpan = Math.max(tradeDuration / 2, minPad);
+        var midpoint = (entryTs + exitTs) / 2;
+        chart.timeScale().setVisibleRange({
+          from: midpoint - halfSpan,
+          to: midpoint + halfSpan,
+        });
+      } else {
+        chart.timeScale().fitContent();
+      }
     }
   }
 
-function loadTradeFromSignalId() {
-  if (!signalId) {
-    return Promise.resolve();
-  }
-  return fetch('/api/live-trade?signal_id=' + encodeURIComponent(signalId))
-    .then(function (res) {
-      if (!res.ok) {
-        var banner = document.getElementById('error-banner');
+  function loadTradeFromApi() {
+    if (!signalId && !pair) {
+      return Promise.resolve();
+    }
+    var endpointParams = new URLSearchParams();
+    if (pair) {
+      endpointParams.set('pair', pair);
+    }
+    if (signalId) {
+      endpointParams.set('signal_id', signalId);
+    }
+    if (direction) {
+      endpointParams.set('direction', direction);
+    }
+    var endpoint = '/api/live-trade?' + endpointParams.toString();
+
+    return fetch(endpoint)
+      .then(function (res) {
+        if (!res.ok) {
+          var banner = document.getElementById('error-banner');
         if (banner) {
           banner.textContent = 'Unable to load trade details from signal_id';
           banner.style.display = 'block';
@@ -343,8 +457,12 @@ function loadTradeFromSignalId() {
 
   /* ---- Init ---- */
   var boot = Promise.resolve();
-  if (signalId) {
-    boot = boot.then(loadTradeFromSignalId);
+  var hasBasicTradeContext = pair && direction && entryPrice != null && (sl != null || tp != null);
+  var needsTradePayload = signalId
+    ? !hasBasicTradeContext
+    : (!pair || entryPrice == null || direction == null || (sl == null && tp == null));
+  if (needsTradePayload) {
+    boot = boot.then(loadTradeFromApi);
   }
   boot.then(function () {
     setPageTitle();
@@ -353,6 +471,7 @@ function loadTradeFromSignalId() {
     return loadChartData();
   }).then(function () {
     addTradeOverlay();
+    setYAxisToTradeTargets();
     fetchOtherTrades();
   });
 

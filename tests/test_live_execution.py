@@ -66,6 +66,16 @@ def _quote(
 class LiveExecutionTests(unittest.TestCase):
     def setUp(self):
         live_module._PORTFOLIO_STATE_CACHE.clear()
+        # Protection validation queries IBKR for order statuses — stub it
+        # so tests that mock submit_fx_market_bracket_order pass through.
+        self._protection_patcher = patch(
+            'fx_sr.live._ensure_protection_orders_live',
+            return_value=(True, ''),
+        )
+        self._protection_patcher.start()
+
+    def tearDown(self):
+        self._protection_patcher.stop()
 
     def test_execute_signal_plans_submits_market_bracket_orders(self):
         signal = _signal('EURUSD')
@@ -76,7 +86,7 @@ class LiveExecutionTests(unittest.TestCase):
             return_value=_quote('EURUSD', bid=1.0998, ask=1.1000, source='l2'),
         ), patch(
             'fx_sr.live.ibkr.submit_fx_market_bracket_order',
-            return_value={'order_id': 101, 'status': 'Submitted'},
+            return_value={'order_id': 101, 'status': 'Submitted', 'take_profit_order_id': 102, 'stop_loss_order_id': 103},
         ) as submit_mock:
             results = execute_signal_plans(
                 [signal],
@@ -122,6 +132,8 @@ class LiveExecutionTests(unittest.TestCase):
                 'avg_fill_price': 1.1001,
                 'filled_units': 4000,
                 'remaining_units': 6000,
+                'take_profit_order_id': 102,
+                'stop_loss_order_id': 103,
             },
         ):
             results = execute_signal_plans(
@@ -156,7 +168,7 @@ class LiveExecutionTests(unittest.TestCase):
             ],
         ), patch(
             'fx_sr.live.ibkr.submit_fx_market_bracket_order',
-            return_value={'order_id': 101, 'status': 'Submitted'},
+            return_value={'order_id': 101, 'status': 'Submitted', 'take_profit_order_id': 102, 'stop_loss_order_id': 103},
         ) as submit_mock:
             results = execute_signal_plans(
                 signals,
@@ -189,8 +201,8 @@ class LiveExecutionTests(unittest.TestCase):
         ), patch(
             'fx_sr.live.ibkr.submit_fx_market_bracket_order',
             side_effect=[
-                {'order_id': 101, 'status': 'Submitted'},
-                {'order_id': 102, 'status': 'Submitted'},
+                {'order_id': 101, 'status': 'Submitted', 'take_profit_order_id': 111, 'stop_loss_order_id': 112},
+                {'order_id': 102, 'status': 'Submitted', 'take_profit_order_id': 113, 'stop_loss_order_id': 114},
             ],
         ) as submit_mock:
             results = execute_signal_plans(
@@ -224,7 +236,7 @@ class LiveExecutionTests(unittest.TestCase):
             ],
         ), patch(
             'fx_sr.live.ibkr.submit_fx_market_bracket_order',
-            return_value={'order_id': 101, 'status': 'Submitted'},
+            return_value={'order_id': 101, 'status': 'Submitted', 'take_profit_order_id': 102, 'stop_loss_order_id': 103},
         ) as submit_mock:
             results = execute_signal_plans(
                 signals,
@@ -279,7 +291,7 @@ class LiveExecutionTests(unittest.TestCase):
             ],
         ), patch(
             'fx_sr.live.ibkr.submit_fx_market_bracket_order',
-            return_value={'order_id': 101, 'status': 'Submitted'},
+            return_value={'order_id': 101, 'status': 'Submitted', 'take_profit_order_id': 102, 'stop_loss_order_id': 103},
         ) as submit_mock:
             results = execute_signal_plans(
                 signals,
@@ -567,8 +579,8 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
         }
 
         with patch(
-            'fx_sr.positions.ibkr.fetch_open_order_pairs',
-            return_value={'EURUSD'},
+            'fx_sr.positions.ibkr.fetch_open_order_counts',
+            return_value={'EURUSD': 2},
         ), patch(
             'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
         ) as submit_mock, patch(

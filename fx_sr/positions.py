@@ -56,6 +56,7 @@ def cancel_bracket_children(signal_id: str | None) -> set[int]:
     return order_ids
 
 
+
 def _cancel_orders_for_pairs(pairs: set[str]) -> None:
     """Cancel all working orders for the given pairs at IBKR."""
     with ibkr._IBKR_LOCK:
@@ -700,6 +701,10 @@ def _update_signal_bracket_ids(
         _replace_row_conn(conn, row)
 
 
+_BRACKET_RESUBMIT_FAILURES: dict[str, int] = {}
+_BRACKET_RESUBMIT_MAX_RETRIES = 3
+
+
 def _resubmit_missing_brackets(
     signal_row: dict | None,
     ibkr_size: float,
@@ -707,30 +712,48 @@ def _resubmit_missing_brackets(
     trade: 'Trade | None' = None,
     pair: str | None = None,
     direction: str | None = None,
-    open_order_pairs: set[str] | None = None,
+    open_order_counts: dict[str, int] | None = None,
 ) -> None:
     """Resubmit TP/SL bracket orders if the originals were lost (e.g. gateway restart).
 
-    Checks whether the pair still has working orders at IBKR.  If not,
-    and TP/SL prices are available (from signal or trade), submits new
-    TP limit + SL stop and updates the signal record with the new order IDs.
+    Checks whether the pair has both bracket legs (TP + SL) working at IBKR.
+    If not, cancels any orphan leg and submits a fresh OCA pair.
 
     Works with a signal row, a Trade object, or both.  Unlinked positions
     (no signal) use the trade's TP/SL prices directly.
 
-    *open_order_pairs* can be pre-fetched to avoid repeated API calls
-    when checking multiple positions in a loop.
+    *open_order_counts* maps pair → number of working orders, pre-fetched
+    to avoid repeated API calls when checking multiple positions.
     """
     pair = pair or (signal_row['pair'] if signal_row else None)
     direction = direction or (signal_row['direction'] if signal_row else None)
     if not pair or not direction:
         return
 
-    # Check if the pair still has working orders at IBKR
-    if open_order_pairs is None:
-        open_order_pairs = ibkr.fetch_open_order_pairs()
-    if pair in open_order_pairs:
-        return  # Brackets (or other orders) still live — nothing to do
+    # Check if the pair has BOTH bracket legs (TP + SL) working at IBKR.
+    # A single surviving leg (e.g. SL only after TP was rejected) means
+    # the position is only partially protected — cancel the orphan and
+    # resubmit both legs as a fresh OCA pair.
+    if open_order_counts is None:
+        open_order_counts = ibkr.fetch_open_order_counts()
+    order_count = open_order_counts.get(pair, 0)
+    if order_count >= 2:
+        _BRACKET_RESUBMIT_FAILURES.pop(pair, None)  # reset on success
+        return  # Both bracket legs present — nothing to do
+
+    # Guard against infinite resubmit loops — if IBKR keeps rejecting
+    # the bracket (e.g. stop order rejected), stop retrying after N attempts.
+    fail_count = _BRACKET_RESUBMIT_FAILURES.get(pair, 0)
+    if fail_count >= _BRACKET_RESUBMIT_MAX_RETRIES:
+        if fail_count == _BRACKET_RESUBMIT_MAX_RETRIES:
+            print(f"    {pair}: bracket resubmission failed {fail_count} times, "
+                  f"halting retries (position has NO bracket protection)")
+            _BRACKET_RESUBMIT_FAILURES[pair] = fail_count + 1  # suppress future messages
+        return
+
+    if order_count == 1:
+        print(f"    {pair}: only {order_count} bracket leg found, cancelling orphan and resubmitting both")
+        _cancel_orders_for_pairs({pair})
 
     # Resolve TP/SL prices: signal row first, then trade fallback
     tp_price = None
@@ -770,8 +793,13 @@ def _resubmit_missing_brackets(
         stop_loss_price=sl_price,
     )
     if result is None:
-        print(f"    Warning: bracket resubmission failed for {pair}")
+        _BRACKET_RESUBMIT_FAILURES[pair] = fail_count + 1
+        print(f"    Warning: bracket resubmission failed for {pair} "
+              f"(attempt {fail_count + 1}/{_BRACKET_RESUBMIT_MAX_RETRIES})")
         return
+
+    # Reset failure counter on success
+    _BRACKET_RESUBMIT_FAILURES.pop(pair, None)
 
     if signal_row is not None and signal_row.get('signal_id'):
         _update_signal_bracket_ids(
@@ -852,9 +880,10 @@ def sync_positions(
                 on_signal_closed(closed_row)
             del db_trades[key]
 
-    # Fetch open orders once for the entire sync cycle — used by bracket
-    # resubmission and orphaned order sweep.
-    open_order_pairs = ibkr.fetch_open_order_pairs()
+    # Fetch open order counts once for the entire sync cycle — used by
+    # bracket resubmission (needs count per pair) and orphaned order sweep.
+    open_order_counts = ibkr.fetch_open_order_counts()
+    open_order_pairs = set(open_order_counts.keys())
 
     for key, pos in ibkr_by_key.items():
         direction = 'LONG' if pos['size'] > 0 else 'SHORT'
@@ -918,7 +947,7 @@ def sync_positions(
             trade=trade,
             pair=pos['pair'],
             direction=direction,
-            open_order_pairs=open_order_pairs,
+            open_order_counts=open_order_counts,
         )
 
         signal_status = signal_row.get('status') if signal_row is not None else (

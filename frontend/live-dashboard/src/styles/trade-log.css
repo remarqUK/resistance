@@ -116,8 +116,34 @@ body::before {
   padding: 18px 0 6px;
 }
 
-.trade-log-chart-panel {
-  margin-top: 16px;
+/* Split layout: table left, chart right */
+.trade-log-split {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.trade-log-table-col {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  max-height: 80vh;
+}
+
+.trade-log-chart-col {
+  flex: 0 0 420px;
+  min-width: 420px;
+}
+
+.trade-log-chart-sticky {
+  position: sticky;
+  top: 12px;
+  border: 1px solid #ddd0c5;
+  border-radius: 8px;
+  background: #fffaf2;
+  min-height: 400px;
+  display: flex;
+  flex-direction: column;
 }
 
 .trade-log-chart-header {
@@ -125,19 +151,41 @@ body::before {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  margin-bottom: 10px;
+  padding: 10px 12px 6px;
+  border-bottom: 1px solid #eee4d8;
 }
 
 .trade-log-chart-header h2 {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 0.95rem;
 }
 
-.trade-log-chart-frame {
-  width: 100%;
-  min-height: 640px;
-  height: 640px;
-  border: 1px solid #ddd0c5;
-  border-radius: 8px;
-  background: #fff;
+.trade-log-chart-body {
+  flex: 1;
+  min-height: 340px;
+  height: 340px;
+}
+
+.trade-log-chart-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 12px 10px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  border-top: 1px solid #eee4d8;
+}
+
+@media (max-width: 1200px) {
+  .trade-log-split {
+    flex-direction: column;
+  }
+  .trade-log-chart-col {
+    flex: none;
+    min-width: 0;
+    width: 100%;
+  }
+  .trade-log-chart-sticky {
+    position: static;
+  }
 }

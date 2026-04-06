@@ -1,0 +1,9 @@
+[   20751ms] Error: Object is disposed
+    at e.get (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:67:3793)
+    at e.resizeCanvasElement (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:67:4287)
+    at Oy.Fm (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:72:125862)
+    at Iy.Pb (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:72:134282)
+    at Iy.ub (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:72:136331)
+    at Iy.Db (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:72:135900)
+    at Iy.mb (http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:72:135078)
+    at http://127.0.0.1:8765/static/react/assets/index-DOJskK2g.js:72:135804

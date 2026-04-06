@@ -328,7 +328,7 @@ class IbkrOrderRoundingTests(unittest.TestCase):
         contract = object()
         placed_orders = []
         ib = MagicMock()
-        ib.client.getReqId.side_effect = [15, 16, 17]
+        ib.client.getReqId.side_effect = [15, 16, 17, 18]
         ib.reqContractDetails.return_value = [types.SimpleNamespace(minTick=0.005)]
 
         def _place_order(_contract, order):
@@ -347,7 +347,8 @@ class IbkrOrderRoundingTests(unittest.TestCase):
 
         with patch.dict(sys.modules, {'ib_async': fake_ib_async}), \
                 patch('fx_sr.ibkr._get_connection', return_value=(ib, True)), \
-                patch('fx_sr.ibkr._make_contract', return_value=contract):
+                patch('fx_sr.ibkr._make_contract', return_value=contract), \
+                patch('fx_sr.ibkr.whatif_margin_check', return_value=None):
             result = ibkr.submit_fx_market_bracket_order(
                 pair='USDJPY',
                 direction='SHORT',
@@ -359,8 +360,9 @@ class IbkrOrderRoundingTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(len(placed_orders), 3)
-        self.assertAlmostEqual(placed_orders[1].lmtPrice, 159.105)
-        self.assertAlmostEqual(placed_orders[2].auxPrice, 159.69)
+        # Brackets-first: [0]=TP limit, [1]=SL stop, [2]=entry market
+        self.assertAlmostEqual(placed_orders[0].lmtPrice, 159.105)
+        self.assertAlmostEqual(placed_orders[1].auxPrice, 159.69)
         self.assertAlmostEqual(result['take_profit_price'], 159.105)
         self.assertAlmostEqual(result['stop_loss_price'], 159.69)
 
@@ -435,23 +437,23 @@ class SubmitBracketAuditTests(unittest.TestCase):
         mock_db_path.return_value = self.db_path
 
         ib = MagicMock()
-        ib.client.getReqId.side_effect = [100, 101, 102]
+        ib.client.getReqId.side_effect = [100, 200, 101, 102]
         mock_conn.return_value = (ib, True)
 
-        parent_trade = MagicMock()
-        parent_trade.orderStatus.status = 'Filled'
-        parent_trade.orderStatus.filled = 10000.0
-        parent_trade.orderStatus.remaining = 0.0
-        parent_trade.orderStatus.avgFillPrice = 1.145
-        parent_trade.order.orderId = 100
-        parent_trade.order.totalQuantity = 10000.0
+        entry_trade = MagicMock()
+        entry_trade.orderStatus.status = 'Filled'
+        entry_trade.orderStatus.filled = 10000.0
+        entry_trade.orderStatus.remaining = 0.0
+        entry_trade.orderStatus.avgFillPrice = 1.145
+        entry_trade.order.orderId = 100
+        entry_trade.order.totalQuantity = 10000.0
 
         tp_trade = MagicMock()
         tp_trade.order.orderId = 101
         sl_trade = MagicMock()
         sl_trade.order.orderId = 102
 
-        ib.placeOrder.side_effect = [parent_trade, tp_trade, sl_trade]
+        ib.placeOrder.side_effect = [entry_trade, tp_trade, sl_trade]
 
         from fx_sr.ibkr import submit_fx_market_bracket_order
         result = submit_fx_market_bracket_order(
@@ -467,7 +469,8 @@ class SubmitBracketAuditTests(unittest.TestCase):
                 "FROM order_audit_log LIMIT 1"
             ).fetchone()
             self.assertIsNotNone(row, "Expected an audit log row")
-            self.assertEqual(row[0], 'submit')
+            # Brackets-first: first logged event is the bracket placement
+            self.assertEqual(row[0], 'submit_bracket')
             self.assertEqual(row[1], 'EURUSD')
             self.assertEqual(row[2], 'LONG')
             self.assertIsNone(row[5])  # no error
@@ -642,6 +645,7 @@ class OrphanSweepAuditTests(unittest.TestCase):
         ibkr_positions = [{'pair': 'USDJPY', 'size': 10000, 'avg_cost': 150.0}]
         mock_ibkr.fetch_positions.return_value = ibkr_positions
         # One open order pair on CHFJPY — orphaned (no position)
+        mock_ibkr.fetch_open_order_counts.return_value = {'CHFJPY': 1}
         mock_ibkr.fetch_open_order_pairs.return_value = {'CHFJPY'}
 
         # Existing DB trade matching the USDJPY:LONG position (no size change)

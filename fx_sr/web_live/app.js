@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   summary: {},
   pairs: {},
   signals: [],
@@ -50,6 +50,7 @@ const els = {
   logList: document.getElementById("log-list"),
 };
 const PRICE_DISPLAY_DECIMALS = 5;
+const EXECUTION_CHART_DECIMALS = 4;
 const FILL_ENDPOINT_PATHS = [
   "/api/fill",
   "/api/fill/",
@@ -194,7 +195,7 @@ function escapeHtml(value) {
 
 function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
+    return "â€“";
   }
   return Number(value).toLocaleString(undefined, {
     minimumFractionDigits: digits,
@@ -204,7 +205,7 @@ function formatNumber(value, digits = PRICE_DISPLAY_DECIMALS) {
 
 function formatSigned(value, digits = 1, suffix = "") {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
+    return "â€“";
   }
   const number = Number(value);
   const prefix = number > 0 ? "+" : "";
@@ -335,11 +336,11 @@ function renderTransactionCountdown() {
 
 function formatTimestamp(isoString) {
   if (!isoString) {
-    return "–";
+    return "â€“";
   }
   const date = new Date(isoString);
   if (Number.isNaN(date.getTime())) {
-    return "–";
+    return "â€“";
   }
   return date.toLocaleString([], {
     year: "numeric",
@@ -354,11 +355,11 @@ function formatTimestamp(isoString) {
 
 function formatDateOnly(isoString) {
   if (!isoString) {
-    return "–";
+    return "â€“";
   }
   const date = new Date(isoString);
   if (Number.isNaN(date.getTime())) {
-    return "–";
+    return "â€“";
   }
   return date.toLocaleDateString([], {
     year: "numeric",
@@ -399,13 +400,13 @@ function destroySelectedExecutionChart() {
 
 function formatExecutionPrice(value, execution) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "–";
+    return "â€“";
   }
-  const digits = execution?.pair?.includes("JPY") ? 3 : PRICE_DISPLAY_DECIMALS;
+  const digits = EXECUTION_CHART_DECIMALS;
   return formatNumber(value, digits);
 }
 
-function createExecutionPriceLine(price, color, title) {
+function createExecutionPriceLine(price, color, title, lineStyle = LightweightCharts.LineStyle.Dashed) {
   if (!selectedExecutionSeries || price === null || price === undefined || Number.isNaN(Number(price))) {
     return;
   }
@@ -413,7 +414,7 @@ function createExecutionPriceLine(price, color, title) {
     price: Number(price),
     color,
     lineWidth: 2,
-    lineStyle: LightweightCharts.LineStyle.Dashed,
+    lineStyle: lineStyle,
     axisLabelVisible: true,
     title,
   });
@@ -439,7 +440,7 @@ async function renderSelectedExecutionChart() {
     return;
   }
 
-  statusEl.textContent = `Loading ${execution.pair} ${replayDate}…`;
+  statusEl.textContent = `Loading ${execution.pair} ${replayDate}â€¦`;
     const startIso = `${replayDate}T00:00:00Z`;
     const endIso = `${replayDate}T23:59:59Z`;
 
@@ -469,7 +470,7 @@ async function renderSelectedExecutionChart() {
       return;
     }
 
-    const executionDecimals = execution?.pair?.includes("JPY") ? 3 : PRICE_DISPLAY_DECIMALS;
+    const executionDecimals = EXECUTION_CHART_DECIMALS;
     const chartState = window.fxChartCore.createStandardChart(chartEl, {
       decimals: executionDecimals,
       chartOptions: {
@@ -498,9 +499,11 @@ async function renderSelectedExecutionChart() {
     selectedExecutionSeries.setData(bars);
     selectedExecutionChart.timeScale().fitContent();
 
+    window.fxChartCore.addZoneLines(selectedExecutionSeries, data.support, data.resistance, executionDecimals);
+
     createExecutionPriceLine(execution.submitted_entry_price, "#456b8c", "Entry");
-    createExecutionPriceLine(execution.submitted_sl_price, "#b23b29", "SL");
-    createExecutionPriceLine(execution.submitted_tp_price, "#1f7a49", "TP");
+    createExecutionPriceLine(execution.submitted_sl_price, "#b23b29", "SL", LightweightCharts.LineStyle.Dotted);
+    createExecutionPriceLine(execution.submitted_tp_price, "#1f7a49", "TP", LightweightCharts.LineStyle.Dotted);
 
     statusEl.textContent = `${execution.pair} replay for ${replayDate}`;
   } catch (error) {
@@ -514,7 +517,7 @@ function badgeClass(value) {
 }
 
 function renderBadge(value, label = value) {
-  return `<span class="${badgeClass(value)}">${escapeHtml(label || "–")}</span>`;
+  return `<span class="${badgeClass(value)}">${escapeHtml(label || "â€“")}</span>`;
 }
 
 function levelTone(level) {
@@ -535,7 +538,7 @@ function formatBacktestButtonText(backtest) {
       const pct = total > 0 ? Math.round((processed / total) * 100) : 0;
       return `Re-running ${processed}/${total} (${pct}%)`;
     }
-    return "Starting…";
+    return "Startingâ€¦";
   }
   if (status === "running") {
     const total = Number(backtest.items_requested || 0);
@@ -682,13 +685,13 @@ function renderSummary() {
   const modeLabel = summary.execution_mode_label
     || (summary.execution_mode === "intrabar" ? "Intrabar (minute bars)" : "Next-bar (completed hourly)");
   if (isBackfilling) {
-    els.executionMode.textContent = `${modeLabel} · Trading paused (backfilling)`;
+    els.executionMode.textContent = `${modeLabel} Â· Trading paused (backfilling)`;
   } else if (summary.execution_available && summary.execution_paused) {
-    els.executionMode.textContent = `${modeLabel} · Execution paused`;
+    els.executionMode.textContent = `${modeLabel} Â· Execution paused`;
   } else {
     els.executionMode.textContent = summary.execution_enabled
-      ? `${modeLabel} · Paper execution enabled`
-      : `${modeLabel} · Scan only`;
+      ? `${modeLabel} Â· Paper execution enabled`
+      : `${modeLabel} Â· Scan only`;
   }
 
   if (els.tradeToggleBtn) {
@@ -708,7 +711,7 @@ function renderSummary() {
   // Balance display
   if (summary.balance != null && summary.account_currency) {
     const bal = Number(summary.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    const risk = summary.risk_pct != null ? ` · ${Number(summary.risk_pct).toFixed(1)}% risk` : "";
+    const risk = summary.risk_pct != null ? ` Â· ${Number(summary.risk_pct).toFixed(1)}% risk` : "";
     if (els.sizingSummary) {
       els.sizingSummary.textContent = `${summary.account_currency} ${bal}${risk}`;
     }
@@ -719,7 +722,7 @@ function renderSummary() {
   }
 
   if (els.strategyLabel) {
-    els.strategyLabel.textContent = `${summary.strategy_label || "Strategy"} · ${summary.mode || "scanner"}`;
+    els.strategyLabel.textContent = `${summary.strategy_label || "Strategy"} Â· ${summary.mode || "scanner"}`;
   }
 
   // Connection pill
@@ -774,7 +777,7 @@ function renderScanProgress() {
   if (summary.status === "backfilling" && backfill.phase && backfill.phase !== "done") {
     const phase = backfill.phase === "zones" ? "Loading zones" : backfill.phase === "hourly" ? "Loading hourly" : "Scanning";
     const pct = backfill.total > 0 ? Math.round((backfill.completed / backfill.total) * 100) : 0;
-    const current = backfill.current_pair ? ` · ${backfill.current_pair}` : "";
+    const current = backfill.current_pair ? ` Â· ${backfill.current_pair}` : "";
     els.scanProgress.textContent = `${phase}: ${backfill.completed}/${backfill.total} (${pct}%)${current}`;
     return;
   }
@@ -824,7 +827,7 @@ function renderWatchlist() {
   els.watchlistBody.innerHTML = rows.map((row) => {
     const signal = row.signal;
     const setupText = signal
-      ? `${signal.zone_type} · ${signal.zone_strength}`
+      ? `${signal.zone_type} Â· ${signal.zone_strength}`
       : row.note || "No setup";
     const direction = signal?.direction || row.state;
     const sNear = row.support_dist_pct != null && row.support_dist_pct <= NEAR_THRESHOLD;
@@ -834,10 +837,10 @@ function renderWatchlist() {
         <td><a href="/live-trade?pair=${encodeURIComponent(row.pair)}" target="_blank" class="pair-main pair-link" title="Live chart ${escapeHtml(row.pair)}">${escapeHtml(row.pair)}</a></td>
         <td>${renderBadge(row.state)}</td>
         <td class="price">${formatNumber(row.price, PRICE_DISPLAY_DECIMALS)}</td>
-        <td class="price${sNear ? " zone-near" : ""}">${escapeHtml(row.support_text || "–")}</td>
-        <td class="price${rNear ? " zone-near" : ""}">${escapeHtml(row.resistance_text || "–")}</td>
+        <td class="price${sNear ? " zone-near" : ""}">${escapeHtml(row.support_text || "â€“")}</td>
+        <td class="price${rNear ? " zone-near" : ""}">${escapeHtml(row.resistance_text || "â€“")}</td>
         <td>${escapeHtml(setupText)}</td>
-        <td>${signal ? renderBadge(direction) : '<span class="pair-sub">–</span>'}</td>
+        <td>${signal ? renderBadge(direction) : '<span class="pair-sub">â€“</span>'}</td>
       </tr>
     `;
   }).join("");
@@ -856,7 +859,7 @@ function renderSignals() {
         <div class="signal-head">
           <div>
             <strong>${escapeHtml(signal.pair)}</strong>
-            <span class="pair-sub">${escapeHtml(signal.zone_type || "setup")} · ${escapeHtml(signal.zone_strength || "–")}</span>
+            <span class="pair-sub">${escapeHtml(signal.zone_type || "setup")} Â· ${escapeHtml(signal.zone_strength || "â€“")}</span>
           </div>
           ${renderBadge(signal.direction)}
         </div>
@@ -864,9 +867,9 @@ function renderSignals() {
           <div><span class="value-label">Entry</span><span class="value">${formatNumber(signal.entry_price, PRICE_DISPLAY_DECIMALS)}</span></div>
           <div><span class="value-label">Stop</span><span class="value">${formatNumber(signal.sl_price, PRICE_DISPLAY_DECIMALS)}</span></div>
           <div><span class="value-label">Target</span><span class="value">${formatNumber(signal.tp_price, PRICE_DISPLAY_DECIMALS)}</span></div>
-          <div><span class="value-label">Units</span><span class="value">${plan.units ? Number(plan.units).toLocaleString() : "–"}</span></div>
-          <div><span class="value-label">Risk</span><span class="value">${plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${escapeHtml(plan.account_currency || "")}` : "–"}</span></div>
-          <div><span class="value-label">Notional</span><span class="value">${plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${escapeHtml(plan.account_currency || "")}` : "–"}</span></div>
+          <div><span class="value-label">Units</span><span class="value">${plan.units ? Number(plan.units).toLocaleString() : "â€“"}</span></div>
+          <div><span class="value-label">Risk</span><span class="value">${plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${escapeHtml(plan.account_currency || "")}` : "â€“"}</span></div>
+          <div><span class="value-label">Notional</span><span class="value">${plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${escapeHtml(plan.account_currency || "")}` : "â€“"}</span></div>
           <div><span class="value-label">Arrived</span><span class="value">${formatTimestamp(signal.arrived_at)}</span></div>
           <div><span class="value-label">Last valid</span><span class="value">${formatTimestamp(signal.last_valid_at)}</span></div>
         </div>
@@ -882,6 +885,27 @@ function renderPositions() {
   }
 
   els.positionsList.innerHTML = state.positions.map((position) => {
+    const chartParams = new URLSearchParams();
+    chartParams.set("pair", String(position.pair || "").toUpperCase());
+    if (position.signal_id) {
+      chartParams.set("signal_id", String(position.signal_id));
+    }
+    if (position.direction) {
+      chartParams.set("direction", String(position.direction).toUpperCase());
+    }
+    if (position.entry_price != null) {
+      chartParams.set("entry_price", String(position.entry_price));
+    }
+    if (position.entry_time) {
+      chartParams.set("entry_time", String(position.entry_time));
+    }
+    if (position.sl_price != null) {
+      chartParams.set("sl", String(position.sl_price));
+    }
+    if (position.tp_price != null) {
+      chartParams.set("tp", String(position.tp_price));
+    }
+    const chartQuery = chartParams.toString();
     const pnlClass = Number(position.pnl_pips || 0) >= 0 ? "up" : "down";
     return `
       <article class="position-card">
@@ -897,6 +921,9 @@ function renderPositions() {
         <div><span class="value-label">Current</span><span class="value">${formatNumber(position.current_price, PRICE_DISPLAY_DECIMALS)}</span></div>
           <div><span class="value-label">Direction</span><span class="value">${escapeHtml(position.direction)}</span></div>
           <div><span class="value-label">P/L</span><span class="value ${pnlClass}">${formatSigned(position.pnl_pips, 1, " pips")}</span></div>
+        </div>
+        <div style="margin-top: 6px">
+          <a href="/live-trade?${chartQuery}" target="_blank" class="pair-link" title="Open trade chart">View chart</a>
         </div>
       </article>
     `;
@@ -941,22 +968,22 @@ function renderExecutions() {
       <div class="mini-head">
         <div>
           <strong>${escapeHtml(execution.pair)}</strong>
-          <span class="pair-sub">${escapeHtml(execution.direction)} · ${Number(execution.units || 0).toLocaleString()} units</span>
+          <span class="pair-sub">${escapeHtml(execution.direction)} Â· ${Number(execution.units || 0).toLocaleString()} units</span>
         </div>
         ${renderBadge(execution.status)}
       </div>
       <div class="mini-meta">
-        <div><span class="value-label">When / Order</span><span class="value">${escapeHtml(formatTimestamp(execution.time))} · #${escapeHtml(execution.order_id || "–")}</span></div>
-        <div><span class="value-label">Note</span><span class="value">${escapeHtml(execution.note || "–")}</span></div>
+        <div><span class="value-label">When / Order</span><span class="value">${escapeHtml(formatTimestamp(execution.time))} Â· #${escapeHtml(execution.order_id || "â€“")}</span></div>
+        <div><span class="value-label">Note</span><span class="value">${escapeHtml(execution.note || "â€“")}</span></div>
       </div>
       ${isSelected ? `
       <div class="mini-detail">
-        <div><span class="value-label">Ticker</span><span class="value">${escapeHtml(execution.pair || "–")}</span></div>
+        <div><span class="value-label">Ticker</span><span class="value">${escapeHtml(execution.pair || "â€“")}</span></div>
         <div><span class="value-label">Date</span><span class="value">${escapeHtml(formatDateOnly(execution.time))}</span></div>
         <div><span class="value-label">Entry</span><span class="value">${escapeHtml(formatExecutionPrice(execution.submitted_entry_price, execution))}</span></div>
         <div><span class="value-label">SL / TP</span><span class="value">${escapeHtml(formatExecutionPrice(execution.submitted_sl_price, execution))} / ${escapeHtml(formatExecutionPrice(execution.submitted_tp_price, execution))}</span></div>
         <div class="mini-detail-wide">
-          <div id="selected-execution-chart-status" class="chart-status">Loading replay…</div>
+          <div id="selected-execution-chart-status" class="chart-status">Loading replayâ€¦</div>
           <div id="selected-execution-chart" class="execution-mini-chart"></div>
         </div>
       </div>
@@ -1221,6 +1248,7 @@ if (rerunBacktestBtn) {
 updateRerunBacktestButton();
 
 connect();
+
 
 
 

@@ -542,6 +542,9 @@ def _build_strategy_params(args) -> StrategyParams:
         overrides['blocked_days'] = args.blocked_days
     if getattr(args, 'no_margin', False):
         overrides['enforce_margin'] = False
+    if getattr(args, 'no_l2', False):
+        overrides['strict_backtest_execution'] = False
+        overrides['prefer_l2_submit_quote'] = False
 
     return params_from_profile(profile, **overrides)
 
@@ -1577,7 +1580,7 @@ def main():
         '  python run.py l2 --pair EURUSD --once\n'
         '  python run.py l2 --pair EURUSD --seconds 300 --interval 1\n'
         '  python run.py live --profile aggressive --once\n'
-        '  python run.py live --port 8765\n\n'
+        '  python run.py live --port 7755\n\n'
         'Profiles (edit fx_sr/profiles.py to add/modify):\n'
         f'{profile_lines}'
     )
@@ -1707,6 +1710,11 @@ def main():
         action='store_true',
         help='Disable margin and minimum-size checks in backtest (compare against realistic defaults)',
     )
+    bt.add_argument(
+        '--no-l2',
+        action='store_true',
+        help='Run without L2 order-book data — use minute/hourly fallback for execution quotes',
+    )
 
     lv = subparsers.add_parser('live', help='Monitor live data for zone opportunities')
     lv.add_argument('--pair', type=str, help='Specific pair to monitor')
@@ -1747,8 +1755,8 @@ def main():
     lv.add_argument(
         '--port',
         type=int,
-        default=8765,
-        help='Local dashboard server port (default: 8765)',
+        default=7755,
+        help='Local dashboard server port (default: 7755)',
     )
     lv.add_argument(
         '--no-browser',
@@ -1805,7 +1813,7 @@ def main():
         help='Days of hourly data for backtest (default: 365)',
     )
     _add_ibkr_args(vz)
-    vz.add_argument('--port', type=int, default=8080, help='Local server port (default: 8080)')
+    vz.add_argument('--port', type=int, default=7755, help='Local server port (default: 7755)')
     vz.add_argument(
         '--refresh',
         action='store_true',

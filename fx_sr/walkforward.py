@@ -18,6 +18,7 @@ from .strategy import (
     Trade,
     build_trade_from_signal,
     check_exit,
+    check_price_exit,
     get_market_exit_price,
     get_tradeable_zones,
     select_entry_signal,
@@ -26,6 +27,61 @@ from .intrabar import find_intrabar_signal, intrabar_execution_time
 
 
 _LOGS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+
+
+def _check_exit_minute_resolution(
+    trade: Trade,
+    minute_df: pd.DataFrame | None,
+    hourly_time: pd.Timestamp,
+    bars_held: int,
+    params: StrategyParams,
+    pip: float,
+) -> Optional[tuple[str, float, pd.Timestamp]]:
+    """Check TP/SL using minute OHLC within the hourly bar's window.
+
+    Iterates each minute bar chronologically; the first minute that triggers
+    a TP or SL wins.  This eliminates the "both hit same bar → SL wins"
+    pessimism of hourly-only evaluation.
+
+    Non-price exits (FRIDAY, EARLY_EXIT, SIDEWAYS, TIME) are NOT checked
+    here — they remain evaluated at hourly granularity by the caller.
+
+    Returns (exit_reason, exit_price, exit_time) or None.
+    """
+    if minute_df is None or minute_df.empty:
+        return None
+
+    # Slice minute bars belonging to this hourly candle
+    bar_start = hourly_time
+    bar_end = hourly_time + pd.Timedelta(hours=1)
+    mask = (minute_df.index >= bar_start) & (minute_df.index < bar_end)
+    window = minute_df.loc[mask]
+    if window.empty:
+        return None
+
+    for ts, mrow in window.iterrows():
+        high = float(mrow['High'])
+        low = float(mrow['Low'])
+        close = float(mrow['Close'])
+
+        # Update best favorable price per minute bar
+        if trade.direction == 'LONG':
+            if trade.best_favorable_price is None or high > trade.best_favorable_price:
+                trade.best_favorable_price = high
+        else:
+            if trade.best_favorable_price is None or low < trade.best_favorable_price:
+                trade.best_favorable_price = low
+
+        result = check_price_exit(
+            trade, high, low, close,
+            params=params, pip=pip,
+            bar_time=ts, bars_held=bars_held,
+            allow_friday=False, allow_sideways=False, allow_time=False,
+        )
+        if result:
+            return (result[0], result[1], ts)
+
+    return None
 
 
 def _zone_snapshot(zone: SRZone | None) -> dict | None:
@@ -292,32 +348,47 @@ def run_walk_forward(
         exit_trade: Optional[Trade] = None
 
         if current_trade is not None:
-            # Track best favorable price for break-even stop logic
-            if current_trade.direction == 'LONG':
-                bar_best = float(row['High'])
-                if current_trade.best_favorable_price is None or bar_best > current_trade.best_favorable_price:
-                    current_trade.best_favorable_price = bar_best
-            else:
-                bar_best = float(row['Low'])
-                if current_trade.best_favorable_price is None or bar_best < current_trade.best_favorable_price:
-                    current_trade.best_favorable_price = bar_best
-
             bars_held = i - trade_entry_bar
-            result = check_exit(
-                current_trade,
-                bar_high=row['High'],
-                bar_low=row['Low'],
-                bar_close=row['Close'],
-                bar_time=current_time,
-                bars_held=bars_held,
-                params=params,
-                pip=pip,
+
+            # --- Minute-resolution TP/SL check ---
+            # best_favorable_price is updated inside the helper per minute bar.
+            minute_result = _check_exit_minute_resolution(
+                current_trade, minute_df, current_time, bars_held, params, pip,
             )
-            if result:
-                exit_reason, exit_price = result
+            if minute_result:
+                exit_reason, exit_price, exit_time = minute_result
+            else:
+                # Ensure best_favorable_price reflects the hourly bar even
+                # when no minute data was available (fallback path).
+                if current_trade.direction == 'LONG':
+                    bar_best = float(row['High'])
+                    if current_trade.best_favorable_price is None or bar_best > current_trade.best_favorable_price:
+                        current_trade.best_favorable_price = bar_best
+                else:
+                    bar_best = float(row['Low'])
+                    if current_trade.best_favorable_price is None or bar_best < current_trade.best_favorable_price:
+                        current_trade.best_favorable_price = bar_best
+
+                exit_time = current_time
+                result = check_exit(
+                    current_trade,
+                    bar_high=row['High'],
+                    bar_low=row['Low'],
+                    bar_close=row['Close'],
+                    bar_time=current_time,
+                    bars_held=bars_held,
+                    params=params,
+                    pip=pip,
+                )
+                if result:
+                    exit_reason, exit_price = result
+                else:
+                    exit_reason = None
+
+            if exit_reason is not None:
                 exit_trade = finalize_trade(
                     current_trade,
-                    current_time,
+                    exit_time,
                     exit_price,
                     exit_reason,
                     bars_held,
@@ -327,7 +398,7 @@ def run_walk_forward(
                 if _snap:
                     _write_trade_snapshot(
                         source=snapshot_source, event='exit', pair=pair,
-                        timestamp=current_time, signal=None, trade=exit_trade,
+                        timestamp=exit_time, signal=None, trade=exit_trade,
                         bar_index=i, bar_time=current_time, bar_row=row,
                         bars_held=bars_held, nearest_support=nearest_support,
                         nearest_resistance=nearest_resistance,
@@ -414,21 +485,32 @@ def run_walk_forward(
                     )
 
         if opened_trade is not None:
-            result = check_exit(
-                opened_trade,
-                bar_high=row['High'],
-                bar_low=row['Low'],
-                bar_close=row['Close'],
-                bar_time=current_time,
-                bars_held=0,
-                params=params,
-                pip=pip,
+            minute_result = _check_exit_minute_resolution(
+                opened_trade, minute_df, current_time, 0, params, pip,
             )
-            if result:
-                exit_reason, exit_price = result
+            if minute_result:
+                exit_reason, exit_price, exit_time = minute_result
+            else:
+                exit_time = current_time
+                result = check_exit(
+                    opened_trade,
+                    bar_high=row['High'],
+                    bar_low=row['Low'],
+                    bar_close=row['Close'],
+                    bar_time=current_time,
+                    bars_held=0,
+                    params=params,
+                    pip=pip,
+                )
+                if result:
+                    exit_reason, exit_price = result
+                else:
+                    exit_reason = None
+
+            if exit_reason is not None:
                 exit_trade = finalize_trade(
                     opened_trade,
-                    current_time,
+                    exit_time,
                     exit_price,
                     exit_reason,
                     0,
@@ -438,7 +520,7 @@ def run_walk_forward(
                 if _snap:
                     _write_trade_snapshot(
                         source=snapshot_source, event='exit', pair=pair,
-                        timestamp=current_time, signal=None, trade=exit_trade,
+                        timestamp=exit_time, signal=None, trade=exit_trade,
                         bar_index=i, bar_time=current_time, bar_row=row,
                         bars_held=0, nearest_support=nearest_support,
                         nearest_resistance=nearest_resistance,

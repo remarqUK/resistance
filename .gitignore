@@ -5,6 +5,7 @@ __pycache__/
 
 # Local Codex/Claude workspace state
 .claude/
+.playwright-mcp/
 
 # Generated strategy artifacts
 fx_data.db

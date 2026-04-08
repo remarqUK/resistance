@@ -1854,6 +1854,141 @@ def submit_fx_market_order(
             return None
 
 
+def neutralize_currency_balance(
+    currency: str,
+    amount: float,
+    account_currency: str = 'GBP',
+) -> Optional[dict]:
+    """Submit a market FX order to neutralize a residual currency balance.
+
+    Uses a CASH contract with symbol=currency, currency=account_currency so
+    the quantity is expressed in the residual currency directly.  A positive
+    amount means we hold excess currency and need to SELL it; negative means
+    we owe it and need to BUY.
+    """
+
+    if abs(amount) < 1:
+        return None
+
+    quantity = int(abs(amount))
+    action = 'SELL' if amount > 0 else 'BUY'
+    order_ref = f'fxsr:neutralize:{currency}:{int(time.time() * 1000)}'
+
+    _audit_start = time.monotonic()
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            log_order_event(
+                function_name='neutralize_currency_balance',
+                pair=f'{currency}{account_currency}',
+                direction=action,
+                action='submit',
+                request_data={'currency': currency, 'amount': amount, 'quantity': quantity},
+                error='Not connected',
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
+            return None
+
+        try:
+            from ib_async import Contract, MarketOrder
+
+            # Try FXCONV first (pure cash conversion, no position created).
+            # Fall back to IDEALPRO + immediate close if FXCONV unavailable
+            # (e.g. paper trading accounts).
+            from ib_async import Forex
+            attempts = [
+                (f'{account_currency.upper()}{currency.upper()}',
+                 'BUY' if amount > 0 else 'SELL'),
+                (f'{currency.upper()}{account_currency.upper()}', action),
+            ]
+
+            # Phase 1: try FXCONV
+            contract = None
+            for pair, try_action in attempts:
+                c = Contract(
+                    secType='CASH', symbol=pair[:3], currency=pair[3:],
+                    exchange='FXCONV',
+                )
+                if ib.qualifyContracts(c) and c.conId > 0:
+                    contract = c
+                    action = try_action
+                    break
+
+            # Phase 2: fall back to IDEALPRO (Forex) if FXCONV not available.
+            # IDEALPRO creates a "Virtual FX Position" but the cash converts.
+            if contract is None:
+                for pair, try_action in attempts:
+                    c = Forex(pair)
+                    if ib.qualifyContracts(c) and c.conId > 0:
+                        contract = c
+                        action = try_action
+                        break
+
+            if contract is None:
+                log_order_event(
+                    function_name='neutralize_currency_balance',
+                    pair=f'{currency}{account_currency}',
+                    direction=action,
+                    action='submit',
+                    request_data={'currency': currency, 'amount': amount, 'quantity': quantity},
+                    error='Contract qualification failed',
+                    duration_ms=(time.monotonic() - _audit_start) * 1000,
+                )
+                return None
+
+            # Submit the conversion order.  IDEALPRO creates a "Virtual FX
+            # Position" but the underlying cash balances DO convert.  We do
+            # NOT close the virtual position — closing it would reverse the
+            # cash conversion.  The virtual position is cosmetic.
+            order = MarketOrder(action, 0, orderRef=order_ref)
+            order.cashQty = quantity
+            trade = ib.placeOrder(contract, order)
+            if hasattr(ib, 'sleep'):
+                ib.sleep(3)
+
+            live_order = getattr(trade, 'order', None)
+            order_status = getattr(trade, 'orderStatus', None)
+            fill_status = getattr(order_status, 'status', None) or ''
+
+            log_order_event(
+                function_name='neutralize_currency_balance',
+                pair=f'{currency}{account_currency}',
+                direction=action,
+                action='submit',
+                request_data={'currency': currency, 'amount': amount, 'quantity': quantity},
+                response_data={
+                    'order_id': getattr(live_order, 'orderId', None),
+                    'status': fill_status,
+                    'avg_fill_price': getattr(order_status, 'avgFillPrice', None),
+                    'exchange': contract.exchange,
+                },
+                order_ids=[getattr(live_order, 'orderId', None)],
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
+            return {
+                'currency': currency,
+                'action': action,
+                'quantity': quantity,
+                'order_id': getattr(live_order, 'orderId', None),
+                'status': fill_status,
+                'avg_fill_price': getattr(order_status, 'avgFillPrice', None),
+                'exchange': contract.exchange,
+            }
+        except Exception as e:
+            print(f"    Warning: failed to neutralize {currency} balance: {e}")
+            log_order_event(
+                function_name='neutralize_currency_balance',
+                pair=f'{currency}{account_currency}',
+                direction=action,
+                action='submit',
+                request_data={'currency': currency, 'amount': amount, 'quantity': quantity},
+                error=str(e),
+                duration_ms=(time.monotonic() - _audit_start) * 1000,
+            )
+            return None
+
+
 def submit_fx_market_bracket_order(
     pair: str,
     direction: str,

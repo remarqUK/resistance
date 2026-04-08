@@ -4,6 +4,7 @@
 import argparse
 from dataclasses import replace
 import os
+import uuid
 import sys
 import time
 
@@ -77,6 +78,18 @@ def _requested_profile_name(args) -> str | None:
     """Return the requested profile/preset name from argparse or tests."""
 
     return getattr(args, 'profile', None) or getattr(args, 'preset', None)
+
+
+def _normalize_execution_mode(mode: str | None, *, context: str) -> str:
+    """Force execution mode to intrabar; fail fast for anything else."""
+
+    resolved = mode or 'intrabar'
+    if resolved != 'intrabar':
+        raise SystemExit(
+            f"  Unsupported execution mode for {context}: {resolved!r}. "
+            "Only 'intrabar' is supported."
+        )
+    return 'intrabar'
 
 
 def _build_backtest_run_config(
@@ -314,8 +327,10 @@ def _run_backtests_until_target(
     zone_days: int,
     active_client_id: int,
     hourly_days: int,
+    run_id: str | None = None,
     execution_mode: str = 'intrabar',
     fetch_workers: int | None = None,
+    backtest_workers: int | None = None,
     allow_stale_cache: bool = False,
 ) -> tuple[
     dict[str, object],
@@ -345,6 +360,7 @@ def _run_backtests_until_target(
     attempt_logs: list[dict[str, float | int | str]] = []
 
     for idx, (label, attempt_params) in enumerate(attempts, 1):
+        attempt_run_id = f'{run_id}:{idx:02d}' if run_id else f'run-{idx:02d}'
         print(
             f'\n  Attempt {idx}/{len(attempts)}: {label}'
             f' | corr={attempt_params.max_correlated_trades}, body={attempt_params.min_entry_candle_body_pct}, '
@@ -369,12 +385,14 @@ def _run_backtests_until_target(
             hourly_days=hourly_days,
             zone_history_days=zone_days,
             pairs=pairs,
+            run_id=attempt_run_id,
             force_refresh=force_refresh,
             base_client_id=active_client_id,
             run_config_json=run_config_json,
             debug=bool(getattr(args, 'backtest_debug', False)),
             execution_mode=execution_mode,
             fetch_workers=fetch_workers,
+            backtest_workers=backtest_workers,
             allow_stale_cache=allow_stale_cache,
         )
         elapsed = time.time() - t0
@@ -540,6 +558,8 @@ def _build_strategy_params(args) -> StrategyParams:
         overrides['blocked_hours'] = args.blocked_hours
     if getattr(args, 'blocked_days', None) is not None:
         overrides['blocked_days'] = args.blocked_days
+    if getattr(args, 'max_sl_pct', None) is not None:
+        overrides['max_sl_pct'] = args.max_sl_pct
     if getattr(args, 'no_margin', False):
         overrides['enforce_margin'] = False
     if getattr(args, 'no_l2', False):
@@ -662,6 +682,12 @@ def _add_strategy_args(parser):
             'Pass no values to clear the block list.'
         ),
     )
+    parser.add_argument(
+        '--max-sl-pct',
+        type=float,
+        default=None,
+        help='Skip signals where SL distance exceeds this %% of entry price (0 = disabled)',
+    )
 
 
 def _add_risk_sizing_args(
@@ -719,23 +745,26 @@ def cmd_backtest(args):
     params = _build_strategy_params(args)
     pairs = _resolve_pairs(args.pair)
     # Use profile zone-history by default, unless explicitly overridden on CLI.
-    zone_days = (
-        profile.get('zone_history_days', DEFAULT_ZONE_HISTORY_DAYS)
-        if args.zone_history is None
-        else args.zone_history
-    )
+    if args.zone_history is None:
+        args.zone_history = 180
+    zone_days = args.zone_history
     if args.days is None:
-        args.days = profile.get('hourly_days', 30)
+        args.days = 365
     # Use profile defaults for balance/risk-pct if not overridden on CLI
     if args.balance is None:
         args.balance = profile.get('starting_balance', None)
     if args.risk_pct is None:
         args.risk_pct = profile.get('risk_pct', 5.0)
-    execution_mode = getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar')
+    execution_mode = _normalize_execution_mode(
+        getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar'),
+        context='backtest',
+    )
+    run_id = uuid.uuid4().hex
 
     profile_name = _requested_profile_name(args)
     print(f"\n  IBKR client ID: {active_client_id}")
     print(f"  Strategy profile: {_format_preset_label(profile_name)}")
+    print(f"  Backtest run ID: {run_id}")
     print(f"  Active params: {_format_param_summary(params)}")
     print(
         f"  Backtest: {len(pairs)} pair(s), {args.days} days hourly, "
@@ -764,7 +793,9 @@ def cmd_backtest(args):
             active_client_id=active_client_id,
             hourly_days=args.days,
             execution_mode=execution_mode,
+            run_id=run_id,
             fetch_workers=getattr(args, 'fetch_workers', None),
+            backtest_workers=getattr(args, 'backtest_workers', None),
             allow_stale_cache=getattr(args, 'allow_stale_cache', False),
         )
     else:
@@ -784,11 +815,13 @@ def cmd_backtest(args):
             zone_history_days=zone_days,
             pairs=pairs,
             force_refresh=args.no_cache,
+            run_id=run_id,
             base_client_id=active_client_id,
             run_config_json=run_config_json,
             execution_mode=execution_mode,
             debug=bool(getattr(args, 'backtest_debug', False)),
             fetch_workers=getattr(args, 'fetch_workers', None),
+            backtest_workers=getattr(args, 'backtest_workers', None),
             allow_stale_cache=getattr(args, 'allow_stale_cache', False),
         )
         attempt_logs: list[dict[str, float | int | str]] = []
@@ -1414,7 +1447,10 @@ def cmd_live(args):
     zone_days = args.zone_history
     profile_name = _requested_profile_name(args)
     profile = get_profile(profile_name)
-    execution_mode = getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar')
+    execution_mode = _normalize_execution_mode(
+        getattr(args, 'execution_mode', None) or profile.get('execution_mode', 'intrabar'),
+        context='live',
+    )
     chart_tf = profile.get('chart_tf', '1h')
     if args.risk_pct is None:
         args.risk_pct = profile.get('risk_pct', 5.0)
@@ -1629,14 +1665,14 @@ def main():
     bt.add_argument(
         '--days',
         type=int,
-        default=None,
-        help='Days of hourly data for execution (default: from profile, fallback 30)',
+        default=365,
+        help='Days of hourly data for execution (default: 365)',
     )
     bt.add_argument(
         '--zone-history',
         type=int,
-        default=None,
-        help='Days of daily data for zone detection (default: profile value, fallback 365)',
+        default=180,
+        help='Days of daily data for zone detection (default: 180)',
     )
     _add_ibkr_args(bt)
     _add_strategy_args(bt)
@@ -1653,9 +1689,9 @@ def main():
     )
     bt.add_argument(
         '--execution-mode',
-        choices=('next_bar', 'intrabar'),
-        default=None,
-        help='Execution timing mode for backtests (default: from profile, typically intrabar)',
+        choices=('intrabar',),
+        default='intrabar',
+        help='Execution timing mode for backtests (fixed: intrabar)',
     )
     bt.add_argument(
         '--target-trades',
@@ -1697,6 +1733,12 @@ def main():
         type=int,
         default=None,
         help='Limit parallel Phase-1 fetch workers used before backtests start (1..N, default auto)',
+    )
+    bt.add_argument(
+        '--backtest-workers',
+        type=int,
+        default=18,
+        help='Limit parallel compute workers for zone/walk-forward phases (default: 18)',
     )
     bt.add_argument(
         '--ib-historical-fetch-concurrency',
@@ -1765,9 +1807,9 @@ def main():
     )
     lv.add_argument(
         '--execution-mode',
-        choices=('next_bar', 'intrabar'),
-        default=None,
-        help='Signal timing mode (default: from profile, typically intrabar)',
+        choices=('intrabar',),
+        default='intrabar',
+        help='Signal timing mode (fixed: intrabar)',
     )
 
     l2p = subparsers.add_parser('l2', help='Capture and inspect IBKR L2 market depth')

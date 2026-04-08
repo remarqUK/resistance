@@ -10,6 +10,7 @@ const ALL_LINKS = [
   { href: '/backtest-diary', label: 'Backtest Diary' },
   // Tools
   { href: '/replay', label: 'Strategy Replay' },
+  { href: '/live-vs-backtest', label: 'Live vs Backtest' },
 ];
 
 interface NavLinksProps {
@@ -30,6 +31,7 @@ export function NavLinks({ current, orientation = 'horizontal' }: NavLinksProps)
             link.href === '/trade-log' || link.href === '/live-diary'
               ? ' hero-action-pill hero-action-blue'
               : link.href === '/replay' ||
+                  link.href === '/live-vs-backtest' ||
                   link.href === '/backtest-trades' ||
                   link.href === '/backtest-diary'
                   ? ' hero-action-pill hero-action-restart'

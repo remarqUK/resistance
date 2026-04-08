@@ -150,6 +150,8 @@ class StrategyParams:
     breakeven_r: float = 0.0                   # move SL to entry after reaching this R profit (0=off)
     # Zone exhaustion quality decay
     zone_exhaustion_quality_decay: bool = False # multiplicative quality penalty from zone visits
+    # Max SL distance filter
+    max_sl_pct: float = 0.0                    # max SL distance as % of entry price; 0 = disabled
     # Correlation quality selection
     correlation_prefer_quality: bool = False    # prefer higher-quality trades in correlation filter
     # Submit-time live execution guards
@@ -235,6 +237,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         tp_zone_cap_min_rr=merged.get('tp_zone_cap_min_rr', 0.6),
         breakeven_r=merged.get('breakeven_r', 0.0),
         zone_exhaustion_quality_decay=merged.get('zone_exhaustion_quality_decay', False),
+        max_sl_pct=merged.get('max_sl_pct', 0.0),
         scan_lookback_bars=merged.get('scan_lookback_bars', 72),
         trade_snapshot_logging=merged.get('trade_snapshot_logging', True),
     )
@@ -333,6 +336,8 @@ def generate_signal(
         risk = entry_price - sl
         if risk <= 0:
             return None
+        if params.max_sl_pct > 0 and (risk / entry_price * 100) > params.max_sl_pct:
+            return None
         tp = entry_price + risk * params.rr_ratio
 
         # Cap TP at opposing resistance zone (minus small buffer)
@@ -360,6 +365,8 @@ def generate_signal(
         sl = zone.upper * (1 + params.sl_buffer_pct / 100)
         risk = sl - entry_price
         if risk <= 0:
+            return None
+        if params.max_sl_pct > 0 and (risk / entry_price * 100) > params.max_sl_pct:
             return None
         tp = entry_price - risk * params.rr_ratio
 

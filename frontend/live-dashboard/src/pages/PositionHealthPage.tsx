@@ -39,6 +39,7 @@ interface ClosedTrade {
   detected_at: string;
   closed_at: string;
   pnl_pips: number | null;
+  pnl_amount: number | null;
 }
 
 interface HealthData {
@@ -109,6 +110,7 @@ export function PositionHealthPage() {
   const orphaned = data?.orphaned_orders || [];
   const closed = data?.closed_trades || [];
   const totalPnl = closed.reduce((sum, t) => sum + (t.pnl_pips || 0), 0);
+  const totalAmount = closed.reduce((sum, t) => sum + (t.pnl_amount || 0), 0);
   const winners = closed.filter(t => (t.pnl_pips || 0) > 0).length;
   const losers = closed.filter(t => (t.pnl_pips || 0) < 0).length;
 
@@ -247,6 +249,14 @@ export function PositionHealthPage() {
                     <span style={{ color: totalPnl >= 0 ? '#3fb950' : '#f85149', fontWeight: 600 }}>
                       {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(1)} pips
                     </span>
+                    {totalAmount !== 0 ? (
+                      <>
+                        {' '}&mdash;{' '}
+                        <span style={{ color: totalAmount >= 0 ? '#3fb950' : '#f85149', fontWeight: 600 }}>
+                          {totalAmount >= 0 ? '+' : ''}&pound;{totalAmount.toFixed(2)}
+                        </span>
+                      </>
+                    ) : null}
                   </>
                 ) : null}
               </span>
@@ -266,6 +276,7 @@ export function PositionHealthPage() {
                       <th>SL</th>
                       <th>TP</th>
                       <th>P&amp;L Pips</th>
+                      <th>P&amp;L &pound;</th>
                       <th>Reason</th>
                       <th>Source</th>
                     </tr>
@@ -275,6 +286,9 @@ export function PositionHealthPage() {
                       const pnl = t.pnl_pips;
                       const pnlClass = pnl != null ? (pnl >= 0 ? 'up' : 'down') : '';
                       const pnlStr = pnl != null ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}` : '';
+                      const amt = t.pnl_amount;
+                      const amtClass = amt != null ? (amt >= 0 ? 'up' : 'down') : '';
+                      const amtStr = amt != null ? `${amt >= 0 ? '+' : ''}\u00a3${amt.toFixed(2)}` : '';
                       return (
                         <tr key={`${t.pair}:${t.closed_at}:${i}`}>
                           <td>{formatTs(t.closed_at)}</td>
@@ -285,6 +299,7 @@ export function PositionHealthPage() {
                           <td>{formatPrice(t.sl_price, t.pair)}</td>
                           <td>{formatPrice(t.tp_price, t.pair)}</td>
                           <td className={pnlClass} style={{ fontWeight: 600 }}>{pnlStr}</td>
+                          <td className={amtClass} style={{ fontWeight: 600 }}>{amtStr}</td>
                           <td>{t.close_reason || ''}</td>
                           <td style={{ fontSize: '0.78rem', color: '#8b949e' }}>{t.close_source || ''}</td>
                         </tr>

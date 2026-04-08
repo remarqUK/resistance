@@ -225,10 +225,9 @@ export function TradeLogPage() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  // Auto-select first trade on initial load
+  // Mark initial load complete (no auto-select — user clicks to open chart)
   useEffect(() => {
     if (!initialSelectionDone.current && data.signals?.length) {
-      setSelectedSignal(data.signals[0]);
       initialSelectionDone.current = true;
     }
   }, [data.signals]);
@@ -288,93 +287,91 @@ export function TradeLogPage() {
         ) : null}
 
         {!error && rows.length ? (
-          <div className="trade-log-split">
-            <div className="trade-log-table-col">
-              <div className="table-wrap">
-                <table className="data-table trade-log-table">
-                  <thead>
-                    <tr>
-                      <th>Signal Time</th>
-                      <th>Pair</th>
-                      <th>Dir</th>
-                      <th>Status</th>
-                      <th>Broker</th>
-                      <th>Entry</th>
-                      <th>SL</th>
-                      <th>TP</th>
-                      <th>Bid/Ask</th>
-                      <th>Spread</th>
-                      <th>Quote</th>
-                      <th>P&amp;L</th>
-                      <th>P/L R</th>
-                      <th>P/L GBP</th>
-                      <th>Close Price</th>
-                      <th>Close Reason</th>
-                      <th>Note</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row: any) => {
-                      const spread = row.submit_spread != null ? (Number(row.submit_spread) * 10000).toFixed(1) : '';
-                      const bid = row.submit_bid != null ? formatNumber(row.submit_bid, 5) : '';
-                      const ask = row.submit_ask != null ? formatNumber(row.submit_ask, 5) : '';
-                      const bidAsk = bid && ask ? `${bid}/${ask}` : '';
-                      const pnl = row.pnl_pips != null ? `${Number(row.pnl_pips) > 0 ? '+' : ''}${Number(row.pnl_pips).toFixed(1)}` : '';
-                      const pnlR = row.pnl_r != null ? `${Number(row.pnl_r) > 0 ? '+' : ''}${Number(row.pnl_r).toFixed(2)}R` : '';
-                      const pnlGbp = row.pnl_gbp != null ? `\u00a3${Number(row.pnl_gbp) > 0 ? '+' : ''}${Number(row.pnl_gbp).toFixed(2)}` : '';
-                      const pnlRClass = row.pnl_r != null ? (Number(row.pnl_r) >= 0 ? 'up' : 'down') : '';
-                      const pnlGbpClass = row.pnl_gbp != null ? (Number(row.pnl_gbp) >= 0 ? 'up' : 'down') : '';
-                      const isClosed = String(row.status || '').toUpperCase() === 'CLOSED';
-                      const closePrice = row.closed_price != null ? formatNumber(row.closed_price, 5) : '';
-                      const closeReason = row.close_reason || '';
-                      const rk = rowKey(row);
-                      const rowIsSelected = rk === selectedRowKey;
-                      return (
-                        <tr
-                          key={rk}
-                          className={`trade-log-row${rowIsSelected ? ' trade-log-row-selected' : ''}`}
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => setSelectedSignal(rowIsSelected ? null : row)}
-                          title="Click to review trade"
-                        >
-                          <td>
-                            {formatSignalTime(row.signal_time)}
-                            {isClosed && row.closed_at ? (
-                              <div style={{ fontSize: '0.72rem', color: '#8b949e', marginTop: '2px' }}>
-                                closed {formatSignalTime(row.closed_at)}
-                              </div>
-                            ) : null}
-                          </td>
-                          <td>{row.pair}</td>
-                          <td className={`dir-${row.direction || ''}`}>{row.direction}</td>
-                          <td className={`status-${row.status || ''}`}>{row.status}</td>
-                          <td>{row.broker_order_status || ''}</td>
-                          <td>{row.submitted_entry_price != null ? formatNumber(row.submitted_entry_price, 5) : formatNumber(row.entry_price, 5)}</td>
-                          <td>{formatNumber(row.sl_price, 5)}</td>
-                          <td>{formatNumber(row.tp_price, 5)}</td>
-                          <td>{bidAsk}</td>
-                          <td>{spread}</td>
-                          <td>{row.quote_source || ''}</td>
-                          <td>{pnl}</td>
-                          <td className={pnlRClass}>{pnlR}</td>
-                          <td className={pnlGbpClass}>{pnlGbp}</td>
-                          <td>{isClosed ? closePrice : ''}</td>
-                          <td>{isClosed ? closeReason : ''}</td>
-                          <td className="note" title={row.note || ''}>{row.note || ''}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+          <>
+            <div className="table-wrap" style={{ maxHeight: '80vh', overflow: 'auto' }}>
+              <table className="data-table trade-log-table">
+                <thead>
+                  <tr>
+                    <th>Signal Time</th>
+                    <th>Pair</th>
+                    <th>Dir</th>
+                    <th>Status</th>
+                    <th>Broker</th>
+                    <th>Entry</th>
+                    <th>SL</th>
+                    <th>TP</th>
+                    <th>Bid/Ask</th>
+                    <th>Spread</th>
+                    <th>Quote</th>
+                    <th>P&amp;L</th>
+                    <th>P/L R</th>
+                    <th>P/L GBP</th>
+                    <th>Close Price</th>
+                    <th>Close Reason</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row: any) => {
+                    const spread = row.submit_spread != null ? (Number(row.submit_spread) * 10000).toFixed(1) : '';
+                    const bid = row.submit_bid != null ? formatNumber(row.submit_bid, 5) : '';
+                    const ask = row.submit_ask != null ? formatNumber(row.submit_ask, 5) : '';
+                    const bidAsk = bid && ask ? `${bid}/${ask}` : '';
+                    const pnl = row.pnl_pips != null ? `${Number(row.pnl_pips) > 0 ? '+' : ''}${Number(row.pnl_pips).toFixed(1)}` : '';
+                    const pnlR = row.pnl_r != null ? `${Number(row.pnl_r) > 0 ? '+' : ''}${Number(row.pnl_r).toFixed(2)}R` : '';
+                    const pnlGbp = row.pnl_gbp != null ? `\u00a3${Number(row.pnl_gbp) > 0 ? '+' : ''}${Number(row.pnl_gbp).toFixed(2)}` : '';
+                    const pnlRClass = row.pnl_r != null ? (Number(row.pnl_r) >= 0 ? 'up' : 'down') : '';
+                    const pnlGbpClass = row.pnl_gbp != null ? (Number(row.pnl_gbp) >= 0 ? 'up' : 'down') : '';
+                    const isClosed = String(row.status || '').toUpperCase() === 'CLOSED';
+                    const closePrice = row.closed_price != null ? formatNumber(row.closed_price, 5) : '';
+                    const closeReason = row.close_reason || '';
+                    const rk = rowKey(row);
+                    const rowIsSelected = rk === selectedRowKey;
+                    return (
+                      <tr
+                        key={rk}
+                        className={`trade-log-row${rowIsSelected ? ' trade-log-row-selected' : ''}`}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setSelectedSignal(rowIsSelected ? null : row)}
+                        title="Click to review trade"
+                      >
+                        <td>
+                          {formatSignalTime(row.signal_time)}
+                          {isClosed && row.closed_at ? (
+                            <div style={{ fontSize: '0.72rem', color: '#8b949e', marginTop: '2px' }}>
+                              closed {formatSignalTime(row.closed_at)}
+                            </div>
+                          ) : null}
+                        </td>
+                        <td>{row.pair}</td>
+                        <td className={`dir-${row.direction || ''}`}>{row.direction}</td>
+                        <td className={`status-${row.status || ''}`}>{row.status}</td>
+                        <td>{row.broker_order_status || ''}</td>
+                        <td>{row.submitted_entry_price != null ? formatNumber(row.submitted_entry_price, 5) : formatNumber(row.entry_price, 5)}</td>
+                        <td>{formatNumber(row.sl_price, 5)}</td>
+                        <td>{formatNumber(row.tp_price, 5)}</td>
+                        <td>{bidAsk}</td>
+                        <td>{spread}</td>
+                        <td>{row.quote_source || ''}</td>
+                        <td>{pnl}</td>
+                        <td className={pnlRClass}>{pnlR}</td>
+                        <td className={pnlGbpClass}>{pnlGbp}</td>
+                        <td>{isClosed ? closePrice : ''}</td>
+                        <td>{isClosed ? closeReason : ''}</td>
+                        <td className="note" title={row.note || ''}>{row.note || ''}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
 
-            <div className="trade-log-chart-col">
-              {selectedSignal ? (
-                <div className="trade-log-chart-sticky">
+            {selectedSignal ? (
+              <div className="trade-chart-overlay-backdrop" onClick={() => setSelectedSignal(null)}>
+                <div className="trade-chart-overlay" onClick={(e) => e.stopPropagation()}>
                   <div className="trade-log-chart-header">
                     <h2>{selectedSignal.pair} {selectedSignal.direction}</h2>
-                    <button className="toolbar-btn" type="button" onClick={() => setSelectedSignal(null)}>Hide</button>
+                    <button className="toolbar-btn" type="button" onClick={() => setSelectedSignal(null)}>&times; Close</button>
                   </div>
                   <div className="trade-log-chart-body">
                     <TradeLogChart
@@ -396,13 +393,9 @@ export function TradeLogPage() {
                     {selectedSignal.pnl_r != null ? <span className={Number(selectedSignal.pnl_r) >= 0 ? 'up' : 'down'}>{Number(selectedSignal.pnl_r) > 0 ? '+' : ''}{Number(selectedSignal.pnl_r).toFixed(2)}R</span> : null}
                   </div>
                 </div>
-              ) : (
-                <div className="trade-log-chart-sticky" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: '0.84rem' }}>
-                  Click a trade to show chart
-                </div>
-              )}
-            </div>
-          </div>
+              </div>
+            ) : null}
+          </>
         ) : null}
       </section>
     </div>

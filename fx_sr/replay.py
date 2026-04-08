@@ -766,6 +766,7 @@ def generate_replay_frames(
         pip=pip,
         zone_provider=zone_provider,
         execution_quote_provider=execution_quote_provider,
+        minute_df=minute_df,
         on_bar=on_bar,
         force_close_end=False,
     )

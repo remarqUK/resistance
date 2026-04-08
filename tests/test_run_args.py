@@ -53,6 +53,17 @@ class RunArgumentTests(unittest.TestCase):
         parsed = cmd_backtest.call_args.args[0]
         self.assertEqual(parsed.execution_mode, 'intrabar')
 
+    def test_main_parses_backtest_default_days_and_workers(self):
+        argv = ['run.py', 'backtest']
+
+        with patch.object(sys, 'argv', argv), \
+                patch('run.cmd_backtest') as cmd_backtest:
+            run.main()
+
+        parsed = cmd_backtest.call_args.args[0]
+        self.assertEqual(parsed.days, 365)
+        self.assertEqual(parsed.backtest_workers, 18)
+
     def test_main_parses_download_minute_backfill_flags(self):
         argv = [
             'run.py',
@@ -163,7 +174,7 @@ class RunArgumentTests(unittest.TestCase):
             days=30,
             balance=None,
             risk_pct=5.0,
-            execution_mode='next_bar',
+            execution_mode='intrabar',
             no_cache=False,
             target_trades=None,
             target_profit_floor=1.0,

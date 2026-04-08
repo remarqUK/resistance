@@ -146,7 +146,7 @@ export function OrderAuditLogPage() {
                         <td>
                           <span className={`pill pill-${row.action}`}>{row.action}</span>
                         </td>
-                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{row.order_ids || ''}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem', wordBreak: 'break-all', maxWidth: '120px' }}>{(row.order_ids || '').replace(/,/g, ', ')}</td>
                         <td>{row.duration_ms != null ? `${row.duration_ms.toFixed(0)}ms` : ''}</td>
                         <td style={{ color: hasError ? '#f85149' : undefined, maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.error || ''}>
                           {row.error || ''}

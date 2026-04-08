@@ -330,7 +330,8 @@ NEAR_ZONE_THRESHOLD_PCT = 0.30
 _LIVE_DAILY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
 _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
-_WALK_FORWARD_CACHE: Dict[str, tuple[str, Optional[Signal]]] = {}  # pair -> (cache_key, signal)
+_WALK_FORWARD_CACHE: Dict[str, tuple[str, Optional[Signal], list]] = {}  # pair -> (cache_key, signal, new_wf_signals)
+_SEEN_WF_TRADES: Dict[str, set] = {}  # pair_id -> set of trade identity keys
 
 
 @dataclass
@@ -738,8 +739,8 @@ def _scan_pair(
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
     hourly_days: int = 1,
-) -> tuple[PairScanRow, Optional[Signal]]:
-    """Scan one pair and return a watchlist row plus optional signal."""
+) -> tuple[PairScanRow, Optional[Signal], list]:
+    """Scan one pair and return a watchlist row, optional live signal, and new WF trade signals."""
 
     # Backward compatibility: older callers passed `blocked_pairs` in the
     # `tracked_states` position before tracked state labels were introduced.
@@ -769,6 +770,7 @@ def _scan_pair(
         return (
             PairScanRow(pair_id, name, decimals, None, "NO DATA", "No daily data", "-", "-"),
             None,
+            [],
         )
 
     current_price = float(daily_df['Close'].iloc[-1])
@@ -804,6 +806,7 @@ def _scan_pair(
                 resistance_dist_pct=_distance_to_zone_pct(current_price, nearest_resistance, is_support=False),
             ),
             None,
+            [],
         )
 
     last_bar = scan_df.iloc[-1]
@@ -843,6 +846,7 @@ def _scan_pair(
                 support_text, resistance_text, **zone_fields,
             ),
             None,
+            [],
         )
 
     if pair_id in blocked_pairs:
@@ -853,6 +857,7 @@ def _scan_pair(
                 support_text, resistance_text, **zone_fields,
             ),
             None,
+            [],
         )
 
     if portfolio_state is None and closed_trades is not None:
@@ -872,6 +877,7 @@ def _scan_pair(
                 state, note, support_text, resistance_text, **zone_fields,
             ),
             None,
+            [],
         )
 
     # Minute data for intrabar signal detection — match the hourly window
@@ -896,6 +902,11 @@ def _scan_pair(
     wf_cached = _WALK_FORWARD_CACHE.get(pair_id)
     if wf_cached is not None and wf_cached[0] == wf_cache_key:
         signal = wf_cached[1]
+        # Return new WF signals only once — clear after first read to prevent
+        # re-processing on repeated cache hits (e.g. intrabar scans every minute).
+        new_wf_signals = wf_cached[2] if len(wf_cached) > 2 else []
+        if new_wf_signals:
+            _WALK_FORWARD_CACHE[pair_id] = (wf_cache_key, signal, [])
     else:
         pip = float(pair_info.get('pip', 0.0001))
 
@@ -933,7 +944,8 @@ def _scan_pair(
             )
 
         # Match backtest exactly: full hourly data, same quote provider,
-        # force_close_end=True, no cooldown callback.
+        # no cooldown callback. force_close_end=False so the current open
+        # trade is preserved (backtest uses True for clean stats only).
         wf_result = run_walk_forward(
             scan_df,
             pair=pair_id,
@@ -965,7 +977,43 @@ def _scan_pair(
                 zone_type='support' if trade.direction == 'LONG' else 'resistance',
                 quality_score=trade.quality_score,
             )
-        _WALK_FORWARD_CACHE[pair_id] = (wf_cache_key, signal)
+
+        # Detect NEW walk-forward trades not seen in previous scans.
+        # These are trades the backtest would show but live previously missed
+        # because the trade had already closed before the scan ran.
+        new_wf_signals: list[Signal] = []
+        seen = _SEEN_WF_TRADES.get(pair_id, set())
+        current_trade_keys: set[str] = set()
+        for t in wf_result.trades:
+            tkey = f"{pair_id}:{t.entry_time}:{t.direction}"
+            current_trade_keys.add(tkey)
+            if tkey not in seen:
+                wf_sig = Signal(
+                    time=t.entry_time,
+                    pair=pair_id,
+                    direction=t.direction,
+                    entry_price=t.entry_price,
+                    sl_price=t.sl_price,
+                    tp_price=t.tp_price,
+                    zone_upper=t.zone_upper,
+                    zone_lower=t.zone_lower,
+                    zone_strength=t.zone_strength,
+                    zone_type='support' if t.direction == 'LONG' else 'resistance',
+                    quality_score=t.quality_score,
+                )
+                # Attach WF outcome for diagnostic logging
+                wf_sig._wf_exit_reason = t.exit_reason
+                wf_sig._wf_pnl_r = t.pnl_r
+                wf_sig._wf_exit_time = t.exit_time
+                new_wf_signals.append(wf_sig)
+        # Also mark the open trade as seen if present
+        if wf_result.open_trade is not None:
+            t = wf_result.open_trade
+            tkey = f"{pair_id}:{t.entry_time}:{t.direction}"
+            current_trade_keys.add(tkey)
+        _SEEN_WF_TRADES[pair_id] = current_trade_keys
+
+        _WALK_FORWARD_CACHE[pair_id] = (wf_cache_key, signal, new_wf_signals)
 
     if signal:
         note = f"{signal.zone_type.title()} reversal ({signal.zone_strength})"
@@ -976,6 +1024,7 @@ def _scan_pair(
                 signal, **zone_fields,
             ),
             signal,
+            new_wf_signals,
         )
 
     state, note = _describe_watch_state(current_price, nearest_support, nearest_resistance)
@@ -986,6 +1035,7 @@ def _scan_pair(
             **zone_fields,
         ),
         None,
+        new_wf_signals,
     )
 
 
@@ -1004,8 +1054,8 @@ def collect_scan_rows(
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
     hourly_days: int = 1,
-) -> tuple[List[Signal], List[PairScanRow]]:
-    """Collect structured pair rows and the executable signals among them."""
+) -> tuple[List[Signal], List[PairScanRow], List[Signal]]:
+    """Collect structured pair rows, executable signals, and new WF trade signals."""
 
     if pairs is None:
         pairs = PAIRS
@@ -1031,11 +1081,12 @@ def collect_scan_rows(
                     tracked_states.setdefault(pair, 'OPEN')
 
     signals: List[Signal] = []
+    all_wf_signals: List[Signal] = []
     pair_rows: List[PairScanRow] = []
     for pair_id, pair_info in pairs.items():
         if is_pair_fully_blocked(pair_id, params):
             continue
-        row, signal = _scan_pair(
+        row, signal, wf_signals = _scan_pair(
             pair_id,
             pair_info,
             params,
@@ -1056,7 +1107,8 @@ def collect_scan_rows(
         pair_rows.append(row)
         if signal:
             signals.append(signal)
-    return signals, pair_rows
+        all_wf_signals.extend(wf_signals)
+    return signals, pair_rows, all_wf_signals
 
 
 def format_scan_rows(pair_rows: List[PairScanRow]) -> str:
@@ -1100,7 +1152,7 @@ def scan_opportunities(
 ) -> List[Signal]:
     """Scan all pairs and print a plain-text watch table."""
 
-    signals, pair_rows = collect_scan_rows(
+    signals, pair_rows, _wf_signals = collect_scan_rows(
         pairs=pairs,
         params=params,
         zone_history_days=zone_history_days,
@@ -1453,6 +1505,15 @@ def execute_signal_plans(
         execution_mode = 'next_bar'
     existing_pairs = existing_pairs or set()
     pending_pairs = pending_pairs or set()
+
+    # Hard cap: refuse new entries if we already have max_correlated_trades
+    # open positions.  The correlation policy handles currency overlap, but
+    # this is a simple count gate that prevents overloading the book.
+    open_count = len(existing_pairs | pending_pairs)
+    position_cap = max(int(params.max_correlated_trades), 1)
+    if open_count >= position_cap:
+        print(f"    Skipping execution: {open_count} positions already open (cap {position_cap})")
+        return []
     slot_risk_amount = (
         calculate_risk_amount(balance, risk_pct)
         if balance is not None and risk_pct is not None and account_currency
@@ -1929,7 +1990,7 @@ def run_monitor_cycle(
 
         portfolio_state = load_portfolio_state(params, current_balance=active_balance)
 
-        signals, pair_rows = collect_scan_rows(
+        signals, pair_rows, _wf_signals = collect_scan_rows(
             pairs=pairs,
             params=params,
             zone_history_days=zone_history_days,

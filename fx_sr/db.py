@@ -5,6 +5,7 @@ PostgreSQL is the canonical storage backend.
 
 from __future__ import annotations
 
+import io
 import os
 import threading
 from contextlib import contextmanager
@@ -83,6 +84,33 @@ def _apply_session_timeouts(conn: _CompatConnection) -> None:
         except Exception:
             # Keep default behavior if a deployment does not permit per-connection GUC changes.
             # Ensure a failed SET does not poison the connection for subsequent reads.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            continue
+
+
+def _apply_raw_session_timeouts(conn) -> None:
+    """Apply defensive per-connection timeouts to a raw psycopg connection."""
+
+    for name, raw_value in (
+        ('statement_timeout', DB_STATEMENT_TIMEOUT_MS),
+        ('lock_timeout', DB_LOCK_TIMEOUT_MS),
+        ('idle_in_transaction_session_timeout', DB_IDLE_IN_TRANSACTION_TIMEOUT_MS),
+    ):
+        if raw_value is None:
+            continue
+        try:
+            value = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            continue
+        if value < 0:
+            continue
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"SET {name} = %s", (value,))
+        except Exception:
             try:
                 conn.rollback()
             except Exception:
@@ -381,6 +409,7 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS backtest_result (
             pair               TEXT NOT NULL,
+            run_id             TEXT NOT NULL DEFAULT '',
             params_hash        TEXT NOT NULL,
             hourly_days        INTEGER NOT NULL,
             zone_history_days  INTEGER NOT NULL,
@@ -392,20 +421,32 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
             run_config_json    TEXT,
             created_at         TIMESTAMPTZ NOT NULL,
             updated_at         TIMESTAMPTZ NOT NULL,
-            PRIMARY KEY (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+            PRIMARY KEY (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
         )
     """)
     existing_backtest_columns = _table_columns(conn, 'backtest_result')
-    if 'execution_mode' in existing_backtest_columns:
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-            ON backtest_result (pair, params_hash, execution_mode, hourly_days, zone_history_days)
-        """)
+    if 'run_id' in existing_backtest_columns:
+        if 'execution_mode' in existing_backtest_columns:
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+                ON backtest_result (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
+            """)
+        else:
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+                ON backtest_result (pair, run_id, params_hash, hourly_days, zone_history_days)
+            """)
     else:
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-            ON backtest_result (pair, params_hash, hourly_days, zone_history_days)
-        """)
+        if 'execution_mode' in existing_backtest_columns:
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+                ON backtest_result (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+            """)
+        else:
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
+                ON backtest_result (pair, params_hash, hourly_days, zone_history_days)
+            """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_backtest_pair_updated_at
         ON backtest_result (pair, updated_at DESC)
@@ -687,6 +728,8 @@ def init_db(db_path: str | None = None) -> None:
             existing_columns = _table_columns(conn, 'backtest_result')
             if 'run_config_json' not in existing_columns:
                 conn.execute('ALTER TABLE backtest_result ADD COLUMN run_config_json TEXT')
+            if 'run_id' not in existing_columns:
+                conn.execute('ALTER TABLE backtest_result ADD COLUMN run_id TEXT')
             if 'execution_mode' not in existing_columns:
                 conn.execute("""
                     ALTER TABLE backtest_result
@@ -721,9 +764,14 @@ def init_db(db_path: str | None = None) -> None:
                 END
                 $$;
             """)
+            conn.execute("UPDATE backtest_result SET run_id = '' WHERE run_id IS NULL")
+            conn.execute("ALTER TABLE backtest_result ALTER COLUMN run_id SET DEFAULT ''")
+            conn.execute("ALTER TABLE backtest_result ALTER COLUMN run_id SET NOT NULL")
 
-            has_execution_mode_pk = conn.execute("""
-                SELECT 1
+            current_pk_columns = [
+                row[0]
+                for row in conn.execute("""
+                SELECT kcu.column_name
                 FROM information_schema.table_constraints tc
                 JOIN information_schema.key_column_usage kcu
                   ON tc.constraint_name = kcu.constraint_name
@@ -732,21 +780,32 @@ def init_db(db_path: str | None = None) -> None:
                 WHERE tc.table_schema = 'public'
                   AND tc.table_name = 'backtest_result'
                   AND tc.constraint_type = 'PRIMARY KEY'
-                  AND kcu.column_name = 'execution_mode'
-                LIMIT 1
-            """).fetchone()
-            if not has_execution_mode_pk:
+                  AND kcu.table_schema = tc.table_schema
+                  AND kcu.table_name = tc.table_name
+                ORDER BY kcu.ordinal_position
+                """
+                ).fetchall()
+            ]
+            expected_pk_columns = [
+                'pair',
+                'run_id',
+                'params_hash',
+                'execution_mode',
+                'hourly_days',
+                'zone_history_days',
+            ]
+            if current_pk_columns != expected_pk_columns:
                 conn.execute(
                     'ALTER TABLE backtest_result DROP CONSTRAINT IF EXISTS backtest_result_pkey'
                 )
                 conn.execute("""
                     ALTER TABLE backtest_result
-                        ADD PRIMARY KEY (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+                        ADD PRIMARY KEY (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
                 """)
                 conn.execute('DROP INDEX IF EXISTS idx_backtest_lookup')
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-                    ON backtest_result (pair, params_hash, execution_mode, hourly_days, zone_history_days)
+                    ON backtest_result (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
                 """)
             conn.commit()
             _DB_SCHEMA_READY.add(db_path)
@@ -901,6 +960,7 @@ def save_backtest_result(
     strategy_version: str,
     result_json: str,
     run_config_json: str | None = None,
+    run_id: str | None = None,
     execution_mode: str = 'next_bar',
     db_path: str | None = None,
 ) -> None:
@@ -919,11 +979,11 @@ def save_backtest_result(
             conn.execute(
                 """
                 INSERT INTO backtest_result (
-                    pair, params_hash, hourly_days, zone_history_days, execution_mode,
+                    pair, run_id, params_hash, hourly_days, zone_history_days, execution_mode,
                     data_signature, ticker, strategy_version, result_json, run_config_json, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT(pair, params_hash, execution_mode, hourly_days, zone_history_days)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
                 DO UPDATE SET
                     data_signature = excluded.data_signature,
                     ticker = excluded.ticker,
@@ -934,6 +994,7 @@ def save_backtest_result(
                 """,
                 (
                     pair,
+                    run_id or '',
                     params_hash,
                     int(hourly_days),
                     int(zone_history_days),
@@ -966,6 +1027,7 @@ def load_backtest_result(
     params_hash: str,
     hourly_days: int,
     zone_history_days: int,
+    run_id: str | None = None,
     execution_mode: str = 'next_bar',
     db_path: str | None = None,
 ) -> tuple[str, str, str, str | None] | None:
@@ -979,14 +1041,26 @@ def load_backtest_result(
 
     conn = _connect(db_path)
     try:
-        cursor = conn.execute(
-            """
-            SELECT data_signature, result_json, strategy_version, run_config_json
+        query = """
+            SELECT data_signature, result_json, strategy_version, run_config_json, updated_at
             FROM backtest_result
             WHERE pair=%s AND params_hash=%s AND execution_mode=%s AND hourly_days=%s AND zone_history_days=%s
-            """,
-            (pair, params_hash, execution_mode, int(hourly_days), int(zone_history_days)),
-        )
+        """
+        params: list[object] = [
+            pair, params_hash, execution_mode, int(hourly_days), int(zone_history_days),
+        ]
+        if run_id is not None:
+            query += ' AND run_id=%s'
+            params.append(run_id)
+            cursor = conn.execute(
+                f'{query} LIMIT 1',
+                tuple(params),
+            )
+        else:
+            cursor = conn.execute(
+                f'{query} ORDER BY updated_at DESC LIMIT 1',
+                tuple(params),
+            )
         row = cursor.fetchone()
     finally:
         conn.close()
@@ -998,6 +1072,8 @@ def load_backtest_result(
 
 def load_backtest_results(
     pairs: Sequence[str] | None = None,
+    *,
+    run_id: str | None = None,
     db_path: str | None = None,
 ) -> list[dict]:
     """Load cached backtest rows for optional pair filters."""
@@ -1009,7 +1085,7 @@ def load_backtest_results(
     init_db(db_path)
 
     query = """
-        SELECT pair, params_hash, hourly_days, zone_history_days, data_signature,
+        SELECT pair, run_id, params_hash, hourly_days, zone_history_days, data_signature,
             ticker, strategy_version, result_json, run_config_json, execution_mode, created_at, updated_at
         FROM backtest_result
     """
@@ -1020,6 +1096,12 @@ def load_backtest_results(
             return []
         query += " WHERE pair IN ({})".format(",".join(["%s"] * len(pair_list)))
         params.extend(pair_list)
+    if run_id is not None:
+        if query.find('WHERE') == -1:
+            query += " WHERE run_id=%s"
+        else:
+            query += " AND run_id=%s"
+        params.append(run_id)
 
     query += " ORDER BY pair, updated_at DESC"
 
@@ -1033,17 +1115,18 @@ def load_backtest_results(
     return [
         {
             'pair': row[0],
-            'params_hash': row[1],
-            'hourly_days': row[2],
-            'zone_history_days': row[3],
-            'data_signature': row[4],
-            'ticker': _ticker_from_db_value(None, row[5]),
-            'strategy_version': row[6],
-            'result_json': row[7],
-            'run_config_json': row[8],
-            'execution_mode': row[9] or 'next_bar',
-            'created_at': row[10],
-            'updated_at': row[11],
+            'run_id': row[1],
+            'params_hash': row[2],
+            'hourly_days': row[3],
+            'zone_history_days': row[4],
+            'data_signature': row[5],
+            'ticker': _ticker_from_db_value(None, row[6]),
+            'strategy_version': row[7],
+            'result_json': row[8],
+            'run_config_json': row[9],
+            'execution_mode': row[10] or 'next_bar',
+            'created_at': row[11],
+            'updated_at': row[12],
         }
         for row in rows
     ]
@@ -1054,6 +1137,7 @@ def delete_backtest_result(
     params_hash: str,
     hourly_days: int,
     zone_history_days: int,
+    run_id: str | None = None,
     execution_mode: str = 'next_bar',
     db_path: str | None = None,
 ) -> None:
@@ -1067,13 +1151,15 @@ def delete_backtest_result(
 
     conn = _connect(db_path)
     try:
-        conn.execute(
-            """
+        query = """
             DELETE FROM backtest_result
             WHERE pair=%s AND params_hash=%s AND execution_mode=%s AND hourly_days=%s AND zone_history_days=%s
-            """,
-            (pair, params_hash, execution_mode, int(hourly_days), int(zone_history_days)),
-        )
+        """
+        params = [pair, params_hash, execution_mode, int(hourly_days), int(zone_history_days)]
+        if run_id is not None:
+            query += ' AND run_id=%s'
+            params.append(run_id)
+        conn.execute(query, tuple(params))
         conn.commit()
     finally:
         conn.close()
@@ -1176,6 +1262,28 @@ def load_ohlc(
             params.append(_normalize_ts(end))
 
         query += " ORDER BY ts"
+        rows = None
+        if _POSTGRES_DRIVER == 'psycopg':
+            copy_sql = f"COPY ({query}) TO STDOUT WITH (FORMAT CSV, HEADER TRUE)"
+            try:
+                with psycopg.connect(db_path) as raw_conn:
+                    _apply_raw_session_timeouts(raw_conn)
+                    csv_buffer = io.BytesIO()
+                    with raw_conn.cursor() as raw_cursor:
+                        with raw_cursor.copy(copy_sql, params) as copy:
+                            while data := copy.read():
+                                csv_buffer.write(bytes(data))
+                    csv_buffer.seek(0)
+                    df = pd.read_csv(csv_buffer)
+                if df.empty:
+                    return pd.DataFrame()
+                df.columns = ['ts', 'Open', 'High', 'Low', 'Close', 'Volume']
+                df["ts"] = pd.to_datetime(df["ts"], utc=True)
+                df = df.set_index("ts")
+                return df
+            except Exception:
+                rows = None
+
         cursor = conn.execute(query, params)
         rows = cursor.fetchall()
     finally:

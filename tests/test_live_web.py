@@ -110,7 +110,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             captured['tracked_pairs'] = tracked_positions
             captured['blocked_pairs'] = blocked_pairs
             captured['hourly_df'] = hourly_df.copy()
-            return None, None
+            return None, None, []
 
         with patch('fx_sr.positions.check_exit', return_value=None), \
                 patch('fx_sr.positions._save_bar_tracking') as save_tracking_mock, \

@@ -92,7 +92,7 @@ You can edit [`scripts/postgres_tuning.sql`](./scripts/postgres_tuning.sql) as n
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--pair` | all 10 | Specific pair (for example `EURUSD`) |
-| `--days` | 30 | Days of hourly data for execution |
+| `--days` | 365 | Days of hourly data for execution |
 | `--zone-history` | 180 | Days of daily data for zone detection |
 | `--preset` | `high_volume` | Named profile: `high_volume`, `optimized`, `source`, `balanced`, or `aggressive` |
 | `--rr-ratio` | preset value | Override preset risk:reward ratio |
@@ -108,6 +108,8 @@ You can edit [`scripts/postgres_tuning.sql`](./scripts/postgres_tuning.sql) as n
 | `--blocked-days` | `0` | Override blocked weekdays (Monday=0) |
 | `--balance` | none | Starting balance for compounding P&L |
 | `--risk-pct` | 5.0 | Risk per trade as % of balance |
+| `--fetch-workers` | auto | Parallel phase-1 fetch workers across pairs (default 1) |
+| `--backtest-workers` | 18 | Parallel workers for zone pre-compute and walk-forward phases |
 | `--no-cache` | off | Bypass PostgreSQL cache and refresh from IBKR |
 | `-v` | off | Show individual trade details |
 

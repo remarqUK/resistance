@@ -187,7 +187,7 @@ PROFILES = {
 
         # Position management
         'cooldown_bars': 1,
-        'max_correlated_trades': 5,
+        'max_correlated_trades': 4,
         'use_correlation_filter': True,
 
         # Execution model
@@ -355,6 +355,9 @@ PROFILES = {
         'quality_risk_min': 0.5,
         'quality_risk_max': 1.6,
 
+        # Risk filter — skip entries with SL too far from entry
+        'max_sl_pct': 0.25,
+
         # Backtest settings
         'hourly_days': 365,
         'starting_balance': 1000.0,
@@ -429,6 +432,9 @@ PROFILES = {
         'quality_sizing': True,
         'quality_risk_min': 0.5,
         'quality_risk_max': 1.6,
+
+        # Risk filter (same as high_volume)
+        'max_sl_pct': 0.25,
 
         # Backtest settings (same as high_volume)
         'hourly_days': 365,

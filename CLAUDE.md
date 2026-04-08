@@ -22,7 +22,7 @@ Both backtest and live call the same `run_walk_forward()` in `fx_sr/walkforward.
 | `minute_df` | Window matches `hourly_days` | Live: `_get_live_minute_data(days=hourly_span_days)` |
 | `l2_snapshots` | Both load from PostgreSQL via `load_l2_snapshots()` | Live loads for the scan_df window |
 | `allow_h1_fallback` | `not params.strict_backtest_execution and params.allow_h1_execution_fallback` | Never hardcode `True` in live |
-| `force_close_end` | Both `True` | |
+| `force_close_end` | Backtest `True`, Live `False` | Live needs open trades preserved to surface signals |
 | `on_bar` | Both `None` | No per-pair cooldown in walk-forward |
 | `is_entry_blocked` | Both `None` | Cooldown handled at portfolio level |
 | `execution_mode` | Same value from profile | `'intrabar'` or `'next_bar'` |
@@ -31,6 +31,7 @@ Both backtest and live call the same `run_walk_forward()` in `fx_sr/walkforward.
 
 These are real-time constraints that cannot be eliminated:
 
+- **`force_close_end=False` in live**: The backtest uses `True` to force-close open trades at the window end for clean stats. Live uses `False` so `wf_result.open_trade` preserves the current open trade for signal detection. With `True`, `open_trade` is always `None` and live can never detect signals.
 - **Completed-bar filtering** (`next_bar` mode): Live excludes the currently forming hourly bar. The backtest processes all bars because they're historical.
 - **Submit-time repricing**: Live reprices signals with a real IBKR quote at order submission via `_prepare_execution_plan()`. This may reject signals the walk-forward accepted (spread too wide, entry drift).
 - **Margin/funding**: `whatif_margin_check`, margin slot budget, and excess liquidity checks may skip signals.

@@ -52,6 +52,7 @@ export interface PositionRow {
   direction: string;
   size?: number;
   entry_price?: number;
+  entry_time?: string;
   current_price?: number;
   pnl_pips?: number;
   status?: string;

@@ -9,6 +9,7 @@ import { ReplayPage } from './pages/ReplayPage';
 import { TradeLogPage } from './pages/TradeLogPage';
 import { OrderAuditLogPage } from './pages/OrderAuditLogPage';
 import { PositionHealthPage } from './pages/PositionHealthPage';
+import { LiveVsBacktestPage } from './pages/LiveVsBacktestPage';
 
 export function App() {
   return (
@@ -18,6 +19,7 @@ export function App() {
       <Route path="/order-audit-log" element={<OrderAuditLogPage />} />
       <Route path="/position-health" element={<PositionHealthPage />} />
       <Route path="/replay" element={<ReplayPage />} />
+      <Route path="/live-vs-backtest" element={<LiveVsBacktestPage />} />
       <Route path="/live-diary" element={<LiveDiaryPage />} />
       <Route path="/live-trade" element={<LiveTradePage />} />
       <Route path="/backtest-trades" element={<BacktestTradesPage />} />

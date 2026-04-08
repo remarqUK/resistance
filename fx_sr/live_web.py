@@ -57,7 +57,10 @@ _BACKTEST_PROGRESS_RE = re.compile(r'^\s*\[(\d+)\s*/\s*(\d+)\]\s+([A-Za-z0-9]+)'
 
 
 def _normalize_execution_mode(mode: str | None) -> str:
-    return mode if mode in {'next_bar', 'intrabar'} else 'next_bar'
+    resolved = mode or 'intrabar'
+    if resolved != 'intrabar':
+        raise ValueError("Only 'intrabar' execution mode is supported.")
+    return 'intrabar'
 
 
 def _execution_mode_label(mode: str) -> str:
@@ -100,7 +103,7 @@ class LiveDashboardHub:
         strategy_label: str | None,
         client_id: int | None,
         port: int,
-        execution_mode: str = 'next_bar',
+        execution_mode: str = 'intrabar',
         chart_tf: str = '1h',
         hourly_days: int = 1,
     ) -> None:
@@ -163,6 +166,7 @@ class LiveDashboardHub:
         self._scan_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='ibkr-scan',
         )
+        self._housekeeping_nudge = asyncio.Event()
         self._quote_stop = threading.Event()
         self._quote_thread: Optional[threading.Thread] = None
         self._pending_tasks: set[asyncio.Task] = set()
@@ -176,6 +180,7 @@ class LiveDashboardHub:
         self._tick_exit_alerted: set[str] = set()
         self._minute_tracker: dict[str, int] = {}
         self._portfolio_state = build_portfolio_state([], params=params, current_balance=balance)
+        self._daily_closed_pnl: float = 0.0
         self._backfill_done = False
         self._backfill_progress: dict = {
             'phase': 'waiting',
@@ -220,6 +225,7 @@ class LiveDashboardHub:
             'balance': self.balance,
             'account_currency': self.account_currency,
             'risk_pct': self.risk_pct * 100.0 if self.risk_pct is not None else None,
+            'daily_closed_pnl': self._daily_closed_pnl,
         }
 
     def _append_log(self, level: str, message: str) -> dict:
@@ -296,10 +302,10 @@ class LiveDashboardHub:
         blocked_pairs: set[str],
         price: float,
         hourly_df,
-    ) -> tuple[PairScanRow | None, object | None]:
+    ) -> tuple[PairScanRow | None, object | None, list]:
         """Rebuild one pair row from authoritative scan inputs."""
 
-        signals, rows = collect_scan_rows(
+        signals, rows, wf_signals = collect_scan_rows(
             pairs={pair: self.pairs[pair]},
             params=self.params,
             zone_history_days=self.zone_history_days,
@@ -314,6 +320,7 @@ class LiveDashboardHub:
         return (
             rows[0] if rows else None,
             signals[0] if signals else None,
+            wf_signals,
         )
 
     async def _broadcast_log(self, level: str, message: str) -> None:
@@ -460,6 +467,8 @@ class LiveDashboardHub:
 
         args.extend(['--ibkr-client-id', str(self._backtest_client_id_base())])
 
+        args.extend(['--execution-mode', 'intrabar'])
+        args.extend(['--days', str(self.hourly_days)])
         if self.zone_history_days:
             args.extend(['--zone-history', str(self.zone_history_days)])
 
@@ -1095,6 +1104,8 @@ class LiveDashboardHub:
                 status = 'PARTIAL' if info.get('signal_status') == 'PARTIAL' else 'OK'
 
             size = int(abs(info.get('ibkr_size') or 0))
+            if size == 0 and 'ibkr_size' in info:
+                continue
             current_price = snap.get('current_price')
             pnl_amount = None
             if current_price is not None and size > 0:
@@ -1966,6 +1977,11 @@ class LiveDashboardHub:
 
         await self._broadcast({'type': 'snapshot', 'state': state})
 
+        # Nudge housekeeping to run soon after any trade execution so position
+        # tracking updates quickly instead of waiting up to 5 minutes.
+        if any(r.order_id is not None or r.status in ('OPEN', 'PARTIAL') for r in execution_results):
+            self._housekeeping_nudge.set()
+
     def _queue_quote_update(self, pair: str, price: float) -> None:
         """Marshal a thread-side quote callback onto the asyncio loop."""
 
@@ -2036,7 +2052,7 @@ class LiveDashboardHub:
             blocked = set(self._tick_pending_pairs)
             current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
 
-        updated_row, signal = await self._loop.run_in_executor(
+        updated_row, signal, wf_signals = await self._loop.run_in_executor(
             self._scan_executor,
             lambda: self._evaluate_pair_row(
                 pair,
@@ -2046,6 +2062,29 @@ class LiveDashboardHub:
                 hourly_df=hourly_df,
             ),
         )
+
+        # Log and attempt execution for new WF trade signals
+        if wf_signals:
+            async with self._lock:
+                for ws in wf_signals:
+                    exit_reason = getattr(ws, '_wf_exit_reason', '?')
+                    pnl_r = getattr(ws, '_wf_pnl_r', 0.0)
+                    pnl_label = f'{pnl_r:+.1f}R' if pnl_r else 'open'
+                    exit_label = f' exit={exit_reason} {pnl_label}' if exit_reason else ''
+                    self._append_log(
+                        'info',
+                        f'WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
+                        f'@ {ws.time}{exit_label}',
+                    )
+            import datetime as _dt
+            _cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=2)
+            for ws in wf_signals:
+                sig_time = pd.Timestamp(ws.time)
+                if sig_time.tzinfo is None:
+                    sig_time = sig_time.tz_localize('UTC')
+                if sig_time >= _cutoff:
+                    await self._handle_signal(ws, source='WF trade')
+
         if signal is not None and self._signal_identity(signal) != current_signal_id:
             await self._handle_signal(signal, source='intrabar')
             return
@@ -2132,13 +2171,15 @@ class LiveDashboardHub:
                             'warning',
                             f"Bar exit: {pair} {alert['direction']} {alert['exit_reason']} @ {alert['exit_price']:.5f}",
                         )
+                        # Nudge housekeeping — bracket likely filled or about to
+                        self._housekeeping_nudge.set()
 
             tracked_copy = dict(self._tracked)
             blocked = set(self._tick_pending_pairs)
             current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
             current_price = self._last_quotes.get(pair, completed_close)
 
-        updated_row, signal = await self._loop.run_in_executor(
+        updated_row, signal, wf_signals = await self._loop.run_in_executor(
             self._scan_executor,
             lambda: self._evaluate_pair_row(
                 pair,
@@ -2148,6 +2189,30 @@ class LiveDashboardHub:
                 hourly_df=hourly_df,
             ),
         )
+
+        # Log new walk-forward trade signals for this pair
+        if wf_signals:
+            async with self._lock:
+                for ws in wf_signals:
+                    exit_reason = getattr(ws, '_wf_exit_reason', '?')
+                    pnl_r = getattr(ws, '_wf_pnl_r', 0.0)
+                    pnl_label = f'{pnl_r:+.1f}R' if pnl_r else 'open'
+                    exit_label = f' exit={exit_reason} {pnl_label}' if exit_reason else ''
+                    self._append_log(
+                        'info',
+                        f'WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
+                        f'@ {ws.time}{exit_label}',
+                    )
+            # Attempt execution for fresh WF signals (entered within last 2 hours)
+            import datetime as _dt
+            _cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=2)
+            for ws in wf_signals:
+                sig_time = pd.Timestamp(ws.time)
+                if sig_time.tzinfo is None:
+                    sig_time = sig_time.tz_localize('UTC')
+                if sig_time >= _cutoff:
+                    await self._handle_signal(ws, source='WF trade')
+
         if signal is not None and self._signal_identity(signal) != current_signal_id:
             await self._handle_signal(signal, source='hourly')
             return
@@ -2259,7 +2324,7 @@ class LiveDashboardHub:
         closed_trades = load_closed_trade_summaries()
         portfolio_state = build_portfolio_state(closed_trades, params=self.params)
 
-        signals, pair_rows = collect_scan_rows(
+        signals, pair_rows, wf_signals = collect_scan_rows(
             pairs=self.pairs,
             params=self.params,
             zone_history_days=self.zone_history_days,
@@ -2268,7 +2333,23 @@ class LiveDashboardHub:
             portfolio_state=portfolio_state,
             hourly_days=self.hourly_days,
         )
-        return signals, pair_rows, closed_trades
+        # Compute daily closed-trade P&L at startup
+        from .live_history import _compute_daily_pnl_gbp
+        from .db import _connect, get_db_path, init_db
+        from datetime import date
+        daily_closed_pnl = 0.0
+        try:
+            db_path = get_db_path()
+            init_db(db_path)
+            conn = _connect(db_path)
+            try:
+                daily_closed_pnl = _compute_daily_pnl_gbp(conn, date.today())
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        return signals, pair_rows, closed_trades, wf_signals, daily_closed_pnl
 
     async def _run_backfill(self) -> None:
         """Run backfill in executor and publish progress to clients."""
@@ -2296,7 +2377,7 @@ class LiveDashboardHub:
         progress_task = asyncio.create_task(_broadcast_progress())
 
         try:
-            signals, pair_rows, closed_trades = await self._loop.run_in_executor(
+            signals, pair_rows, closed_trades, wf_signals, daily_closed_pnl = await self._loop.run_in_executor(
                 self._scan_executor,
                 self._backfill_data,
             )
@@ -2360,6 +2441,7 @@ class LiveDashboardHub:
                 self.balance = balance
             if currency is not None:
                 self.account_currency = currency
+            self._daily_closed_pnl = daily_closed_pnl
             self._portfolio_state = build_portfolio_state(closed_trades, params=self.params)
             for row in closed_rows:
                 summary = closed_trade_summary_from_row(row)
@@ -2374,6 +2456,19 @@ class LiveDashboardHub:
             self._early_exit_active = {}
             self._backfill_done = True
             self._append_log('success', f'Backfill complete: {len(pair_rows)} pairs, {len(signals)} signals')
+            # Log all walk-forward trade signals discovered at startup
+            if wf_signals:
+                self._append_log('info', f'Walk-forward found {len(wf_signals)} trade signal(s):')
+                for ws in wf_signals:
+                    exit_reason = getattr(ws, '_wf_exit_reason', '?')
+                    pnl_r = getattr(ws, '_wf_pnl_r', 0.0)
+                    pnl_label = f'{pnl_r:+.1f}R' if pnl_r else 'open'
+                    exit_label = f' exit={exit_reason} {pnl_label}' if exit_reason else ''
+                    self._append_log(
+                        'info',
+                        f'  WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
+                        f'@ {ws.time}{exit_label}',
+                    )
             self.summary = self._build_summary(status='live')
             state = self._export_state()
 
@@ -2387,7 +2482,12 @@ class LiveDashboardHub:
         """Low-frequency periodic tasks: position sync, zone refresh, balance."""
 
         while True:
-            await asyncio.sleep(300)  # 5 minutes
+            # Wait up to 5 minutes, but wake early if nudged (e.g. after a trade)
+            try:
+                await asyncio.wait_for(self._housekeeping_nudge.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                pass
+            self._housekeeping_nudge.clear()
 
             try:
                 async with self._lock:
@@ -2421,9 +2521,25 @@ class LiveDashboardHub:
 
                     cash_balances = ibkr.fetch_cash_balances()
 
-                    return tracked, balance, currency, closed_rows, cash_balances
+                    # Daily closed-trade P&L (same source as live diary)
+                    from .live_history import _compute_daily_pnl_gbp
+                    from .db import _connect, get_db_path, init_db
+                    from datetime import date
+                    daily_closed_pnl = 0.0
+                    try:
+                        db_path = get_db_path()
+                        init_db(db_path)
+                        conn = _connect(db_path)
+                        try:
+                            daily_closed_pnl = _compute_daily_pnl_gbp(conn, date.today())
+                        finally:
+                            conn.close()
+                    except Exception:
+                        pass
 
-                tracked, balance, currency, closed_rows, cash_balances = await self._loop.run_in_executor(
+                    return tracked, balance, currency, closed_rows, cash_balances, daily_closed_pnl
+
+                tracked, balance, currency, closed_rows, cash_balances, daily_closed_pnl = await self._loop.run_in_executor(
                     self._scan_executor,
                     _housekeeping,
                 )
@@ -2449,6 +2565,7 @@ class LiveDashboardHub:
                     self._tick_pending_pairs = set()
                     self._tick_exit_alerted = set()
                     self._early_exit_active = {}
+                    self._daily_closed_pnl = daily_closed_pnl
                     self._apply_live_quotes()
                     self.summary = self._build_summary(status='live')
                     state = self._export_state()
@@ -2711,7 +2828,8 @@ async def _position_health_api(request: web.Request) -> web.Response:
                     """SELECT pair, direction, status,
                               entry_price, sl_price, tp_price,
                               closed_price, close_reason, close_source,
-                              detected_at, closed_at, pnl_pips
+                              detected_at, closed_at, pnl_pips,
+                              open_units, opened_price, account_currency
                        FROM detected_signal
                        WHERE closed_at IS NOT NULL AND closed_at >= %s
                        ORDER BY closed_at DESC""",
@@ -2719,7 +2837,8 @@ async def _position_health_api(request: web.Request) -> web.Response:
                 ).fetchall()
                 cols = ['pair', 'direction', 'status', 'entry_price', 'sl_price',
                         'tp_price', 'closed_price', 'close_reason', 'close_source',
-                        'detected_at', 'closed_at', 'pnl_pips']
+                        'detected_at', 'closed_at', 'pnl_pips',
+                        'open_units', 'opened_price', 'account_currency']
                 for row in rows:
                     d = {cols[i]: row[i] for i in range(len(cols))}
                     for ts_key in ('detected_at', 'closed_at'):
@@ -2727,9 +2846,15 @@ async def _position_health_api(request: web.Request) -> web.Response:
                             d[ts_key] = str(d[ts_key])
                     if d.get('pnl_pips') is not None:
                         d['pnl_pips'] = float(d['pnl_pips'])
-                    for px_key in ('entry_price', 'sl_price', 'tp_price', 'closed_price'):
+                    for px_key in ('entry_price', 'sl_price', 'tp_price', 'closed_price', 'opened_price'):
                         if d.get(px_key) is not None:
                             d[px_key] = float(d[px_key])
+                    if d.get('open_units') is not None:
+                        d['open_units'] = int(d['open_units'])
+                    # Compute £ P&L amount
+                    from .live_history import _compute_pnl_gbp
+                    pnl_amount = _compute_pnl_gbp(d, conn)
+                    d['pnl_amount'] = round(pnl_amount, 2) if pnl_amount is not None else None
                     closed_trades.append(d)
             finally:
                 conn.close()
@@ -3098,6 +3223,61 @@ async def _close_tracked_position(request: web.Request) -> web.Response:
         return web.json_response({'error': str(exc)}, status=500)
 
 
+async def _neutralize_currency(request: web.Request) -> web.Response:
+    """Neutralize a residual currency balance by submitting an offsetting FX order."""
+
+    _validate_dashboard_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({'error': 'Invalid JSON body'}, status=400)
+
+    currency = (payload.get('currency') or '').strip().upper()
+    amount = payload.get('amount')
+    if not currency or amount is None:
+        return web.json_response(
+            {'error': 'Expected JSON body with "currency" and "amount".'},
+            status=400,
+        )
+
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return web.json_response({'error': 'Amount must be a number.'}, status=400)
+
+    if abs(amount) < 1:
+        return web.json_response({'error': 'Amount too small to neutralize.'}, status=400)
+
+    hub: LiveDashboardHub = request.app["hub"]
+    account_currency = hub.account_currency or 'GBP'
+
+    import asyncio
+    try:
+        result = await asyncio.to_thread(
+            ibkr.neutralize_currency_balance,
+            currency,
+            amount,
+            account_currency,
+        )
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
+
+    if result is None:
+        return web.json_response(
+            {'error': f'Failed to submit neutralization order for {currency}.'},
+            status=502,
+        )
+
+    # Nudge housekeeping to refresh balances quickly
+    hub._housekeeping_nudge.set()
+
+    action = 'Sell' if amount > 0 else 'Buy'
+    return web.json_response({
+        'message': f'{action} {abs(int(amount)):,} {currency} submitted.',
+        'result': result,
+    })
+
+
 def _register_fill_route(app: web.Application, handler: object) -> None:
     """Register all known dashboard fill routes for compatibility."""
 
@@ -3294,8 +3474,16 @@ def run_live_web_app(
     app.router.add_get('/api/chart-data', _chart_data)
     app.router.add_post('/api/position-close', _close_tracked_position)
     app.router.add_post('/position-close', _close_tracked_position)
+    app.router.add_post('/api/neutralize-currency', _neutralize_currency)
     app.router.add_post('/api/execution-mode', _set_execution_mode)
     _register_fill_route(app, _fill_cache)
+    async def _force_housekeeping(request: web.Request) -> web.Response:
+        _validate_dashboard_request(request)
+        hub: LiveDashboardHub = request.app["hub"]
+        hub._housekeeping_nudge.set()
+        return web.json_response({'message': 'Housekeeping triggered.'})
+
+    app.router.add_post('/api/housekeeping', _force_housekeeping)
     app.router.add_post('/api/shutdown', _shutdown)
     app.router.add_post('/api/restart', _restart)
     app.router.add_post('/api/backtest-rerun', _rerun_backtest)
@@ -3304,6 +3492,7 @@ def run_live_web_app(
     app.router.add_post('/backtest-rerun/', _rerun_backtest)
     app.router.add_get('/replay', _index)
     app.router.add_get('/backtest-trades', _index)
+    app.router.add_get('/live-vs-backtest', _index)
     app.router.add_get('/api/backtest/trades', handle_backtest_trades_api)
     app.router.add_get('/backtest-diary', _index)
     app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)
@@ -3330,7 +3519,15 @@ def run_live_web_app(
     @web.middleware
     async def no_cache(request, handler):
         response = await handler(request)
-        if request.path.startswith('/static/') or request.path in ('/', '/chart', '/trade-log', '/replay', '/order-audit-log', '/position-health'):
+        if request.path.startswith('/static/') or request.path in (
+            '/',
+            '/chart',
+            '/trade-log',
+            '/replay',
+            '/live-vs-backtest',
+            '/order-audit-log',
+            '/position-health',
+        ):
             response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
         return response
 

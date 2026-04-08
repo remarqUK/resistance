@@ -125,7 +125,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
-            row, signal = _scan_pair(
+            row, signal, _wf = _scan_pair(
                 'EURUSD',
                 {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
                 params,
@@ -184,7 +184,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=live_hourly_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
-            _, signal = _scan_pair(
+            _, signal, _wf = _scan_pair(
                 'EURUSD',
                 {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
                 params,
@@ -245,7 +245,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=live_hourly_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
-            _, signal = _scan_pair(
+            _, signal, _wf = _scan_pair(
                 'EURUSD',
                 {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
                 params,
@@ -283,7 +283,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
                 patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]):
-            _, signal = _scan_pair(
+            _, signal, _wf = _scan_pair(
                 'EURUSD',
                 {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
                 params,
@@ -517,8 +517,8 @@ class SharedEntryLogicTests(unittest.TestCase):
             resistance_text='-',
         )
 
-        with patch('fx_sr.live._scan_pair', return_value=(row, None)) as scan_pair:
-            _, rows = live_module.collect_scan_rows(pairs=pairs, params=StrategyParams())
+        with patch('fx_sr.live._scan_pair', return_value=(row, None, [])) as scan_pair:
+            _, rows, _wf = live_module.collect_scan_rows(pairs=pairs, params=StrategyParams())
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].pair, 'EURUSD')

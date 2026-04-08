@@ -569,32 +569,117 @@ function ExecutionMiniChart({ execution }: { execution: ExecutionRow }) {
   );
 }
 
-const CurrencyBalanceWarning = memo(function CurrencyBalanceWarning({ balances, baseCurrency }: { balances: Record<string, number>; baseCurrency: string }) {
+const CurrencyBalanceWarning = memo(function CurrencyBalanceWarning({ balances, baseCurrency, positions }: { balances: Record<string, number>; baseCurrency: string; positions: any[] }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [result, setResult] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  const [submitted, setSubmitted] = useState<Set<string>>(new Set());
+
+  // Determine which currencies are expected from tracked positions
+  const positionCurrencies = new Set<string>();
+  if (positions) {
+    for (const pos of positions) {
+      const pair = (pos.pair || '').toUpperCase();
+      if (pair.length === 6) {
+        positionCurrencies.add(pair.slice(0, 3));
+        positionCurrencies.add(pair.slice(3, 6));
+      }
+    }
+  }
+
   const nonBase = Object.entries(balances)
     .filter(([c, v]) => c !== baseCurrency && Math.abs(v) > 50)
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
   if (!nonBase.length) return null;
+
+  const residual = nonBase.filter(([c]) => !positionCurrencies.has(c));
+  const expected = nonBase.filter(([c]) => positionCurrencies.has(c));
+
+  const neutralize = async (currency: string, amount: number) => {
+    if (submitted.has(currency)) return;
+    const action = amount > 0 ? 'Sell' : 'Buy';
+    const qty = Math.abs(amount).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    if (!confirm(`${action} ${qty} ${currency} to neutralize this balance?`)) return;
+    setBusy(currency);
+    setSubmitted((s) => new Set(s).add(currency));
+    setResult((r) => { const next = { ...r }; delete next[currency]; return next; });
+    try {
+      const res = await fetch('/api/neutralize-currency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency, amount }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setResult((r) => ({ ...r, [currency]: { ok: false, msg: data.error || 'Failed' } }));
+        setSubmitted((s) => { const next = new Set(s); next.delete(currency); return next; });
+      } else {
+        setResult((r) => ({ ...r, [currency]: { ok: true, msg: data.message || 'Submitted' } }));
+      }
+    } catch (err: any) {
+      setResult((r) => ({ ...r, [currency]: { ok: false, msg: err?.message || 'Network error' } }));
+      setSubmitted((s) => { const next = new Set(s); next.delete(currency); return next; });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
-    <section className="panel" style={{ marginBottom: '12px', background: 'rgba(178,59,41,0.06)', border: '1px solid rgba(178,59,41,0.2)' }}>
-      <div className="panel-subhead" style={{ color: '#b23b29' }}>Residual Currency Balances</div>
-      <div style={{ fontSize: '0.8rem', color: 'var(--muted)', marginBottom: '8px' }}>
-        Convert in TWS to avoid interest charges and FX exposure.
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '6px 12px', fontSize: '0.82rem' }}>
-        {nonBase.map(([currency, amount]) => (
-          <div key={currency}>
-            <span style={{ fontWeight: 600 }}>{currency}</span>{' '}
-            <span style={{ color: amount >= 0 ? '#1f7a49' : '#b23b29' }}>
-              {amount >= 0 ? '+' : ''}{Number(amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            </span>
+    <section className="panel" style={{ marginBottom: '12px', background: residual.length ? 'rgba(178,59,41,0.06)' : 'rgba(91,75,58,0.04)', border: residual.length ? '1px solid rgba(178,59,41,0.2)' : '1px solid rgba(91,75,58,0.12)' }}>
+      <div className="panel-subhead" style={{ color: residual.length ? '#b23b29' : 'var(--muted)' }}>Currency Balances</div>
+      {residual.length > 0 ? (
+        <>
+          <div style={{ fontSize: '0.8rem', color: '#b23b29', marginBottom: '6px', fontWeight: 600 }}>
+            Residual balances
           </div>
-        ))}
-      </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.82rem', marginBottom: expected.length ? '10px' : '0' }}>
+            {residual.map(([currency, amount]) => (
+              <div key={currency}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <span style={{ fontWeight: 600 }}>{currency}</span>{' '}
+                    <span style={{ color: amount >= 0 ? '#1f7a49' : '#b23b29' }}>
+                      {amount >= 0 ? '+' : ''}{Number(amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy === currency || submitted.has(currency)}
+                    onClick={() => void neutralize(currency, amount)}
+                    style={{ background: 'rgba(178,59,41,0.10)', border: '1px solid #b23b29', borderRadius: '4px', padding: '1px 8px', cursor: busy === currency || submitted.has(currency) ? 'not-allowed' : 'pointer', fontSize: '0.72rem', color: submitted.has(currency) ? '#8b949e' : '#b23b29', whiteSpace: 'nowrap' }}
+                  >
+                    {busy === currency ? 'Submitting...' : submitted.has(currency) ? 'Done' : `${amount > 0 ? 'Sell' : 'Buy'} ${Math.abs(amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                  </button>
+                </div>
+                {result[currency] ? (
+                  <div style={{ fontSize: '0.72rem', marginTop: '2px', color: result[currency].ok ? '#1f7a49' : '#b23b29' }}>
+                    {result[currency].msg}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+      {expected.length > 0 ? (
+        <>
+          {residual.length > 0 ? <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginBottom: '4px' }}>From tracked positions</div> : null}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '4px 12px', fontSize: '0.82rem' }}>
+            {expected.map(([currency, amount]) => (
+              <div key={currency} style={{ opacity: 0.7 }}>
+                <span style={{ fontWeight: 600 }}>{currency}</span>{' '}
+                <span style={{ color: amount >= 0 ? '#1f7a49' : '#b23b29' }}>
+                  {amount >= 0 ? '+' : ''}{Number(amount).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
     </section>
   );
 });
 
-const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, slPrice, tpPrice, decimals = 4 }: { pair: string; entryPrice?: number; slPrice?: number; tpPrice?: number; decimals?: number }) {
+const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, entryTime, direction, slPrice, tpPrice, decimals = 4 }: { pair: string; entryPrice?: number; entryTime?: string; direction?: string; slPrice?: number; tpPrice?: number; decimals?: number }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
@@ -636,12 +721,14 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, sl
           priceFormat: { type: 'price', precision: decimals, minMove: 1 / Math.pow(10, decimals) },
         };
         // Constrain Y-axis to SL-TP range
-        if (slPrice != null && tpPrice != null && !isNaN(slPrice) && !isNaN(tpPrice)) {
-          const lo = Math.min(slPrice, tpPrice);
-          const hi = Math.max(slPrice, tpPrice);
+        const hasSlTp = slPrice != null && tpPrice != null && !isNaN(slPrice) && !isNaN(tpPrice);
+        if (hasSlTp) {
+          const lo = Math.min(slPrice!, tpPrice!);
+          const hi = Math.max(slPrice!, tpPrice!);
           const pad = (hi - lo) * 0.10;
           seriesOpts.autoscaleInfoProvider = () => ({
             priceRange: { minValue: lo - pad, maxValue: hi + pad },
+            margins: { above: 0, below: 0 },
           });
         }
         const series = chart.addCandlestickSeries(seriesOpts);
@@ -651,6 +738,25 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, sl
           series.setData(data.bars);
           const last = data.bars[data.bars.length - 1];
           lastBarRef.current = { time: last.time, open: last.open, high: last.high, low: last.low, close: last.close };
+
+          // Entry marker on the bar closest to entry time
+          if (entryTime) {
+            const entryTs = Math.floor(new Date(entryTime).getTime() / 1000);
+            let bestBar = data.bars[0];
+            let bestDiff = Math.abs(bestBar.time - entryTs);
+            for (const bar of data.bars) {
+              const diff = Math.abs(bar.time - entryTs);
+              if (diff < bestDiff) { bestBar = bar; bestDiff = diff; }
+            }
+            const isLong = direction === 'LONG';
+            series.setMarkers([{
+              time: bestBar.time,
+              position: isLong ? 'belowBar' : 'aboveBar',
+              color: '#d4a017',
+              shape: isLong ? 'arrowUp' : 'arrowDown',
+              text: 'Entry',
+            }]);
+          }
         }
 
         const line = (price: any, color: string, title: string, style?: number) => {
@@ -736,8 +842,22 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, sl
   );
 });
 
+function DailyPnlLabel({ closedPnl, positions }: { closedPnl?: number; positions?: any[] }) {
+  const realised = closedPnl ?? 0;
+  const unrealised = (positions || []).reduce((s: number, p: any) => s + (p.pnl_amount || 0), 0);
+  const total = realised + unrealised;
+  if (realised === 0 && unrealised === 0) return null;
+  const up = total >= 0;
+  return (
+    <span className="metric-detail" style={{ fontWeight: 600, color: up ? '#1f7a49' : '#b23b29' }}>
+      Day: {up ? '+' : ''}&pound;{total.toFixed(2)}
+    </span>
+  );
+}
+
 function AccountChart() {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
   const [empty, setEmpty] = useState(false);
 
   useEffect(() => {
@@ -826,6 +946,28 @@ function AccountChart() {
 
         chart.timeScale().fitContent();
 
+        // Tooltip on crosshair hover
+        chart.subscribeCrosshairMove((param: any) => {
+          const tip = tooltipRef.current;
+          if (!tip) return;
+          if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
+            tip.style.display = 'none';
+            return;
+          }
+          const equity = param.seriesData?.get(balanceSeries);
+          const pnl = param.seriesData?.get(pnlSeries);
+          const eqVal = equity?.value ?? equity?.close;
+          const pnlVal = pnl?.value;
+          if (eqVal == null) { tip.style.display = 'none'; return; }
+          let text = `Equity: \u00a3${Number(eqVal).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+          if (pnlVal != null) {
+            const sign = pnlVal >= 0 ? '+' : '';
+            text += `  |  P&L: ${sign}\u00a3${Number(pnlVal).toFixed(2)}`;
+          }
+          tip.textContent = text;
+          tip.style.display = 'block';
+        });
+
         ro = new ResizeObserver(() => {
           if (chart) chart.applyOptions({ width: container.clientWidth });
         });
@@ -850,7 +992,12 @@ function AccountChart() {
       </div>
       {empty
         ? <div className="empty" style={{ fontSize: '0.82rem', padding: '12px 0' }}>No account history yet.</div>
-        : <div ref={containerRef} style={{ width: '100%' }} />
+        : (
+          <div style={{ position: 'relative' }}>
+            <div ref={containerRef} style={{ width: '100%' }} />
+            <div ref={tooltipRef} style={{ display: 'none', position: 'absolute', top: '4px', left: '8px', fontSize: '0.76rem', color: '#5b4b3a', background: 'rgba(255,250,242,0.9)', padding: '2px 8px', borderRadius: '4px', pointerEvents: 'none', zIndex: 10, fontWeight: 600 }} />
+          </div>
+        )
       }
     </section>
   );
@@ -1229,7 +1376,7 @@ export function DashboardPage() {
       <header className="hero">
         <div className="hero-title-row">
           <div>
-            <h1><span className="eyebrow">FX support / resistance scanner</span>Forex IBKR</h1>
+            <h1><span className="eyebrow">FX support / resistance scanner</span>IBKR Forex</h1>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
             <NavLinks current="/" orientation="horizontal" />
@@ -1329,13 +1476,23 @@ export function DashboardPage() {
             <article className="metric-card">
               <span className="meta-label">Scan state</span>
               {isScanLive ? (
-                <div className="metric-detail">
+                <div className="metric-detail" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span id="scan-status" className="pill pill-live">{scanStatus}</span>
+                  <DailyPnlLabel closedPnl={summary.daily_closed_pnl} positions={viewState.positions} />
                 </div>
               ) : (
                 <strong id="scan-status">{scanStatus}</strong>
               )}
-              <span id="scan-progress" className="metric-detail">{scanProgressText(summary)}</span>
+              <span id="scan-progress" className="metric-detail">
+                {scanProgressText(summary)}
+                {' '}
+                <button
+                  type="button"
+                  onClick={() => { fetch('/api/housekeeping', { method: 'POST' }).catch(() => {}); }}
+                  title="Force housekeeping sync now"
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '0.78rem', color: 'var(--muted)', padding: '0 2px' }}
+                >&#x27F3;</button>
+              </span>
             </article>
             <article className="metric-card">
               <span className="meta-label">Signals</span>
@@ -1387,9 +1544,21 @@ export function DashboardPage() {
           </section>
         </section>
         <section className="side-column">
-          <CurrencyBalanceWarning balances={viewState.currency_balances} baseCurrency={viewState.summary?.account_currency || 'GBP'} />
+          <CurrencyBalanceWarning balances={viewState.currency_balances} baseCurrency={viewState.summary?.account_currency || 'GBP'} positions={viewState.positions} />
           <section className="panel">
-            <div className="panel-subhead">Tracked Positions</div>
+            <div className="panel-subhead" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span>Tracked Positions</span>
+              {viewState.positions.length > 0 ? (() => {
+                const totalAmt = viewState.positions.reduce((s: number, p: any) => s + (p.pnl_amount || 0), 0);
+                const totalPips = viewState.positions.reduce((s: number, p: any) => s + (p.pnl_pips || 0), 0);
+                const up = totalAmt >= 0;
+                return (
+                  <span style={{ fontSize: '0.78rem', fontWeight: 600, color: up ? '#1f7a49' : '#b23b29' }}>
+                    {up ? '+' : ''}{totalPips.toFixed(1)} pips / {up ? '+' : ''}&pound;{totalAmt.toFixed(2)}
+                  </span>
+                );
+              })() : null}
+            </div>
             <div id="positions-list" className="stack-list compact-list">
               {!viewState.positions.length ? <div className="empty-card">No tracked positions.</div> : viewState.positions.map((position) => {
                 const posKey = `${position.pair}:${position.direction}`;
@@ -1409,6 +1578,18 @@ export function DashboardPage() {
                         <span className={badgeClass(position.direction)}>{position.direction}</span>
                         {' '}
                         <span className="pair-sub">{Number(position.size || 0).toLocaleString()} units</span>
+                        {position.entry_time ? <span className="pair-sub" style={{marginLeft:'auto'}}>{(() => {
+                          const d = new Date(position.entry_time);
+                          const now = Date.now();
+                          const diffMs = now - d.getTime();
+                          if (diffMs < 0 || isNaN(diffMs)) return d.toLocaleString();
+                          const mins = Math.floor(diffMs / 60000);
+                          if (mins < 60) return `${mins}m ago`;
+                          const hrs = Math.floor(mins / 60);
+                          if (hrs < 24) return `${hrs}h ${mins % 60}m ago`;
+                          const days = Math.floor(hrs / 24);
+                          return `${days}d ${hrs % 24}h ago`;
+                        })()}</span> : null}
                       </div>
                       {position.status !== 'OK' ? <span className={badgeClass(position.status)}>{position.status}</span> : null}
                     </div>
@@ -1467,6 +1648,8 @@ export function DashboardPage() {
                         <PositionMiniChart
                           pair={position.pair}
                           entryPrice={position.entry_price}
+                          entryTime={position.entry_time}
+                          direction={position.direction}
                           slPrice={position.sl_price}
                           tpPrice={position.tp_price}
                           decimals={dec}

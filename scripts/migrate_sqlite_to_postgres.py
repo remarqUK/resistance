@@ -155,9 +155,11 @@ TABLE_SCHEMAS: dict[str, list[tuple[str, str]]] = {
     ],
     "backtest_result": [
         ("pair", "TEXT NOT NULL"),
+        ("run_id", "TEXT NOT NULL"),
         ("params_hash", "TEXT NOT NULL"),
         ("hourly_days", "INTEGER NOT NULL"),
         ("zone_history_days", "INTEGER NOT NULL"),
+        ("execution_mode", "TEXT NOT NULL"),
         ("data_signature", "TEXT NOT NULL"),
         ("ticker", "SMALLINT NOT NULL"),
         ("strategy_version", "TEXT NOT NULL"),
@@ -262,7 +264,7 @@ PRIMARY_KEYS: dict[str, list[str]] = {
     "ohlc": ["ticker", "interval", "ts"],
     "l2_snapshot": ["id"],
     "l2_level": ["snapshot_id", "side", "level_no"],
-    "backtest_result": ["pair", "params_hash", "hourly_days", "zone_history_days"],
+    "backtest_result": ["pair", "run_id", "params_hash", "execution_mode", "hourly_days", "zone_history_days"],
     "detected_signal": ["signal_id"],
     "detected_signal_fill": ["exec_id"],
     "open_trades": ["pair", "direction"],
@@ -556,9 +558,11 @@ def _create_common_tables(cur):
         """
         CREATE TABLE IF NOT EXISTS backtest_result (
             pair TEXT NOT NULL,
+            run_id TEXT NOT NULL,
             params_hash TEXT NOT NULL,
             hourly_days INTEGER NOT NULL,
             zone_history_days INTEGER NOT NULL,
+            execution_mode TEXT NOT NULL,
             data_signature TEXT NOT NULL,
             ticker SMALLINT NOT NULL CHECK (ticker > 0),
             strategy_version TEXT NOT NULL,
@@ -566,11 +570,11 @@ def _create_common_tables(cur):
             run_config_json TEXT,
             created_at TIMESTAMPTZ NOT NULL,
             updated_at TIMESTAMPTZ NOT NULL,
-            PRIMARY KEY (pair, params_hash, hourly_days, zone_history_days)
+            PRIMARY KEY (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
         )
         """
     )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_backtest_lookup ON backtest_result (pair, params_hash, hourly_days, zone_history_days)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_backtest_lookup ON backtest_result (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_backtest_pair_updated_at ON backtest_result (pair, updated_at DESC)")
 
     cur.execute(

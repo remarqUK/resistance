@@ -332,6 +332,7 @@ _LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
 _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _WALK_FORWARD_CACHE: Dict[str, tuple[str, Optional[Signal], list]] = {}  # pair -> (cache_key, signal, new_wf_signals)
 _SEEN_WF_TRADES: Dict[str, set] = {}  # pair_id -> set of trade identity keys
+_SEEN_WF_TRADES_SEEDED: bool = False  # True once seeded from DB
 
 
 @dataclass
@@ -781,10 +782,10 @@ def _scan_pair(
         days=max(hourly_days, 1),
         hourly_data_cache=hourly_data_cache,
     )
-    if execution_mode == 'intrabar':
-        scan_df = hourly_df
-    else:
-        scan_df = _completed_live_hourly_data(hourly_df)
+    # Live scans must never generate entries from the still-forming hourly bar.
+    # Intrabar mode changes how the completed bar is evaluated (using minute
+    # data inside that hour), not which hourly bars are eligible for entry.
+    scan_df = _completed_live_hourly_data(hourly_df)
     if scan_df.empty:
         return (
             PairScanRow(
@@ -981,6 +982,28 @@ def _scan_pair(
         # Detect NEW walk-forward trades not seen in previous scans.
         # These are trades the backtest would show but live previously missed
         # because the trade had already closed before the scan ran.
+        #
+        # On first run after startup, seed the "seen" set from the database
+        # so only trades the live system has already acted on are marked seen.
+        # Trades the system never detected remain "unseen" and get surfaced.
+        global _SEEN_WF_TRADES_SEEDED
+        if not _SEEN_WF_TRADES_SEEDED:
+            _SEEN_WF_TRADES_SEEDED = True
+            try:
+                from .live_history import load_detected_signals
+                for row in load_detected_signals():
+                    p = row.get('pair', '')
+                    sig_time = row.get('signal_time')
+                    d = row.get('direction', '')
+                    if p and sig_time and d:
+                        # Normalize to UTC to match WF trade key format
+                        ts = pd.Timestamp(sig_time)
+                        if ts.tzinfo is not None:
+                            ts = ts.tz_convert('UTC')
+                        _SEEN_WF_TRADES.setdefault(p, set()).add(f"{p}:{ts}:{d}")
+            except Exception:
+                pass
+
         new_wf_signals: list[Signal] = []
         seen = _SEEN_WF_TRADES.get(pair_id, set())
         current_trade_keys: set[str] = set()

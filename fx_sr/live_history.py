@@ -364,12 +364,39 @@ def _ensure_table(db_path: str | None = None) -> str:
             ON pair_scan_log (scan_time DESC)
             """
         )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS system_event (
+                id         BIGSERIAL PRIMARY KEY,
+                event_time {ts_type} NOT NULL DEFAULT NOW(),
+                event_type TEXT NOT NULL,
+                detail     TEXT
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
 
     _ENSURE_TABLE_PATHS.add(db_path)
     return db_path
+
+
+def record_system_event(event_type: str, detail: str | None = None) -> None:
+    """Record a system lifecycle event (startup, shutdown, etc.)."""
+    try:
+        db_path = _ensure_signal_tables()
+        conn = db._connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO system_event (event_type, detail) VALUES (%s, %s)",
+                (event_type, detail),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        pass
 
 
 def _row_to_dict(cursor, row) -> dict:

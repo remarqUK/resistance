@@ -2584,6 +2584,8 @@ class LiveDashboardHub:
         self._loop = asyncio.get_running_loop()
         await self._broadcast_log('info', 'Live dashboard startup requested.')
         start_background_writer()
+        from .live_history import record_system_event
+        record_system_event('startup', f'profile={self.strategy_label} mode={self.execution_mode}')
 
         # Phase 1: backfill historical data with progress
         await self._run_backfill()
@@ -3406,6 +3408,8 @@ async def _startup(app: web.Application) -> None:
 
 async def _cleanup(app: web.Application) -> None:
     """Stop background services during shutdown."""
+    from .live_history import record_system_event
+    record_system_event('shutdown')
 
     hub_task = app.get("_hub_task")
     if hub_task and not hub_task.done():

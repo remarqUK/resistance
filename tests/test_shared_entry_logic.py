@@ -30,6 +30,21 @@ def _build_daily_df(rows: int = 40) -> pd.DataFrame:
     )
 
 
+def _build_recent_daily_df(anchor_time: pd.Timestamp, rows: int = 40) -> pd.DataFrame:
+    end_day = pd.Timestamp(anchor_time).tz_convert('UTC').normalize()
+    index = pd.date_range(end=end_day, periods=rows, freq='D', tz='UTC')
+    return pd.DataFrame(
+        {
+            'Open': [1.1000] * rows,
+            'High': [1.1100] * rows,
+            'Low': [1.0900] * rows,
+            'Close': [1.1000] * rows,
+            'Volume': [0.0] * rows,
+        },
+        index=index,
+    )
+
+
 def _build_hourly_df(rows: list[tuple[str, float, float, float, float]]) -> pd.DataFrame:
     index = pd.DatetimeIndex([pd.Timestamp(ts, tz='UTC') for ts, *_ in rows])
     return pd.DataFrame(
@@ -95,6 +110,8 @@ class SharedEntryLogicTests(unittest.TestCase):
         live_module._LIVE_DAILY_DATA_CACHE.clear()
         live_module._LIVE_ZONE_CACHE.clear()
         live_module._LIVE_HOURLY_DATA_CACHE.clear()
+        live_module._WALK_FORWARD_CACHE.clear()
+        live_module._SEEN_WF_TRADES.clear()
 
     def test_live_scan_and_backtest_both_honor_time_filters(self):
         daily_df = _build_daily_df()
@@ -183,6 +200,7 @@ class SharedEntryLogicTests(unittest.TestCase):
 
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=live_hourly_df), \
+                patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -194,6 +212,8 @@ class SharedEntryLogicTests(unittest.TestCase):
                 daily_data_cache={},
                 zone_cache={},
                 hourly_data_cache={},
+                minute_data_cache={},
+                execution_mode='intrabar',
             )
 
         self.assertIsNotNone(signal)
@@ -244,6 +264,7 @@ class SharedEntryLogicTests(unittest.TestCase):
 
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=live_hourly_df), \
+                patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -255,6 +276,8 @@ class SharedEntryLogicTests(unittest.TestCase):
                 daily_data_cache={},
                 zone_cache={},
                 hourly_data_cache={},
+                minute_data_cache={},
+                execution_mode='intrabar',
             )
 
         self.assertIsNotNone(signal)
@@ -263,13 +286,60 @@ class SharedEntryLogicTests(unittest.TestCase):
         self.assertEqual(signal.time, result.trades[0].entry_time)
 
     def test_live_scan_ignores_current_in_progress_hour_and_anchors_to_submit_hour(self):
-        daily_df = _build_daily_df()
         current_hour = pd.Timestamp.now(tz='UTC').floor('h')
+        daily_df = _build_recent_daily_df(current_hour)
+        hourly_df = _build_hourly_df(
+            [
+                (str(current_hour - pd.Timedelta(hours=3)), 1.1040, 1.1045, 1.1035, 1.1040),
+                (str(current_hour - pd.Timedelta(hours=2)), 1.0950, 1.0955, 1.0945, 1.0950),
+                (str(current_hour - pd.Timedelta(hours=1)), 1.0900, 1.0904, 1.0899, 1.0903),
+                (str(current_hour), 1.0895, 1.0898, 1.0892, 1.0894),
+            ]
+        )
+        params = StrategyParams(
+            min_entry_candle_body_pct=0.0,
+            momentum_lookback=1,
+            momentum_threshold=0.99,
+            use_time_filters=False,
+            use_pair_direction_filter=False,
+        )
+        minute_df = _build_minute_df([(str(current_hour), 1.0903)])
+
+        with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
+                patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.0900, 1.0910)]):
+            _, signal, _wf = _scan_pair(
+                'EURUSD',
+                {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
+                params,
+                zone_history_days=20,
+                tracked_pairs={},
+                blocked_pairs=set(),
+                daily_data_cache={},
+                zone_cache={},
+                hourly_data_cache={},
+                minute_data_cache={},
+                execution_mode='intrabar',
+            )
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.direction, 'LONG')
+        self.assertEqual(signal.time, current_hour)
+
+    def test_live_intrabar_scan_ignores_signal_inside_current_in_progress_hour(self):
+        current_hour = pd.Timestamp.now(tz='UTC').floor('h')
+        daily_df = _build_recent_daily_df(current_hour)
         hourly_df = _build_hourly_df(
             [
                 (str(current_hour - pd.Timedelta(hours=2)), 1.1030, 1.1034, 1.1028, 1.1030),
-                (str(current_hour - pd.Timedelta(hours=1)), 1.1000, 1.1005, 1.0999, 1.1003),
-                (str(current_hour), 1.0970, 1.0972, 1.0968, 1.0970),
+                (str(current_hour - pd.Timedelta(hours=1)), 1.1020, 1.1023, 1.1018, 1.1020),
+                (str(current_hour), 1.1000, 1.1005, 1.0999, 1.1003),
+            ]
+        )
+        minute_df = _build_minute_df(
+            [
+                (str(current_hour + pd.Timedelta(minutes=10)), 1.1004),
             ]
         )
         params = StrategyParams(
@@ -282,6 +352,7 @@ class SharedEntryLogicTests(unittest.TestCase):
 
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -293,11 +364,11 @@ class SharedEntryLogicTests(unittest.TestCase):
                 daily_data_cache={},
                 zone_cache={},
                 hourly_data_cache={},
+                minute_data_cache={},
+                execution_mode='intrabar',
             )
 
-        self.assertIsNotNone(signal)
-        self.assertEqual(signal.direction, 'LONG')
-        self.assertEqual(signal.time, current_hour)
+        self.assertIsNone(signal)
 
     def test_run_backtest_fast_matches_walk_forward_backtest(self):
         daily_df = _build_daily_df()
@@ -385,7 +456,7 @@ class SharedEntryLogicTests(unittest.TestCase):
             get_entry_execution_price(1.1004, 'LONG', 0.0001, params),
         )
 
-    def test_backtest_uses_modeled_next_hour_fallback_when_quote_snapshot_is_missing(self):
+    def test_backtest_uses_modeled_h1_fallback_when_quote_snapshot_is_missing(self):
         daily_df = _build_daily_df()
         hourly_df = _build_hourly_df(
             [
@@ -400,6 +471,7 @@ class SharedEntryLogicTests(unittest.TestCase):
             momentum_threshold=0.99,
             use_time_filters=False,
             use_pair_direction_filter=False,
+            strict_backtest_execution=False,
         )
         zone = _support_zone(1.1000, 1.1010)
 
@@ -410,13 +482,14 @@ class SharedEntryLogicTests(unittest.TestCase):
                 'EURUSD',
                 params=params,
                 zone_history_days=20,
+                execution_mode='next_bar',
             )
 
         self.assertEqual(result.total_trades, 1)
         self.assertEqual(result.trades[0].entry_time, pd.Timestamp('2026-02-05 02:00:00', tz='UTC'))
         self.assertAlmostEqual(
             result.trades[0].entry_price,
-            get_entry_execution_price(1.1004, 'LONG', 0.0001, params),
+            get_entry_execution_price(1.1000, 'LONG', 0.0001, params),
         )
 
     def test_backtest_executes_intrabar_within_hour_when_minute_quote_exists(self):
@@ -539,18 +612,9 @@ class SharedEntryLogicTests(unittest.TestCase):
             total_pnl_pips=0.0,
         )
 
-        def fake_backtest_pair(
-            pair,
-            info,
-            params,
-            hourly_days,
-            zone_history_days,
-            force_refresh,
-            client_id,
-            execution_mode='next_bar',
-        ):
-            scanned.append(pair)
-            return pair, fake_result
+        def fake_backtest_pair(**kwargs):
+            scanned.append(kwargs['pair'])
+            return kwargs['pair'], fake_result
 
         with patch('fx_sr.backtest._backtest_pair', side_effect=fake_backtest_pair):
             results = run_all_backtests_parallel(
@@ -570,18 +634,9 @@ class SharedEntryLogicTests(unittest.TestCase):
         scanned: list[tuple[str, str]] = []
         fake_result = SimpleNamespace(total_trades=0, win_rate=0.0, total_pnl_pips=0.0)
 
-        def fake_backtest_pair(
-            pair,
-            info,
-            params,
-            hourly_days,
-            zone_history_days,
-            force_refresh,
-            client_id,
-            execution_mode='next_bar',
-        ):
-            scanned.append((pair, execution_mode))
-            return pair, fake_result
+        def fake_backtest_pair(**kwargs):
+            scanned.append((kwargs['pair'], kwargs.get('execution_mode', 'next_bar')))
+            return kwargs['pair'], fake_result
 
         with patch('fx_sr.backtest._backtest_pair', side_effect=fake_backtest_pair):
             results = run_all_backtests_parallel(
@@ -611,18 +666,9 @@ class SharedEntryLogicTests(unittest.TestCase):
             total_pnl_pips=0.0,
         )
 
-        def fake_backtest_pair(
-            pair,
-            info,
-            params,
-            hourly_days,
-            zone_history_days,
-            force_refresh,
-            client_id,
-            execution_mode='next_bar',
-        ):
-            scanned.append(pair)
-            return pair, fake_result
+        def fake_backtest_pair(**kwargs):
+            scanned.append(kwargs['pair'])
+            return kwargs['pair'], fake_result
 
         with patch('fx_sr.backtest._backtest_pair', side_effect=fake_backtest_pair):
             results = run_all_backtests_parallel(

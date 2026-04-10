@@ -219,6 +219,20 @@ def _ensure_table(db_path: str = None):
                 PRIMARY KEY (pair, direction)
             )
         """)
+        # One-time migration: seed neutralization records for the 5 phantom
+        # positions created by IDEALPRO currency neutralization on 2026-04-10.
+        # These will be cleaned up automatically when the virtual positions
+        # disappear from IBKR.
+        conn.execute("""
+            INSERT INTO neutralization_position (pair, direction, exchange)
+            VALUES
+                ('GBPJPY', 'LONG', 'IDEALPRO'),
+                ('GBPCAD', 'SHORT', 'IDEALPRO'),
+                ('GBPAUD', 'LONG', 'IDEALPRO'),
+                ('GBPUSD', 'LONG', 'IDEALPRO'),
+                ('EURGBP', 'SHORT', 'IDEALPRO')
+            ON CONFLICT (pair, direction) DO NOTHING
+        """)
         conn.commit()
     finally:
         conn.close()

@@ -1854,6 +1854,40 @@ def submit_fx_market_order(
             return None
 
 
+def _neutralization_pair_direction(
+    currency: str,
+    account_currency: str,
+    action: str,
+    contract_pair: str,
+) -> tuple[str, str] | None:
+    """Map a neutralization fill to the standard (pair, direction) it creates.
+
+    Returns (pair, direction) where pair is a key in PAIRS and direction
+    is 'LONG' or 'SHORT', or None if the pair is not in our tracked set.
+    """
+    from .profiles import PAIRS
+
+    # The contract_pair is the symbol used in the IBKR order (e.g. 'GBPJPY').
+    # Check both orderings against our known pairs.
+    candidates = [contract_pair, contract_pair[3:] + contract_pair[:3]]
+    known_pair = None
+    for candidate in candidates:
+        if candidate in PAIRS:
+            known_pair = candidate
+            break
+    if known_pair is None:
+        return None
+
+    # Determine direction: BUY the contract = LONG, SELL = SHORT.
+    # But if the contract is reversed vs our known pair, flip.
+    if known_pair == contract_pair:
+        direction = 'LONG' if action == 'BUY' else 'SHORT'
+    else:
+        direction = 'SHORT' if action == 'BUY' else 'LONG'
+
+    return (known_pair, direction)
+
+
 def neutralize_currency_balance(
     currency: str,
     amount: float,
@@ -1966,6 +2000,22 @@ def neutralize_currency_balance(
                 order_ids=[getattr(live_order, 'orderId', None)],
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
+            # Record IDEALPRO fills so sync_positions skips the virtual position.
+            if contract is not None and contract.exchange == 'IDEALPRO':
+                fill_action = action  # the resolved action used for the order
+                contract_symbol = (
+                    getattr(contract, 'symbol', '') + getattr(contract, 'currency', '')
+                )
+                pd_result = _neutralization_pair_direction(
+                    currency, account_currency, fill_action, contract_symbol,
+                )
+                if pd_result is not None:
+                    from .positions import record_neutralization_position
+                    record_neutralization_position(
+                        pd_result[0], pd_result[1],
+                        order_id=getattr(live_order, 'orderId', None),
+                        exchange='IDEALPRO',
+                    )
             return {
                 'currency': currency,
                 'action': action,

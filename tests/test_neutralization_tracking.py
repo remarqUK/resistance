@@ -65,3 +65,33 @@ def test_load_empty():
     positions = load_neutralization_positions()
     assert isinstance(positions, set)
     assert len(positions) == 0
+
+
+from fx_sr.ibkr import _neutralization_pair_direction
+
+
+def test_neutralization_pair_direction_buy_jpy():
+    """BUY JPY against GBP -> sells GBP, buys JPY -> GBPJPY SHORT (selling GBP)."""
+    pair, direction = _neutralization_pair_direction('JPY', 'GBP', 'SELL', 'GBPJPY')
+    assert pair == 'GBPJPY'
+    assert direction == 'SHORT'
+
+
+def test_neutralization_pair_direction_sell_eur():
+    """SELL EUR against GBP -> we sell EUR, buy GBP -> EURGBP SHORT."""
+    pair, direction = _neutralization_pair_direction('EUR', 'GBP', 'SELL', 'EURGBP')
+    assert pair == 'EURGBP'
+    assert direction == 'SHORT'
+
+
+def test_neutralization_pair_direction_buy_usd():
+    """BUY USD against GBP via GBPUSD contract with BUY action -> GBPUSD LONG."""
+    pair, direction = _neutralization_pair_direction('USD', 'GBP', 'BUY', 'GBPUSD')
+    assert pair == 'GBPUSD'
+    assert direction == 'LONG'
+
+
+def test_neutralization_pair_direction_unknown_pair():
+    """Unknown pair returns None."""
+    result = _neutralization_pair_direction('XYZ', 'GBP', 'BUY', 'XYZGBP')
+    assert result is None

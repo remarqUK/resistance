@@ -2006,7 +2006,7 @@ def neutralize_currency_balance(
             if (
                 contract is not None
                 and contract.exchange == 'IDEALPRO'
-                and fill_status in ('Filled', 'PreSubmitted', 'Submitted')
+                and fill_status == 'Filled'
             ):
                 fill_action = action  # the resolved action used for the order
                 contract_symbol = (

@@ -208,6 +208,16 @@ def _ensure_table(db_path: str = None):
             CREATE INDEX IF NOT EXISTS idx_open_trades_pair_direction
             ON open_trades (pair, direction)
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS neutralization_position (
+                pair       TEXT NOT NULL,
+                direction  TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                order_id   INTEGER,
+                exchange   TEXT,
+                PRIMARY KEY (pair, direction)
+            )
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -222,6 +232,59 @@ def _ensure_tracking_tables(db_path: str | None = None) -> str:
     _ensure_table(db_path)
     ensure_detected_signal_table(db_path)
     return db_path
+
+
+def record_neutralization_position(
+    pair: str,
+    direction: str,
+    order_id: int | None = None,
+    exchange: str | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Record that a currency neutralization created a virtual FX position."""
+    if db_path is None:
+        db_path = get_db_path()
+    _ensure_table(db_path)
+    with db_transaction(db_path) as conn:
+        conn.execute(
+            """INSERT INTO neutralization_position (pair, direction, order_id, exchange)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (pair, direction) DO UPDATE
+               SET order_id = EXCLUDED.order_id,
+                   exchange = EXCLUDED.exchange,
+                   created_at = NOW()
+            """,
+            (pair, direction, order_id, exchange),
+        )
+
+
+def load_neutralization_positions(db_path: str | None = None) -> set[tuple[str, str]]:
+    """Return the set of (pair, direction) combos that are neutralization virtual positions."""
+    if db_path is None:
+        db_path = get_db_path()
+    _ensure_table(db_path)
+    conn = _connect(db_path)
+    try:
+        cursor = conn.execute("SELECT pair, direction FROM neutralization_position")
+        return {(row[0], row[1]) for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def remove_neutralization_position(
+    pair: str,
+    direction: str,
+    db_path: str | None = None,
+) -> None:
+    """Remove a neutralization position record (e.g. when the virtual position disappears)."""
+    if db_path is None:
+        db_path = get_db_path()
+    _ensure_table(db_path)
+    with db_transaction(db_path) as conn:
+        conn.execute(
+            "DELETE FROM neutralization_position WHERE pair=%s AND direction=%s",
+            (pair, direction),
+        )
 
 
 @contextmanager

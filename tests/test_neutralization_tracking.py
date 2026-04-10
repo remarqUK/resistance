@@ -97,6 +97,7 @@ def test_neutralization_pair_direction_unknown_pair():
     assert result is None
 
 
+import types
 from unittest.mock import patch, MagicMock
 from fx_sr.positions import sync_positions
 from fx_sr.strategy import StrategyParams
@@ -117,14 +118,14 @@ def test_sync_skips_neutralization_positions(mock_reconcile, mock_ibkr, mock_loa
     ]
     mock_ibkr.fetch_open_order_counts.return_value = {}
 
-    # Record GBPJPY LONG as a neutralization position
     record_neutralization_position('GBPJPY', 'LONG')
 
     params = StrategyParams()
     result = sync_positions(params=params)
 
-    # GBPJPY:LONG should NOT appear in tracked trades
     assert 'GBPJPY:LONG' not in result
+    # Must not attempt bracket resubmission for skipped positions.
+    mock_ibkr.submit_bracket_for_existing_position.assert_not_called()
 
 
 @patch('fx_sr.positions.set_setting')
@@ -142,3 +143,89 @@ def test_sync_skips_blocked_pair_directions(mock_reconcile, mock_ibkr, mock_load
     result = sync_positions(params=params)
 
     assert 'GBPJPY:LONG' not in result
+    # Must not attempt bracket resubmission for blocked positions.
+    mock_ibkr.submit_bracket_for_existing_position.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# neutralize_currency_balance fill-status gating
+# ---------------------------------------------------------------------------
+
+class _FakeContract:
+    """Minimal contract stand-in that holds keyword attrs like the real class."""
+    def __init__(self, **kwargs):
+        self.conId = 0
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def _fake_forex(pair):
+    return _FakeContract(symbol=pair[:3], currency=pair[3:], exchange='IDEALPRO', secType='CASH')
+
+
+def _mock_ib_for_neutralize(fill_status):
+    """Build a mock IB connection whose neutralization order reports *fill_status*.
+
+    FXCONV contracts always fail qualification (conId stays 0).
+    IDEALPRO contracts succeed only for pairs in the PAIRS dict.
+    """
+    from fx_sr.profiles import PAIRS
+
+    ib = MagicMock()
+
+    def qualify(c):
+        if getattr(c, 'exchange', '') == 'FXCONV':
+            c.conId = 0
+            return [c]
+        pair = getattr(c, 'symbol', '') + getattr(c, 'currency', '')
+        c.conId = 123 if pair in PAIRS else 0
+        return [c]
+
+    ib.qualifyContracts = qualify
+
+    order_status = MagicMock()
+    order_status.status = fill_status
+    order_status.avgFillPrice = 0.87
+    trade = MagicMock()
+    trade.order.orderId = 999
+    trade.orderStatus = order_status
+    ib.placeOrder.return_value = trade
+    return ib
+
+
+def _run_neutralize(fill_status, currency='EUR', amount=17000.0, account_currency='GBP'):
+    """Run neutralize_currency_balance with a fully-mocked IBKR connection."""
+    ib = _mock_ib_for_neutralize(fill_status)
+
+    fake_ib_async = types.ModuleType('ib_async')
+    fake_ib_async.Contract = _FakeContract
+    fake_ib_async.MarketOrder = MagicMock(return_value=MagicMock())
+    fake_ib_async.Forex = _fake_forex
+
+    import sys
+    with patch('fx_sr.ibkr._get_connection', return_value=(ib, True)), \
+         patch('fx_sr.ibkr.log_order_event'), \
+         patch.dict(sys.modules, {'ib_async': fake_ib_async}):
+        from fx_sr.ibkr import neutralize_currency_balance
+        neutralize_currency_balance(currency, amount, account_currency)
+
+
+def test_neutralize_records_on_filled():
+    """neutralize_currency_balance records a neutralization position when Filled."""
+    _run_neutralize('Filled')
+    positions = load_neutralization_positions()
+    assert ('EURGBP', 'SHORT') in positions
+
+
+def test_neutralize_does_not_record_on_submitted():
+    """neutralize_currency_balance must NOT record when order is only Submitted."""
+    _run_neutralize('Submitted')
+    positions = load_neutralization_positions()
+    assert ('EURGBP', 'SHORT') not in positions
+
+
+def test_neutralize_does_not_record_on_presubmitted():
+    """neutralize_currency_balance must NOT record when order is PreSubmitted."""
+    _run_neutralize('PreSubmitted')
+    positions = load_neutralization_positions()
+    assert ('EURGBP', 'SHORT') not in positions

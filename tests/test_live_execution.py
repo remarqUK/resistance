@@ -536,8 +536,8 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
         }
 
         with patch(
-            'fx_sr.positions.ibkr.fetch_open_order_pairs',
-            return_value=set(),
+            'fx_sr.positions.ibkr.fetch_open_order_counts',
+            return_value={},
         ), patch(
             'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
             return_value={
@@ -607,8 +607,8 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
         }
 
         with patch(
-            'fx_sr.positions.ibkr.fetch_open_order_pairs',
-            return_value=set(),
+            'fx_sr.positions.ibkr.fetch_open_order_counts',
+            return_value={},
         ), patch(
             'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
         ) as submit_mock:
@@ -634,8 +634,8 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
         )
 
         with patch(
-            'fx_sr.positions.ibkr.fetch_open_order_pairs',
-            return_value=set(),
+            'fx_sr.positions.ibkr.fetch_open_order_counts',
+            return_value={},
         ), patch(
             'fx_sr.positions.ibkr.submit_bracket_for_existing_position',
             return_value={

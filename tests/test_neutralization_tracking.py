@@ -95,3 +95,50 @@ def test_neutralization_pair_direction_unknown_pair():
     """Unknown pair returns None."""
     result = _neutralization_pair_direction('XYZ', 'GBP', 'BUY', 'XYZGBP')
     assert result is None
+
+
+from unittest.mock import patch, MagicMock
+from fx_sr.positions import sync_positions
+from fx_sr.strategy import StrategyParams
+
+
+def _make_ibkr_position(pair, size, avg_cost):
+    return {'pair': pair, 'size': size, 'avg_cost': avg_cost}
+
+
+@patch('fx_sr.positions.set_setting')
+@patch('fx_sr.positions._load_trades', return_value={})
+@patch('fx_sr.positions.ibkr')
+@patch('fx_sr.positions.reconcile_detected_signal_orders')
+def test_sync_skips_neutralization_positions(mock_reconcile, mock_ibkr, mock_load, mock_setting):
+    """sync_positions should not create open_trades for neutralization positions."""
+    mock_ibkr.fetch_positions.return_value = [
+        _make_ibkr_position('GBPJPY', 30000, 213.76),
+    ]
+    mock_ibkr.fetch_open_order_counts.return_value = {}
+
+    # Record GBPJPY LONG as a neutralization position
+    record_neutralization_position('GBPJPY', 'LONG')
+
+    params = StrategyParams()
+    result = sync_positions(params=params)
+
+    # GBPJPY:LONG should NOT appear in tracked trades
+    assert 'GBPJPY:LONG' not in result
+
+
+@patch('fx_sr.positions.set_setting')
+@patch('fx_sr.positions._load_trades', return_value={})
+@patch('fx_sr.positions.ibkr')
+@patch('fx_sr.positions.reconcile_detected_signal_orders')
+def test_sync_skips_blocked_pair_directions(mock_reconcile, mock_ibkr, mock_load, mock_setting):
+    """sync_positions should not adopt positions for blocked pair+direction combos."""
+    mock_ibkr.fetch_positions.return_value = [
+        _make_ibkr_position('GBPJPY', 30000, 213.76),  # GBPJPY LONG is blocked
+    ]
+    mock_ibkr.fetch_open_order_counts.return_value = {}
+
+    params = StrategyParams(use_pair_direction_filter=True)
+    result = sync_positions(params=params)
+
+    assert 'GBPJPY:LONG' not in result

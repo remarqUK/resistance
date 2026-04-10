@@ -14,6 +14,7 @@ from typing import Callable, Dict, List, Optional
 import pandas as pd
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
+from .profiles import BLOCKED_PAIR_DIRECTIONS
 from .data import fetch_daily_data, fetch_hourly_data
 from .db import _connect, _normalize_ts, db_transaction, get_db_path, set_setting
 from .live_history import (
@@ -901,6 +902,9 @@ def sync_positions(
         print("    Warning: broker unavailable, skipping position sync and reconciliation")
         return _load_trades()
 
+    # Load neutralization positions to skip virtual FX positions from currency conversion.
+    neutralization_keys = load_neutralization_positions()
+
     # Build live position keys BEFORE reconciliation so it never closes
     # a signal whose position still exists at IBKR.
     live_position_keys = set()
@@ -950,6 +954,27 @@ def sync_positions(
 
     for key, pos in ibkr_by_key.items():
         direction = 'LONG' if pos['size'] > 0 else 'SHORT'
+
+        # Skip virtual FX positions created by currency neutralization.
+        if (pos['pair'], direction) in neutralization_keys:
+            # If this phantom position was previously synced into open_trades,
+            # clean it up: remove the DB entry and cancel any brackets.
+            if key in db_trades:
+                info = db_trades[key]
+                print(f"    Removing phantom neutralization position: {pos['pair']} {direction}")
+                cancel_bracket_children(info.get('signal_id'))
+                _cancel_orders_for_pairs({pos['pair']})
+                with _tracking_db_transaction() as conn:
+                    _remove_trade_conn(conn, pos['pair'], direction)
+                del db_trades[key]
+            continue
+
+        # Skip positions for blocked pair+direction combos (safety net).
+        if params.use_pair_direction_filter and (pos['pair'], direction) in BLOCKED_PAIR_DIRECTIONS:
+            if key not in db_trades:
+                print(f"    Skipping blocked pair+direction: {pos['pair']} {direction}")
+                continue
+
         existing_info = db_trades.get(key)
         is_new_position = existing_info is None
         size_changed = (
@@ -1073,6 +1098,12 @@ def sync_positions(
                 'open_order_pairs': sorted(open_order_pairs),
             },
         )
+
+    # Cleanup: remove neutralization records for positions no longer in IBKR.
+    for n_pair, n_dir in list(neutralization_keys):
+        n_key = f"{n_pair}:{n_dir}"
+        if n_key not in ibkr_by_key:
+            remove_neutralization_position(n_pair, n_dir)
 
     set_setting('last_sync_positions', value_ts=datetime.now(timezone.utc))
 

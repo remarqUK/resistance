@@ -219,20 +219,6 @@ def _ensure_table(db_path: str = None):
                 PRIMARY KEY (pair, direction)
             )
         """)
-        # One-time migration: seed neutralization records for the 5 phantom
-        # positions created by IDEALPRO currency neutralization on 2026-04-10.
-        # These will be cleaned up automatically when the virtual positions
-        # disappear from IBKR.
-        conn.execute("""
-            INSERT INTO neutralization_position (pair, direction, exchange)
-            VALUES
-                ('GBPJPY', 'LONG', 'IDEALPRO'),
-                ('GBPCAD', 'SHORT', 'IDEALPRO'),
-                ('GBPAUD', 'LONG', 'IDEALPRO'),
-                ('GBPUSD', 'LONG', 'IDEALPRO'),
-                ('EURGBP', 'SHORT', 'IDEALPRO')
-            ON CONFLICT (pair, direction) DO NOTHING
-        """)
         conn.commit()
     finally:
         conn.close()
@@ -972,13 +958,22 @@ def sync_positions(
         # Skip virtual FX positions created by currency neutralization.
         if (pos['pair'], direction) in neutralization_keys:
             # If this phantom position was previously synced into open_trades,
-            # clean it up: remove the DB entry and cancel any brackets.
+            # clean it up: remove the DB entry, cancel brackets, and close
+            # any attached detected_signal so it doesn't dangle.
             if key in db_trades:
                 info = db_trades[key]
                 print(f"    Removing phantom neutralization position: {pos['pair']} {direction}")
                 cancel_bracket_children(info.get('signal_id'))
                 _cancel_orders_for_pairs({pos['pair']})
                 with _tracking_db_transaction() as conn:
+                    if info.get('signal_id'):
+                        record_closed_signal_conn(
+                            conn,
+                            info['signal_id'],
+                            close_reason='NEUTRALIZATION_CLEANUP',
+                            close_price=pos['avg_cost'],
+                            close_source='sync_positions',
+                        )
                     _remove_trade_conn(conn, pos['pair'], direction)
                 del db_trades[key]
             continue

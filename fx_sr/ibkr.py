@@ -2001,7 +2001,13 @@ def neutralize_currency_balance(
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
             # Record IDEALPRO fills so sync_positions skips the virtual position.
-            if contract is not None and contract.exchange == 'IDEALPRO':
+            # Only record when the order actually filled — unfilled/rejected
+            # orders don't create a virtual position.
+            if (
+                contract is not None
+                and contract.exchange == 'IDEALPRO'
+                and fill_status in ('Filled', 'PreSubmitted', 'Submitted')
+            ):
                 fill_action = action  # the resolved action used for the order
                 contract_symbol = (
                     getattr(contract, 'symbol', '') + getattr(contract, 'currency', '')

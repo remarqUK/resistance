@@ -81,6 +81,11 @@ class Trade:
     quality_score: float = 0.0
     commission_cost: float = 0.0    # round-turn commission in account currency
     best_favorable_price: Optional[float] = None  # best price reached in favorable direction
+    # Partial close / trailing fields
+    trade_group_id: Optional[str] = None    # links split trade halves
+    position_fraction: float = 1.0          # 1.0 = full, 0.5 = half position
+    is_remainder: bool = False              # True for hold-to-TP half after partial close
+    entry_atr: float = 0.0                  # ATR at entry, used for trailing calculations
 
 
 from .profiles import BLOCKED_PAIR_DIRECTIONS
@@ -173,6 +178,25 @@ class StrategyParams:
     # Diagnostic: dump JSON trade snapshots to logs/ for backtest/live parity debugging.
     # Toggle off once parity is confirmed.
     trade_snapshot_logging: bool = True
+    # --- Alternative TP/SL modes (backtestable) ---
+    # SL mode: 'fixed' uses sl_buffer_pct; 'atr' uses ATR * multiplier from zone edge
+    sl_mode: str = 'fixed'
+    atr_period: int = 14
+    atr_sl_multiplier: float = 1.0
+    # TP mode: 'rr' uses rr_ratio; 'zone' targets opposing zone edge
+    tp_mode: str = 'rr'
+    tp_zone_min_rr: float = 0.6
+    tp_zone_fallback_rr: float = 1.0
+    # Partial close: close a fraction at an intermediate R target
+    partial_close_enabled: bool = False
+    partial_close_fraction: float = 0.5
+    partial_close_target_r: float = 1.0
+    # Trailing stop (active after partial close by default)
+    trailing_mode: str = 'none'          # 'none' | 'breakeven' | 'fixed_r' | 'atr'
+    trailing_fixed_r: float = 0.5
+    trailing_atr_multiplier: float = 1.5
+    trailing_activate_r: float = 1.0
+    trailing_requires_partial: bool = True
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -240,6 +264,21 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         max_sl_pct=merged.get('max_sl_pct', 0.0),
         scan_lookback_bars=merged.get('scan_lookback_bars', 72),
         trade_snapshot_logging=merged.get('trade_snapshot_logging', True),
+        # Alternative TP/SL modes
+        sl_mode=merged.get('sl_mode', 'fixed'),
+        atr_period=merged.get('atr_period', 14),
+        atr_sl_multiplier=merged.get('atr_sl_multiplier', 1.0),
+        tp_mode=merged.get('tp_mode', 'rr'),
+        tp_zone_min_rr=merged.get('tp_zone_min_rr', 0.6),
+        tp_zone_fallback_rr=merged.get('tp_zone_fallback_rr', 1.0),
+        partial_close_enabled=merged.get('partial_close_enabled', False),
+        partial_close_fraction=merged.get('partial_close_fraction', 0.5),
+        partial_close_target_r=merged.get('partial_close_target_r', 1.0),
+        trailing_mode=merged.get('trailing_mode', 'none'),
+        trailing_fixed_r=merged.get('trailing_fixed_r', 0.5),
+        trailing_atr_multiplier=merged.get('trailing_atr_multiplier', 1.5),
+        trailing_activate_r=merged.get('trailing_activate_r', 1.0),
+        trailing_requires_partial=merged.get('trailing_requires_partial', True),
     )
 
 
@@ -287,6 +326,7 @@ def generate_signal(
     time: pd.Timestamp,
     params: StrategyParams,
     opposing_zone: Optional[SRZone] = None,
+    current_atr: float = 0.0,
 ) -> Optional[Signal]:
     """Check if a 1-hour candle inside a zone produces an entry signal.
 
@@ -332,22 +372,35 @@ def generate_signal(
             return None  # not bullish
 
         entry_price = get_entry_execution_price(bar_close, 'LONG', pip, params)
-        sl = zone.lower * (1 - params.sl_buffer_pct / 100)
+        if params.sl_mode == 'atr' and current_atr > 0:
+            sl = zone.lower - current_atr * params.atr_sl_multiplier
+        else:
+            sl = zone.lower * (1 - params.sl_buffer_pct / 100)
         risk = entry_price - sl
         if risk <= 0:
             return None
         if params.max_sl_pct > 0 and (risk / entry_price * 100) > params.max_sl_pct:
             return None
-        tp = entry_price + risk * params.rr_ratio
-
-        # Cap TP at opposing resistance zone (minus small buffer)
-        if params.tp_zone_cap and opposing_zone is not None and opposing_zone.zone_type == 'resistance':
-            cap_price = opposing_zone.lower  # near edge of resistance
-            if cap_price < tp and cap_price > entry_price:
-                tp = cap_price
+        if params.tp_mode == 'zone' and opposing_zone is not None and opposing_zone.zone_type == 'resistance':
+            tp = opposing_zone.lower  # near edge of opposing resistance
+            if tp <= entry_price:
+                tp = entry_price + risk * params.tp_zone_fallback_rr
+            else:
                 effective_rr = (tp - entry_price) / risk if risk > 0 else 0.0
-                if effective_rr < params.tp_zone_cap_min_rr:
-                    return None  # not enough room
+                if effective_rr < params.tp_zone_min_rr:
+                    return None  # opposing zone too close
+        elif params.tp_mode == 'zone':
+            tp = entry_price + risk * params.tp_zone_fallback_rr
+        else:
+            tp = entry_price + risk * params.rr_ratio
+            # Cap TP at opposing resistance zone (minus small buffer)
+            if params.tp_zone_cap and opposing_zone is not None and opposing_zone.zone_type == 'resistance':
+                cap_price = opposing_zone.lower  # near edge of resistance
+                if cap_price < tp and cap_price > entry_price:
+                    tp = cap_price
+                    effective_rr = (tp - entry_price) / risk if risk > 0 else 0.0
+                    if effective_rr < params.tp_zone_cap_min_rr:
+                        return None  # not enough room
 
         return Signal(
             time=time, pair=pair, direction='LONG',
@@ -362,22 +415,35 @@ def generate_signal(
             return None  # not bearish
 
         entry_price = get_entry_execution_price(bar_close, 'SHORT', pip, params)
-        sl = zone.upper * (1 + params.sl_buffer_pct / 100)
+        if params.sl_mode == 'atr' and current_atr > 0:
+            sl = zone.upper + current_atr * params.atr_sl_multiplier
+        else:
+            sl = zone.upper * (1 + params.sl_buffer_pct / 100)
         risk = sl - entry_price
         if risk <= 0:
             return None
         if params.max_sl_pct > 0 and (risk / entry_price * 100) > params.max_sl_pct:
             return None
-        tp = entry_price - risk * params.rr_ratio
-
-        # Cap TP at opposing support zone (plus small buffer)
-        if params.tp_zone_cap and opposing_zone is not None and opposing_zone.zone_type == 'support':
-            cap_price = opposing_zone.upper  # near edge of support
-            if cap_price > tp and cap_price < entry_price:
-                tp = cap_price
+        if params.tp_mode == 'zone' and opposing_zone is not None and opposing_zone.zone_type == 'support':
+            tp = opposing_zone.upper  # near edge of opposing support
+            if tp >= entry_price:
+                tp = entry_price - risk * params.tp_zone_fallback_rr
+            else:
                 effective_rr = (entry_price - tp) / risk if risk > 0 else 0.0
-                if effective_rr < params.tp_zone_cap_min_rr:
-                    return None  # not enough room
+                if effective_rr < params.tp_zone_min_rr:
+                    return None  # opposing zone too close
+        elif params.tp_mode == 'zone':
+            tp = entry_price - risk * params.tp_zone_fallback_rr
+        else:
+            tp = entry_price - risk * params.rr_ratio
+            # Cap TP at opposing support zone (plus small buffer)
+            if params.tp_zone_cap and opposing_zone is not None and opposing_zone.zone_type == 'support':
+                cap_price = opposing_zone.upper  # near edge of support
+                if cap_price > tp and cap_price < entry_price:
+                    tp = cap_price
+                    effective_rr = (entry_price - tp) / risk if risk > 0 else 0.0
+                    if effective_rr < params.tp_zone_cap_min_rr:
+                        return None  # not enough room
 
         return Signal(
             time=time, pair=pair, direction='SHORT',
@@ -612,6 +678,7 @@ def select_entry_signal(
     params: StrategyParams,
     support_zone: Optional[SRZone],
     resistance_zone: Optional[SRZone],
+    current_atr: float = 0.0,
 ) -> Optional[Signal]:
     """Evaluate the full shared entry rule-set for one hourly bar."""
 
@@ -644,6 +711,7 @@ def select_entry_signal(
             time=current_time,
             params=params,
             opposing_zone=opposing,
+            current_atr=current_atr,
         )
         if signal is None:
             continue
@@ -692,6 +760,36 @@ def build_trade_from_signal(
     )
 
 
+def check_partial_close(
+    trade: Trade,
+    high_price: float,
+    low_price: float,
+    params: StrategyParams,
+) -> Optional[float]:
+    """Check if the partial close target R has been reached.
+
+    Returns the partial close price if triggered, None otherwise.
+    Only fires once per trade (position_fraction must be 1.0).
+    """
+    if not params.partial_close_enabled:
+        return None
+    if trade.position_fraction != 1.0:
+        return None  # already partially closed
+    if trade.risk <= 0:
+        return None
+
+    target_r = params.partial_close_target_r
+    if trade.direction == 'LONG':
+        target_price = trade.entry_price + trade.risk * target_r
+        if high_price >= target_price:
+            return target_price
+    else:
+        target_price = trade.entry_price - trade.risk * target_r
+        if low_price <= target_price:
+            return target_price
+    return None
+
+
 def check_price_exit(
     trade: Trade,
     high_price: float,
@@ -712,9 +810,43 @@ def check_price_exit(
     half_spread = get_half_spread_price(pip, params)
     market_exit = get_market_exit_price(close_price, trade.direction, pip, params)
 
-    # Break-even stop: if trade reached breakeven_r, use entry as effective SL
+    # Trailing stop / break-even stop logic
     effective_sl = trade.sl_price
-    if params.breakeven_r > 0 and trade.best_favorable_price is not None and trade.risk > 0:
+    _trailing_active = (
+        params.trailing_mode != 'none'
+        and (not params.trailing_requires_partial or trade.is_remainder)
+        and trade.best_favorable_price is not None
+        and trade.risk > 0
+    )
+    if _trailing_active:
+        if trade.direction == 'LONG':
+            best_r = (trade.best_favorable_price - trade.entry_price) / trade.risk
+            if best_r >= params.trailing_activate_r:
+                if params.trailing_mode == 'breakeven':
+                    effective_sl = max(trade.entry_price, trade.sl_price)
+                elif params.trailing_mode == 'fixed_r':
+                    trail_distance = params.trailing_fixed_r * trade.risk
+                    effective_sl = max(trade.best_favorable_price - trail_distance, trade.entry_price)
+                elif params.trailing_mode == 'atr' and trade.entry_atr > 0:
+                    effective_sl = max(
+                        trade.best_favorable_price - trade.entry_atr * params.trailing_atr_multiplier,
+                        trade.entry_price,
+                    )
+        else:
+            best_r = (trade.entry_price - trade.best_favorable_price) / trade.risk
+            if best_r >= params.trailing_activate_r:
+                if params.trailing_mode == 'breakeven':
+                    effective_sl = min(trade.entry_price, trade.sl_price)
+                elif params.trailing_mode == 'fixed_r':
+                    trail_distance = params.trailing_fixed_r * trade.risk
+                    effective_sl = min(trade.best_favorable_price + trail_distance, trade.entry_price)
+                elif params.trailing_mode == 'atr' and trade.entry_atr > 0:
+                    effective_sl = min(
+                        trade.best_favorable_price + trade.entry_atr * params.trailing_atr_multiplier,
+                        trade.entry_price,
+                    )
+    elif params.breakeven_r > 0 and trade.best_favorable_price is not None and trade.risk > 0:
+        # Legacy break-even stop (when trailing_mode == 'none')
         if trade.direction == 'LONG':
             best_r = (trade.best_favorable_price - trade.entry_price) / trade.risk
             if best_r >= params.breakeven_r:

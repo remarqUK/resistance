@@ -59,6 +59,26 @@ def _build_hourly_df(rows: list[tuple[str, float, float, float, float]]) -> pd.D
     )
 
 
+def _pad_hourly_df(df: pd.DataFrame, min_bars: int = 25, neutral_price: float = 1.0500) -> pd.DataFrame:
+    """Prepend neutral padding bars so the live scan's minimum-bar guard is satisfied."""
+    needed = max(0, min_bars - len(df))
+    if needed == 0:
+        return df
+    first_ts = df.index[0]
+    pad_index = pd.date_range(end=first_ts - pd.Timedelta(hours=1), periods=needed, freq='h', tz='UTC')
+    pad = pd.DataFrame(
+        {
+            'Open': neutral_price,
+            'High': neutral_price + 0.0005,
+            'Low': neutral_price - 0.0005,
+            'Close': neutral_price,
+            'Volume': 0.0,
+        },
+        index=pad_index,
+    )
+    return pd.concat([pad, df])
+
+
 def _build_minute_df(rows: list[tuple[str, float]]) -> pd.DataFrame:
     index = pd.DatetimeIndex([pd.Timestamp(ts, tz='UTC') for ts, _ in rows])
     return pd.DataFrame(
@@ -139,8 +159,9 @@ class SharedEntryLogicTests(unittest.TestCase):
 
         self.assertEqual(result.total_trades, 0)
 
+        padded = _pad_hourly_df(hourly_df)
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
-                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=padded), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             row, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -198,8 +219,9 @@ class SharedEntryLogicTests(unittest.TestCase):
         self.assertEqual(result.trades[0].direction, 'LONG')
         self.assertEqual(result.trades[0].entry_time, pd.Timestamp('2026-02-03 05:00:00', tz='UTC'))
 
+        padded_live = _pad_hourly_df(live_hourly_df)
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
-                patch('fx_sr.live.fetch_hourly_data', return_value=live_hourly_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=padded_live), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             _, signal, _wf = _scan_pair(
@@ -262,8 +284,9 @@ class SharedEntryLogicTests(unittest.TestCase):
         self.assertEqual(result.trades[0].direction, 'SHORT')
         self.assertEqual(result.trades[0].entry_time, pd.Timestamp('2026-02-04 05:00:00', tz='UTC'))
 
+        padded_live = _pad_hourly_df(live_hourly_df)
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
-                patch('fx_sr.live.fetch_hourly_data', return_value=live_hourly_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=padded_live), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             _, signal, _wf = _scan_pair(
@@ -305,8 +328,9 @@ class SharedEntryLogicTests(unittest.TestCase):
         )
         minute_df = _build_minute_df([(str(current_hour), 1.0903)])
 
+        padded = _pad_hourly_df(hourly_df)
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
-                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=padded), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.0900, 1.0910)]):
             _, signal, _wf = _scan_pair(
@@ -350,8 +374,9 @@ class SharedEntryLogicTests(unittest.TestCase):
             use_pair_direction_filter=False,
         )
 
+        padded = _pad_hourly_df(hourly_df)
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
-                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=padded), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
                 patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]):
             _, signal, _wf = _scan_pair(

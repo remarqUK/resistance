@@ -739,7 +739,10 @@ def _resolve_live_sizing(args) -> tuple[float | None, str | None]:
 def cmd_backtest(args):
     """Run backtesting mode."""
 
+    from fx_sr.db import init_db
+
     active_client_id = _configure_ibkr(args)
+    init_db(migrate_legacy=False)
     profile_name = _requested_profile_name(args)
     profile = get_profile(profile_name)
     params = _build_strategy_params(args)
@@ -1076,6 +1079,48 @@ def _find_cache_gaps(
     return gaps
 
 
+def _find_cache_gap_work_items(
+    target_days: int = 365,
+    *,
+    now=None,
+    daily_extra_days: int = 0,
+) -> list[tuple[str, str, str, object]]:
+    """Return gap work items including the first missing timestamp when known."""
+
+    from fx_sr.data import find_first_missing_bar
+    from fx_sr.db import load_ohlc
+
+    import pandas as pd
+
+    now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    work_items: list[tuple[str, str, str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for pair_id, ticker, interval in _find_cache_gaps(
+        target_days,
+        now=now_ts,
+        daily_extra_days=daily_extra_days,
+    ):
+        cached = load_ohlc(ticker, interval)
+        gap_start = find_first_missing_bar(cached, interval, now=now_ts) if not cached.empty else None
+        work_items.append((pair_id, ticker, interval, gap_start))
+        seen.add((pair_id, ticker, interval))
+
+    for pair_id, pair_info in PAIRS.items():
+        ticker = pair_info['ticker']
+        for interval in ('1d', '1h', '1m'):
+            if (pair_id, ticker, interval) in seen:
+                continue
+            cached = load_ohlc(ticker, interval)
+            if cached.empty:
+                continue
+            gap_start = find_first_missing_bar(cached, interval, now=now_ts)
+            if gap_start is not None:
+                work_items.append((pair_id, ticker, interval, gap_start))
+
+    return work_items
+
+
 def _weekday_gap_days(from_ts, to_ts) -> int:
     """Estimate missing trading-calendar days between two timestamps (weekdays only)."""
 
@@ -1166,7 +1211,7 @@ def cmd_fill(args):
     """Identify cache gaps and fill them from IBKR."""
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from fx_sr.data import download_single_interval
+    from fx_sr.data import download_single_interval, refill_interval_from
     from fx_sr.db import get_db_path, init_db
 
     active_client_id = _configure_ibkr(args)
@@ -1187,12 +1232,12 @@ def cmd_fill(args):
     )
 
     gap_scan_start = time.perf_counter()
-    gaps = _find_cache_gaps(target_days, daily_extra_days=daily_extra_days)
+    gap_items = _find_cache_gap_work_items(target_days, daily_extra_days=daily_extra_days)
     gap_scan_elapsed = time.perf_counter() - gap_scan_start
     if debug:
         print(f'  [dbg] gap scan took {gap_scan_elapsed:.2f}s')
 
-    if not gaps:
+    if not gap_items:
         print('\n  All 22 pairs fully synced for 1d, 1h, and 1m. Nothing to do.')
         return
 
@@ -1201,13 +1246,17 @@ def cmd_fill(args):
             target_days,
             daily_extra_days=daily_extra_days,
         )
-        print(f'\n  Gaps found ({len(gaps)}):')
+        print(f'\n  Gaps found ({len(gap_items)}):')
         for pair_id, _ticker, iv, detail in gaps_verbose:
             print(f'    {pair_id:<10} {iv:<4} {detail}')
+        for pair_id, _ticker, iv, gap_start in gap_items:
+            if gap_start is not None:
+                print(f'    {pair_id:<10} {iv:<4} internal/trailing hole starts at {gap_start}')
     else:
-        print(f'\n  Gaps found ({len(gaps)}):')
-        for pair_id, _ticker, iv in gaps:
-            print(f'    {pair_id:<10} {iv}')
+        print(f'\n  Gaps found ({len(gap_items)}):')
+        for pair_id, _ticker, iv, gap_start in gap_items:
+            suffix = f' from {gap_start}' if gap_start is not None else ''
+            print(f'    {pair_id:<10} {iv}{suffix}')
 
     # Each work item is a single (pair, interval) - run 3 at a time to stay
     # under IBKR's ~5 concurrent historical-data request limit.
@@ -1222,17 +1271,28 @@ def cmd_fill(args):
             iv,
             daily_target_days if iv == '1d' else target_days,
             active_client_id + idx,
+            gap_start,
         )
-        for idx, (pair_id, _ticker, iv) in enumerate(gaps)
+        for idx, (pair_id, _ticker, iv, gap_start) in enumerate(gap_items)
     ]
 
-    def _run_work_item(pair_id, pair_info, iv, item_days, cid):
+    def _run_work_item(pair_id, pair_info, iv, item_days, cid, gap_start):
         item_start = time.perf_counter()
         if debug:
             print(f'  [dbg] work item start: {pair_id} {iv} -> client {cid}')
-        rows = download_single_interval(
-            pair_id, pair_info, iv, item_days, client_id=cid, verbose=verbose,
-        )
+        if gap_start is not None:
+            rows = len(
+                refill_interval_from(
+                    pair_info['ticker'],
+                    iv,
+                    gap_start,
+                    client_id=cid,
+                )
+            )
+        else:
+            rows = download_single_interval(
+                pair_id, pair_info, iv, item_days, client_id=cid, verbose=verbose,
+            )
         item_elapsed = time.perf_counter() - item_start
         if debug:
             print(f'  [dbg] work item end: {pair_id} {iv} -> {item_elapsed:.2f}s')
@@ -1256,18 +1316,18 @@ def cmd_fill(args):
             failed = []
 
             futures = {}
-            for pair_id, pair_info, iv, item_days, cid in pending:
-                fut = executor.submit(_run_work_item, pair_id, pair_info, iv, item_days, cid)
-                futures[fut] = (pair_id, pair_info, iv, item_days, cid)
+            for pair_id, pair_info, iv, item_days, cid, gap_start in pending:
+                fut = executor.submit(_run_work_item, pair_id, pair_info, iv, item_days, cid, gap_start)
+                futures[fut] = (pair_id, pair_info, iv, item_days, cid, gap_start)
             for fut in as_completed(futures):
-                pair_id, pair_info, iv, item_days, cid = futures[fut]
+                pair_id, pair_info, iv, item_days, cid, gap_start = futures[fut]
                 completed += 1
                 try:
                     _, _, _, _, rows, item_elapsed = fut.result()
                     print(f'  [{completed}/{total}] {pair_id} {iv} done ({rows} rows, {item_elapsed:.2f}s)')
                 except Exception as e:
                     print(f'  [{completed}/{total}] {pair_id} {iv} FAILED: {e}')
-                    failed.append((pair_id, pair_info, iv, item_days, cid))
+                    failed.append((pair_id, pair_info, iv, item_days, cid, gap_start))
 
             pending = failed
             if debug:
@@ -1279,14 +1339,15 @@ def cmd_fill(args):
 
     # Re-check
     recheck_start = time.perf_counter()
-    remaining = _find_cache_gaps(target_days, daily_extra_days=daily_extra_days)
+    remaining = _find_cache_gap_work_items(target_days, daily_extra_days=daily_extra_days)
     recheck_elapsed = time.perf_counter() - recheck_start
     if debug:
         print(f'  [dbg] post-fill recheck took {recheck_elapsed:.2f}s')
     if remaining:
         print(f'\n  Still missing ({len(remaining)}):')
-        for pair_id, _ticker, iv in remaining:
-            print(f'    {pair_id:<10} {iv}')
+        for pair_id, _ticker, iv, gap_start in remaining:
+            suffix = f' from {gap_start}' if gap_start is not None else ''
+            print(f'    {pair_id:<10} {iv}{suffix}')
     else:
         print('\n  All gaps filled.')
 
@@ -1602,7 +1663,8 @@ def main():
         f"  {name:<12} {p['description']} "
         f"(rr={p['rr_ratio']}, sl={p['sl_buffer_pct']}, "
         f"early={p['early_exit_r']}, corr={p['max_correlated_trades']})"
-        for name, p in PROFILES.items()
+        for name in PROFILES
+        for p in [get_profile(name)]
     )
     epilog = (
         'Examples:\n'

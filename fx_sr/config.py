@@ -47,7 +47,8 @@ STRATEGY_PRESETS = {
         'momentum_threshold': p.get('momentum_threshold', 0.7),
         'friday_tp_pct': p.get('friday_tp_pct', 0.70),
     }
-    for name, p in PROFILES.items()
+    for name in PROFILES
+    for p in [get_profile(name)]
 }
 
 DEFAULT_STRATEGY_PRESET = DEFAULT_PROFILE

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -24,11 +26,15 @@ from .bar_accumulator import HourlyBarAccumulator
 from .live import (
     ExecutionResult,
     PairScanRow,
+    _scan_pair,
+    apply_startup_scan_artifacts,
     build_live_size_plans,
     collect_scan_rows,
     execute_signal_plans,
     load_closed_trade_summaries,
     refresh_pair_row_price,
+    run_startup_scan_pair,
+    seed_seen_wf_trades,
 )
 from .live_history import (
     enqueue_write_async,
@@ -40,8 +46,8 @@ from .live_history import (
     start_background_writer,
     stop_background_writer,
 )
-from .data import _remaining_days_to_fetch, download_single_interval
-from .db import get_cached_range, init_db
+from .data import _remaining_days_to_fetch, download_single_interval, find_first_missing_cached_bar, refill_interval_from
+from .db import _connect, get_cached_range, get_db_path, get_setting, init_db, load_ohlc, set_setting
 from .portfolio import build_portfolio_state, closed_trade_summary_from_row, get_entry_block
 from .live_stream import StreamingScanner
 from .positions import calc_pnl_pips, cancel_bracket_children, pair_pip, process_hourly_exit_bars, sync_positions
@@ -54,6 +60,22 @@ LOG_LIMIT = 80
 ALERT_LIMIT = 200
 EXECUTION_LIMIT = 200
 _BACKTEST_PROGRESS_RE = re.compile(r'^\s*\[(\d+)\s*/\s*(\d+)\]\s+([A-Za-z0-9]+)')
+_STARTUP_WARM_CACHE_VERSION = 1
+_STARTUP_WARM_CACHE_ALIAS = 'live_startup_warm:latest'
+_HOLE_REFILL_MAX_AGE = pd.Timedelta(days=30)
+_PHASE2_SCAN_WORKERS_DEFAULT = 4
+
+
+@dataclass(slots=True)
+class _BufferedRealtimeBar:
+    """Minimal realtime-bar payload kept during startup catch-up."""
+
+    time: pd.Timestamp
+    open_: float
+    high: float
+    low: float
+    close: float
+    volume: float
 
 
 def _normalize_execution_mode(mode: str | None) -> str:
@@ -107,7 +129,18 @@ class LiveDashboardHub:
         chart_tf: str = '1h',
         hourly_days: int = 1,
     ) -> None:
-        self.pairs = pairs
+        from .strategy import is_pair_fully_blocked
+
+        self._blocked_live_pairs = {
+            pair_id: pair_info
+            for pair_id, pair_info in pairs.items()
+            if is_pair_fully_blocked(pair_id, params)
+        }
+        self.pairs = {
+            pair_id: pair_info
+            for pair_id, pair_info in pairs.items()
+            if pair_id not in self._blocked_live_pairs
+        }
         self.params = params
         self.interval = interval
         self.zone_history_days = zone_history_days
@@ -179,6 +212,10 @@ class LiveDashboardHub:
         self._tick_pending_pairs: set[str] = set()
         self._tick_exit_alerted: set[str] = set()
         self._minute_tracker: dict[str, int] = {}
+        self._realtime_bars_enabled = False
+        self._startup_bar_buffering = True
+        self._startup_bar_sequence = 0
+        self._startup_bar_buffer: list[tuple[pd.Timestamp, int, str, _BufferedRealtimeBar]] = []
         self._portfolio_state = build_portfolio_state([], params=params, current_balance=balance)
         self._daily_closed_pnl: float = 0.0
         self._backfill_done = False
@@ -210,6 +247,7 @@ class LiveDashboardHub:
             'pairs_completed': len(self._pair_rows),
             'signal_count': 0,
             'pending_count': len(self._tick_pending_pairs),
+            'pending_pairs': sorted(self._tick_pending_pairs),
             'position_count': len(self._tracked),
             'execution_enabled': self._execution_enabled(),
             'execution_available': self._execution_available,
@@ -227,6 +265,295 @@ class LiveDashboardHub:
             'risk_pct': self.risk_pct * 100.0 if self.risk_pct is not None else None,
             'daily_closed_pnl': self._daily_closed_pnl,
         }
+
+    def _startup_warm_cache_key(self) -> str:
+        """Return the app-settings key for this startup scan configuration."""
+
+        identity = {
+            'version': _STARTUP_WARM_CACHE_VERSION,
+            'pairs': sorted(self.pairs.keys()),
+            'strategy_label': self.strategy_label,
+            'execution_mode': self.execution_mode,
+            'zone_history_days': self.zone_history_days,
+            'hourly_days': self.hourly_days,
+            'params': repr(self.params),
+        }
+        digest = hashlib.sha1(
+            json.dumps(identity, sort_keys=True, default=str).encode('utf-8')
+        ).hexdigest()
+        return f'live_startup_warm:{digest}'
+
+    @staticmethod
+    def _frame_fingerprint(df: pd.DataFrame | None) -> dict:
+        """Return a lightweight fingerprint for one cached OHLC frame."""
+
+        if df is None or df.empty:
+            return {'rows': 0, 'first': None, 'last': None, 'close': None}
+        return {
+            'rows': int(len(df)),
+            'first': str(pd.Timestamp(df.index[0])),
+            'last': str(pd.Timestamp(df.index[-1])),
+            'close': float(df['Close'].iloc[-1]),
+        }
+
+    @staticmethod
+    def _range_fingerprint(cached_range) -> dict:
+        """Return a lightweight fingerprint for cached range metadata."""
+
+        if cached_range is None:
+            return {'rows': 0, 'first': None, 'last': None}
+        first_ts, last_ts, rows = cached_range
+        return {
+            'rows': int(rows),
+            'first': str(first_ts) if first_ts is not None else None,
+            'last': str(last_ts) if last_ts is not None else None,
+        }
+
+    def _pair_startup_fingerprint(
+        self,
+        pair_id: str,
+        ticker: str | None,
+        daily_df: pd.DataFrame | None,
+        hourly_df: pd.DataFrame | None,
+    ) -> dict:
+        """Build a strict-enough fingerprint for one pair's phase-3 inputs."""
+
+        daily_range = get_cached_range(ticker, '1d') if ticker else None
+        minute_range = get_cached_range(ticker, '1m') if ticker else None
+        return {
+            'pair': pair_id,
+            'ticker': ticker,
+            'zone_history_days': int(self.zone_history_days),
+            'hourly_days': int(self.hourly_days),
+            'execution_mode': self.execution_mode,
+            'daily_range': self._range_fingerprint(daily_range),
+            'hourly': self._frame_fingerprint(hourly_df),
+            'minute_range': self._range_fingerprint(minute_range),
+        }
+
+    def _startup_resume_hourly_df(
+        self,
+        hourly_df: pd.DataFrame | None,
+        cached_entry: dict | None,
+    ) -> tuple[pd.DataFrame | None, bool]:
+        """Return a reduced replay window when a prior warm artifact exists."""
+
+        if hourly_df is None or hourly_df.empty or not cached_entry:
+            return hourly_df, False
+
+        cached_last = (
+            cached_entry.get('fingerprint', {})
+            .get('hourly', {})
+            .get('last')
+        )
+        if not cached_last:
+            return hourly_df, False
+
+        try:
+            last_ts = pd.Timestamp(cached_last)
+        except Exception:
+            return hourly_df, False
+
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.tz_localize('UTC')
+        else:
+            last_ts = last_ts.tz_convert('UTC')
+
+        tail_bars = max(
+            int(getattr(self.params, 'scan_lookback_bars', 72) or 72),
+            int(getattr(self.params, 'max_hold_bars', 72) or 72),
+        ) + 4
+        resume_start = last_ts - pd.Timedelta(hours=tail_bars)
+        reduced = hourly_df[hourly_df.index >= resume_start]
+        if reduced.empty or len(reduced) >= len(hourly_df):
+            return hourly_df, False
+        return reduced, True
+
+    @staticmethod
+    def _serialize_signal_artifact(signal) -> dict | None:
+        """Serialize a Signal plus warm-start metadata."""
+
+        if signal is None:
+            return None
+        payload = {
+            'time': pd.Timestamp(signal.time).isoformat(),
+            'pair': signal.pair,
+            'direction': signal.direction,
+            'entry_price': float(signal.entry_price),
+            'sl_price': float(signal.sl_price),
+            'tp_price': float(signal.tp_price),
+            'zone_upper': float(signal.zone_upper),
+            'zone_lower': float(signal.zone_lower),
+            'zone_strength': signal.zone_strength,
+            'zone_type': signal.zone_type,
+            'quality_score': float(getattr(signal, 'quality_score', 0.0) or 0.0),
+        }
+        for key in ('_wf_exit_reason', '_wf_pnl_r', '_wf_exit_time'):
+            value = getattr(signal, key, None)
+            if value is None:
+                continue
+            payload[key] = (
+                pd.Timestamp(value).isoformat()
+                if key == '_wf_exit_time'
+                else value
+            )
+        return payload
+
+    @staticmethod
+    def _deserialize_signal_artifact(payload: dict | None):
+        """Restore a Signal from warm-start storage."""
+
+        if not payload:
+            return None
+        from .strategy import Signal
+
+        signal = Signal(
+            time=pd.Timestamp(payload['time']),
+            pair=str(payload['pair']),
+            direction=str(payload['direction']),
+            entry_price=float(payload['entry_price']),
+            sl_price=float(payload['sl_price']),
+            tp_price=float(payload['tp_price']),
+            zone_upper=float(payload['zone_upper']),
+            zone_lower=float(payload['zone_lower']),
+            zone_strength=str(payload['zone_strength']),
+            zone_type=str(payload['zone_type']),
+            quality_score=float(payload.get('quality_score') or 0.0),
+        )
+        if payload.get('_wf_exit_reason') is not None:
+            signal._wf_exit_reason = payload.get('_wf_exit_reason')
+        if payload.get('_wf_pnl_r') is not None:
+            signal._wf_pnl_r = payload.get('_wf_pnl_r')
+        if payload.get('_wf_exit_time') is not None:
+            signal._wf_exit_time = pd.Timestamp(payload['_wf_exit_time'])
+        return signal
+
+    def _serialize_pair_row_artifact(self, row: PairScanRow) -> dict:
+        """Serialize a PairScanRow without lifecycle-only fields."""
+
+        return {
+            'pair': row.pair,
+            'name': row.name,
+            'decimals': int(row.decimals),
+            'price': None if row.price is None else float(row.price),
+            'state': row.state,
+            'note': row.note,
+            'support_text': row.support_text,
+            'resistance_text': row.resistance_text,
+            'support_lower': None if row.support_lower is None else float(row.support_lower),
+            'support_upper': None if row.support_upper is None else float(row.support_upper),
+            'support_strength': row.support_strength,
+            'resistance_lower': None if row.resistance_lower is None else float(row.resistance_lower),
+            'resistance_upper': None if row.resistance_upper is None else float(row.resistance_upper),
+            'resistance_strength': row.resistance_strength,
+            'support_dist_pct': None if row.support_dist_pct is None else float(row.support_dist_pct),
+            'resistance_dist_pct': None if row.resistance_dist_pct is None else float(row.resistance_dist_pct),
+        }
+
+    def _deserialize_pair_row_artifact(self, payload: dict, signal) -> PairScanRow:
+        """Restore a PairScanRow from warm-start storage."""
+
+        return PairScanRow(
+            pair=str(payload['pair']),
+            name=str(payload['name']),
+            decimals=int(payload['decimals']),
+            price=payload.get('price'),
+            state=str(payload['state']),
+            note=str(payload.get('note') or ''),
+            support_text=str(payload.get('support_text') or '-'),
+            resistance_text=str(payload.get('resistance_text') or '-'),
+            signal=signal,
+            support_lower=payload.get('support_lower'),
+            support_upper=payload.get('support_upper'),
+            support_strength=payload.get('support_strength'),
+            resistance_lower=payload.get('resistance_lower'),
+            resistance_upper=payload.get('resistance_upper'),
+            resistance_strength=payload.get('resistance_strength'),
+            support_dist_pct=payload.get('support_dist_pct'),
+            resistance_dist_pct=payload.get('resistance_dist_pct'),
+        )
+
+    def _load_startup_warm_entries(self) -> dict[str, dict]:
+        """Load the last successful startup-warm artifact for this config."""
+
+        candidate_rows = []
+
+        for key in (_STARTUP_WARM_CACHE_ALIAS, self._startup_warm_cache_key()):
+            row = get_setting(key)
+            raw = row.get('value_text') if row is not None else None
+            if raw:
+                candidate_rows.append(raw)
+
+        if not candidate_rows:
+            try:
+                conn = _connect(get_db_path())
+                try:
+                    row = conn.execute(
+                        "SELECT value_text FROM app_settings "
+                        "WHERE key LIKE %s "
+                        "ORDER BY updated_at DESC LIMIT 1",
+                        ('live_startup_warm:%',),
+                    ).fetchone()
+                finally:
+                    conn.close()
+                if row is not None and row[0]:
+                    candidate_rows.append(row[0])
+            except Exception:
+                pass
+
+        for raw in candidate_rows:
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if payload.get('version') != _STARTUP_WARM_CACHE_VERSION:
+                continue
+            entries = payload.get('pairs')
+            if isinstance(entries, dict):
+                return entries
+        return {}
+
+    def _save_startup_warm_entries(self, entries: dict[str, dict]) -> None:
+        """Persist the latest successful startup-warm artifact."""
+
+        payload = json.dumps(
+            {'version': _STARTUP_WARM_CACHE_VERSION, 'pairs': entries},
+            sort_keys=True,
+            default=str,
+        )
+        set_setting(self._startup_warm_cache_key(), value_text=payload)
+        set_setting(_STARTUP_WARM_CACHE_ALIAS, value_text=payload)
+
+    async def _persist_pair_startup_warm(self, pair: str, wf_signals: list | None = None) -> None:
+        """Persist one pair's current startup-warm entry."""
+
+        async with self._lock:
+            row = self._pair_rows.get(pair)
+        if row is None:
+            return
+
+        signal = row.signal
+        ticker = self.pairs.get(pair, {}).get('ticker')
+        wf_payload = list(wf_signals or [])
+
+        def _save() -> None:
+            entries = self._load_startup_warm_entries()
+            hourly_df = self._accumulator.get_hourly_df(pair)
+            fingerprint = self._pair_startup_fingerprint(
+                pair,
+                ticker,
+                None,
+                hourly_df,
+            )
+            entries[pair] = {
+                'fingerprint': fingerprint,
+                'row': self._serialize_pair_row_artifact(row),
+                'signal': self._serialize_signal_artifact(signal),
+                'wf_signals': [self._serialize_signal_artifact(item) for item in wf_payload],
+            }
+            self._save_startup_warm_entries(entries)
+
+        await self._loop.run_in_executor(self._scan_executor, _save)
 
     def _append_log(self, level: str, message: str) -> dict:
         """Append a structured log entry."""
@@ -735,7 +1062,7 @@ class LiveDashboardHub:
             base_client_id += 1000
         return base_client_id + 4000
 
-    def _find_fill_gaps(self, target_days: int) -> list[tuple[str, dict, str]]:
+    def _find_fill_gaps(self, target_days: int) -> list[tuple[str, dict, str, pd.Timestamp | None]]:
         """Find cache gaps for supported intervals."""
 
         if target_days <= 0:
@@ -747,19 +1074,24 @@ class LiveDashboardHub:
             '1m': int(target_days * 1000),
         }
         now = pd.Timestamp.now(tz='UTC')
-        gaps: list[tuple[str, dict, str]] = []
+        gaps: list[tuple[str, dict, str, pd.Timestamp | None]] = []
 
         for pair_id, pair_info in self.pairs.items():
             ticker = pair_info['ticker']
             for interval in ('1d', '1h', '1m'):
                 cached_range = get_cached_range(ticker, interval)
+                gap_start = find_first_missing_cached_bar(
+                    ticker,
+                    interval,
+                    now=now,
+                )
                 if cached_range is None:
-                    gaps.append((pair_id, pair_info, interval))
+                    gaps.append((pair_id, pair_info, interval, gap_start))
                     continue
 
                 first_ts, last_ts, rows = cached_range
                 if int(rows) < min_rows.get(interval, 0):
-                    gaps.append((pair_id, pair_info, interval))
+                    gaps.append((pair_id, pair_info, interval, gap_start))
                     continue
 
                 fetch_days = _remaining_days_to_fetch(
@@ -772,8 +1104,8 @@ class LiveDashboardHub:
                     ),
                     now=now,
                 )
-                if fetch_days > 0:
-                    gaps.append((pair_id, pair_info, interval))
+                if fetch_days > 0 or gap_start is not None:
+                    gaps.append((pair_id, pair_info, interval, gap_start))
 
         return gaps
 
@@ -801,7 +1133,7 @@ class LiveDashboardHub:
                 'message': 'No cache gaps detected.',
             }
 
-        work_items = [(pair_id, pair_info, interval) for pair_id, pair_info, interval in gaps]
+        work_items = [(pair_id, pair_info, interval, gap_start) for pair_id, pair_info, interval, gap_start in gaps]
         max_workers = min(3, len(work_items))
         base_fill_client_id = self._fill_client_id_base()
         max_retries = 3
@@ -818,8 +1150,17 @@ class LiveDashboardHub:
                 thread._fill_client_id_slot = slot
             return base_fill_client_id + int(slot)
 
-        def _run_work_item(pair_id: str, pair_info: dict, interval: str) -> int:
+        def _run_work_item(pair_id: str, pair_info: dict, interval: str, gap_start: pd.Timestamp | None) -> int:
             client_id = _thread_client_id()
+            if gap_start is not None:
+                return len(
+                    refill_interval_from(
+                        pair_info['ticker'],
+                        interval,
+                        gap_start,
+                        client_id=client_id,
+                    )
+                )
             return download_single_interval(pair_id, pair_info, interval, target_days, client_id=client_id)
 
         pending = list(work_items)
@@ -846,17 +1187,17 @@ class LiveDashboardHub:
             failed: list[tuple[str, dict, str]] = []
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(_run_work_item, pair_id, pair_info, interval): (pair_id, pair_info, interval)
-                    for pair_id, pair_info, interval in pending
+                    executor.submit(_run_work_item, pair_id, pair_info, interval, gap_start): (pair_id, pair_info, interval, gap_start)
+                    for pair_id, pair_info, interval, gap_start in pending
                 }
 
                 for future in as_completed(futures):
-                    pair_id, pair_info, interval = futures[future]
+                    pair_id, pair_info, interval, gap_start = futures[future]
                     try:
                         _ = future.result()
                         total_items_processed += 1
                     except Exception:
-                        failed.append((pair_id, pair_info, interval))
+                        failed.append((pair_id, pair_info, interval, gap_start))
                         total_errors += 1
                     await self._publish_fill_progress(
                         status='running',
@@ -1139,6 +1480,13 @@ class LiveDashboardHub:
                     'account_currency': account_currency,
                     'status': status,
                     'decimals': self.pairs.get(pair, {}).get('decimals', 5),
+                    'is_remainder': getattr(trade, 'is_remainder', False),
+                    'position_fraction': getattr(trade, 'position_fraction', 1.0),
+                    'trade_group_id': getattr(trade, 'trade_group_id', None),
+                    'sl_at_breakeven': (
+                        getattr(trade, 'is_remainder', False)
+                        and abs(trade.sl_price - trade.entry_price) < abs(trade.entry_price * 0.0001)
+                    ),
                 }
             )
         return rows
@@ -1495,6 +1843,15 @@ class LiveDashboardHub:
             'currency_balances': dict(self._currency_balances),
         }
 
+    def _export_position_state(self) -> dict:
+        """Serialize the position-specific state updated on live price ticks."""
+
+        return {
+            'summary': dict(self.summary),
+            'positions': self._serialize_positions(),
+            'alerts': self._serialize_alerts(),
+        }
+
     async def set_execution_paused(self, paused: bool) -> dict:
         """Pause or resume new order placement without restarting the dashboard."""
 
@@ -1530,6 +1887,32 @@ class LiveDashboardHub:
 
         for ws in stale:
             self._clients.discard(ws)
+
+    def _track_task(self, task: asyncio.Task, *, label: str) -> None:
+        """Track an asyncio task and surface failures in the dashboard log."""
+
+        self._pending_tasks.add(task)
+        task.add_done_callback(
+            lambda done, task_label=label: self._on_tracked_task_done(done, label=task_label)
+        )
+
+    def _on_tracked_task_done(self, task: asyncio.Task, *, label: str) -> None:
+        """Remove a tracked task and log any unhandled exception."""
+
+        self._pending_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is None:
+            return
+        log_task = asyncio.create_task(
+            self._broadcast_log('error', f'{label} failed: {exc}')
+        )
+        self._pending_tasks.add(log_task)
+        log_task.add_done_callback(self._pending_tasks.discard)
 
     async def close_tracked_position(self, *, pair: str, direction: str) -> dict:
         """Submit a closing market order for a tracked position."""
@@ -1716,13 +2099,6 @@ class LiveDashboardHub:
 
         async with self._lock:
             self._last_quotes[pair] = price
-            row = self._pair_rows.get(pair)
-            if row is None:
-                return
-
-            updated_row = refresh_pair_row_price(row, price)
-            self._pair_rows[pair] = updated_row
-
             positions_changed = False
             for key, info in self._tracked.items():
                 if info['pair'] != pair:
@@ -1733,13 +2109,23 @@ class LiveDashboardHub:
                 }
                 positions_changed = True
 
+            row = self._pair_rows.get(pair)
+            updated_row = None
+            if row is not None:
+                updated_row = refresh_pair_row_price(row, price)
+                self._pair_rows[pair] = updated_row
+
             # --- Skip all trading logic until backfill is complete ---
             if not self._backfill_done:
                 summary = dict(self.summary)
-                row_payload = self._serialize_pair_row(updated_row)
+                row_payload = self._serialize_pair_row(updated_row) if updated_row is not None else None
+                position_payload = self._export_position_state() if positions_changed else None
 
         if not self._backfill_done:
-            await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
+            if position_payload is not None:
+                await self._broadcast({'type': 'positions_update', **position_payload})
+            if row_payload is not None:
+                await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
             return
 
         exit_signal_writes: list[tuple[str, str, float | None]] = []
@@ -1785,8 +2171,8 @@ class LiveDashboardHub:
                     positions_changed = True
 
             summary = dict(self.summary)
-            row_payload = self._serialize_pair_row(updated_row)
-            state_payload = self._export_state() if positions_changed else None
+            row_payload = self._serialize_pair_row(updated_row) if updated_row is not None else None
+            position_payload = self._export_position_state() if positions_changed else None
 
         for signal_id, exit_reason, exit_price in exit_signal_writes:
             await self._loop.run_in_executor(
@@ -1799,11 +2185,11 @@ class LiveDashboardHub:
                 )
             )
 
-        if positions_changed and state_payload is not None:
-            await self._broadcast({'type': 'snapshot', 'state': state_payload})
-            return
+        if positions_changed and position_payload is not None:
+            await self._broadcast({'type': 'positions_update', **position_payload})
 
-        await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
+        if row_payload is not None:
+            await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
 
     async def _handle_signal(self, signal, *, source: str) -> None:
         """Process a streaming signal detected from the live bar feed."""
@@ -1993,8 +2379,7 @@ class LiveDashboardHub:
         """Create an asyncio task and track it so it can be cleaned up."""
 
         task = asyncio.create_task(self._handle_quote_update(pair, price))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
+        self._track_task(task, label=f'quote update {pair}')
 
     def _queue_bar_update(self, pair: str, bar) -> None:
         """Marshal a real-time bar callback onto the asyncio loop."""
@@ -2004,25 +2389,57 @@ class LiveDashboardHub:
 
         def _schedule():
             task = asyncio.create_task(self._handle_bar_update(pair, bar))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._pending_tasks.discard)
+            self._track_task(task, label=f'realtime bar {pair}')
 
         self._loop.call_soon_threadsafe(_schedule)
 
-    async def _handle_bar_update(self, pair: str, bar) -> None:
-        """Process a 5-second real-time bar: update accumulator + feed quote/exit handling."""
+    @staticmethod
+    def _copy_realtime_bar(bar) -> _BufferedRealtimeBar | None:
+        """Copy a realtime bar into a lightweight startup-buffer payload."""
+
+        bar_time = getattr(bar, 'time', None) or getattr(bar, 'date', None)
+        if bar_time is None:
+            return None
+        ts = pd.Timestamp(bar_time)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize('UTC')
+        else:
+            ts = ts.tz_convert('UTC')
+        return _BufferedRealtimeBar(
+            time=ts,
+            open_=float(getattr(bar, 'open_', 0) or 0),
+            high=float(getattr(bar, 'high', 0) or 0),
+            low=float(getattr(bar, 'low', 0) or 0),
+            close=float(getattr(bar, 'close', 0) or 0),
+            volume=float(getattr(bar, 'volume', 0) or 0),
+        )
+
+    def _buffer_startup_bar(self, pair: str, bar) -> None:
+        """Append one incoming realtime bar to the startup replay buffer."""
+
+        copied = self._copy_realtime_bar(bar)
+        if copied is None:
+            return
+        self._startup_bar_sequence += 1
+        self._startup_bar_buffer.append(
+            (copied.time, self._startup_bar_sequence, pair, copied)
+        )
+
+    async def _process_realtime_bar(self, pair: str, bar) -> None:
+        """Apply one realtime bar to quotes, accumulator, and live logic."""
 
         price = float(getattr(bar, 'close', 0) or 0)
         if price <= 0:
             return
 
-        # Update the bar accumulator (inline — fast)
-        self._accumulator.on_realtime_bar(pair, bar)
-
         # Delegate to the existing quote handler for display and tick exits
         await self._handle_quote_update(pair, price)
 
-        # Intrabar mode: evaluate signals on minute bar completion
+        if not self._realtime_bars_enabled:
+            return
+
+        self._accumulator.on_realtime_bar(pair, bar)
+
         if self._backfill_done and self.execution_mode == 'intrabar':
             bar_time = getattr(bar, 'time', None) or getattr(bar, 'date', None)
             if bar_time is not None:
@@ -2035,6 +2452,41 @@ class LiveDashboardHub:
                 self._minute_tracker[pair] = minute_ts
                 if prev_minute is not None and minute_ts != prev_minute:
                     await self._handle_minute_bar_complete(pair, price)
+
+    async def _replay_startup_bars(self) -> int:
+        """Replay buffered realtime bars collected while startup work ran."""
+
+        replayed = 0
+        while True:
+            async with self._lock:
+                if not self._startup_bar_buffer:
+                    break
+                batch = sorted(
+                    self._startup_bar_buffer,
+                    key=lambda item: (item[0], item[1]),
+                )
+                self._startup_bar_buffer = []
+            for _ts, _seq, pair, bar in batch:
+                await self._process_realtime_bar(pair, bar)
+                replayed += 1
+            await asyncio.sleep(0)
+
+        self._startup_bar_buffering = False
+        return replayed
+
+    async def _handle_bar_update(self, pair: str, bar) -> None:
+        """Process a 5-second real-time bar: update accumulator + feed quote/exit handling."""
+
+        price = float(getattr(bar, 'close', 0) or 0)
+        if price <= 0:
+            return
+
+        if self._startup_bar_buffering:
+            self._buffer_startup_bar(pair, bar)
+            await self._handle_quote_update(pair, price)
+            return
+
+        await self._process_realtime_bar(pair, bar)
 
     async def _handle_minute_bar_complete(self, pair: str, price: float) -> None:
         """Intrabar mode: evaluate signal at each minute bar close."""
@@ -2121,13 +2573,15 @@ class LiveDashboardHub:
 
         def _schedule():
             task = asyncio.create_task(self._handle_hourly_bar_complete(pair, bar_time))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._pending_tasks.discard)
+            self._track_task(task, label=f'hourly bar {pair}')
 
         self._loop.call_soon_threadsafe(_schedule)
 
     async def _handle_hourly_bar_complete(self, pair: str, bar_time) -> None:
         """Run bar-shape exit checks and full signal evaluation on hourly bar completion."""
+
+        if not self._backfill_done:
+            return
 
         hourly_df = self._completed_hourly_df(pair, bar_time)
         if hourly_df.empty:
@@ -2212,7 +2666,6 @@ class LiveDashboardHub:
                     sig_time = sig_time.tz_localize('UTC')
                 if sig_time >= _cutoff:
                     await self._handle_signal(ws, source='WF trade')
-
         if signal is not None and self._signal_identity(signal) != current_signal_id:
             await self._handle_signal(signal, source='hourly')
             return
@@ -2241,98 +2694,454 @@ class LiveDashboardHub:
             client_id=stream_client_id,
         )
 
+    def _ensure_quote_stream_started(self) -> bool:
+        """Start the real-time bar thread once and report whether it was newly started."""
+
+        if self._quote_thread is not None and self._quote_thread.is_alive():
+            return False
+        self._quote_stop.clear()
+        self._quote_thread = threading.Thread(
+            target=self._run_realtime_bar_stream,
+            name='ibkr-realtime-bars',
+            daemon=True,
+        )
+        self._quote_thread.start()
+        return True
+
     def _backfill_data(self) -> None:
         """Fetch historical daily + hourly data for all pairs (runs in executor)."""
 
-        from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
+        import time as _time
         from .levels import detect_zones
-        from .strategy import get_tradeable_zones as _get_tz
+        from .strategy import get_tradeable_zones as _get_tz, is_pair_fully_blocked
         from .walkforward import slice_daily_window
 
         pair_list = list(self.pairs.items())
         total = len(pair_list)
         backfill_client_id = self._backfill_client_id_base()
-
+        minute_seed_days = 2
+        daily_cache: dict[tuple[str, int], object] = {}
+        zone_cache: dict[tuple[str, int], object] = {}
+        hourly_cache: dict[str, object] = {}
         pair_status = self._backfill_progress['pair_status']
 
-        # Phase 1: Daily data + zones
-        self._backfill_progress.update(phase='zones', completed=0, total=total)
-        for idx, (pair_id, pair_info) in enumerate(pair_list):
-            pair_status[pair_id] = 'loading zones'
-            self._backfill_progress.update(current_pair=pair_id, completed=idx)
+        # Phase 2: scan for cache holes in parallel, refill recent holes
+        # sequentially, then seed daily/hourly/minute state from cache.
+        phase2_start = _time.monotonic()
+        print(f'  [backfill] Phase 2: cache-hole check + seed for {total} pairs')
+        self._backfill_progress.update(phase='seed', completed=0, total=total)
+        self._backfill_progress['current_detail'] = ''
+
+        def _scan_pair_gaps(pair_id: str, pair_info: dict) -> dict:
             ticker = pair_info.get('ticker')
             if not ticker:
-                pair_status[pair_id] = 'no ticker'
-                continue
-            try:
-                daily_df = fetch_daily_data(
+                return {
+                    'pair_id': pair_id,
+                    'ticker': ticker,
+                    'error': 'no ticker',
+                }
+            if is_pair_fully_blocked(pair_id, self.params):
+                return {
+                    'pair_id': pair_id,
+                    'ticker': ticker,
+                    'refill_holes': [],
+                    'reported_only_holes': [],
+                    'skipped': 'fully blocked',
+                    'error': None,
+                }
+
+            now_utc = pd.Timestamp.now(tz='UTC')
+            recent_cutoff = now_utc - _HOLE_REFILL_MAX_AGE
+            refill_holes: list[tuple[str, pd.Timestamp]] = []
+            reported_only_holes: list[str] = []
+
+            for interval in ('1d', '1h', '1m'):
+                gap_start_recent = find_first_missing_cached_bar(
                     ticker,
-                    days=self.zone_history_days,
-                    client_id=backfill_client_id + idx,
+                    interval,
+                    start=recent_cutoff,
+                    end=now_utc,
+                    now=now_utc,
+                    check_trailing=True,
                 )
-                if not daily_df.empty:
-                    daily_window = slice_daily_window(daily_df, daily_df.index[-1], self.zone_history_days)
-                    zones = detect_zones(daily_window)
-                    ref_price = float(daily_df['Close'].iloc[-1])
-                    support, resistance = _get_tz(zones, ref_price)
-                    self._scanner._zones[pair_id] = (support, resistance, zones)
-                    pair_status[pair_id] = 'zones loaded'
+                if gap_start_recent is not None:
+                    gap_ts = pd.Timestamp(gap_start_recent)
+                    if gap_ts.tzinfo is None:
+                        gap_ts = gap_ts.tz_localize('UTC')
+                    else:
+                        gap_ts = gap_ts.tz_convert('UTC')
+                    refill_holes.append((interval, gap_ts))
+
+                # Old 1m holes are report-only and expensive to scan over long
+                # histories. Do not block live startup on that audit path.
+                if interval == '1m':
+                    continue
+
+                gap_start_old = find_first_missing_cached_bar(
+                    ticker,
+                    interval,
+                    end=recent_cutoff,
+                    now=recent_cutoff,
+                    check_trailing=False,
+                )
+                if gap_start_old is None:
+                    continue
+                gap_ts = pd.Timestamp(gap_start_old)
+                if gap_ts.tzinfo is None:
+                    gap_ts = gap_ts.tz_localize('UTC')
                 else:
-                    pair_status[pair_id] = 'no daily data'
-            except Exception:
-                pair_status[pair_id] = 'zones failed'
-        self._backfill_progress.update(completed=total)
+                    gap_ts = gap_ts.tz_convert('UTC')
+                gap_label = f'{interval}@{gap_ts}'
+                reported_only_holes.append(gap_label)
 
-        # Phase 2: Hourly data + accumulator seeding
-        self._backfill_progress.update(phase='hourly', completed=0)
-        for idx, (pair_id, pair_info) in enumerate(pair_list):
-            prev = pair_status.get(pair_id, '')
-            pair_status[pair_id] = 'loading hourly'
-            self._backfill_progress.update(current_pair=pair_id, completed=idx)
-            ticker = pair_info.get('ticker')
-            if not ticker:
-                continue
+            return {
+                'pair_id': pair_id,
+                'ticker': ticker,
+                'refill_holes': refill_holes,
+                'reported_only_holes': reported_only_holes,
+                'skipped': None,
+                'error': None,
+            }
+
+        env_scan_workers = os.getenv('FX_SR_PHASE2_SCAN_WORKERS')
+        if env_scan_workers is not None:
             try:
-                hourly_df = fetch_hourly_data(
-                    ticker,
-                    days=7,
-                    client_id=backfill_client_id + idx,
-                )
-                self._accumulator.seed(pair_id, hourly_df)
+                scan_workers = max(1, min(total, int(env_scan_workers.strip())))
+            except ValueError:
+                scan_workers = min(total, _PHASE2_SCAN_WORKERS_DEFAULT)
+        else:
+            scan_workers = min(total, _PHASE2_SCAN_WORKERS_DEFAULT)
+        gap_scan_results: dict[str, dict] = {}
+        refill_work: list[tuple[str, str, str, pd.Timestamp]] = []
+        print(f'  [backfill] Phase 2a scan workers: {scan_workers}')
+        with ThreadPoolExecutor(max_workers=scan_workers, thread_name_prefix='startup-gap-scan') as executor:
+            futures = {
+                executor.submit(_scan_pair_gaps, pair_id, pair_info): (idx, pair_id, pair_info)
+                for idx, (pair_id, pair_info) in enumerate(pair_list)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                _, pair_id, pair_info = futures[future]
+                completed += 1
+                self._backfill_progress.update(current_pair=pair_id, completed=completed)
                 try:
-                    minute_df = fetch_minute_data_cached(
-                        ticker,
-                        days=2,
-                        allow_stale_cache=True,
-                        client_id=backfill_client_id + idx,
-                    )
-                    self._accumulator.seed_minutes(pair_id, minute_df)
-                except Exception:
-                    pass
-                pair_status[pair_id] = 'ready'
-            except Exception:
-                pair_status[pair_id] = 'hourly failed'
-        self._backfill_progress.update(completed=total)
+                    payload = future.result()
+                except Exception as exc:
+                    pair_status[pair_id] = 'gap scan failed'
+                    print(f'    [scan {completed}/{total}] {pair_id}: gap scan FAILED: {exc}')
+                    continue
 
-        # Phase 3: Initial scan rows from backfilled data
-        self._backfill_progress.update(phase='scan', current_pair=None)
-        hourly_cache = {}
-        for pair_id in self._accumulator.seeded_pairs:
-            ticker = self.pairs.get(pair_id, {}).get('ticker')
-            if ticker:
-                hourly_cache[ticker] = self._accumulator.get_hourly_df(pair_id)
+                gap_scan_results[pair_id] = payload
+                if payload.get('error') is not None:
+                    pair_status[pair_id] = str(payload['error'])
+                    print(f'    [scan {completed}/{total}] {pair_id}: {payload["error"]}')
+                    continue
+
+                refill_holes = payload['refill_holes']
+                reported_only = payload['reported_only_holes']
+                skipped_reason = payload.get('skipped')
+                if skipped_reason:
+                    pair_status[pair_id] = skipped_reason
+                    print(f'    [scan {completed}/{total}] {pair_id}: skipped gap scan/refill ({skipped_reason})')
+                    continue
+                for interval, gap_ts in refill_holes:
+                    refill_work.append((pair_id, pair_info['ticker'], interval, gap_ts))
+
+                note_parts: list[str] = []
+                if refill_holes:
+                    note_parts.append(
+                        'refill ' + ', '.join(f'{interval}@{gap_ts}' for interval, gap_ts in refill_holes)
+                    )
+                if reported_only:
+                    note_parts.append('reported only ' + ', '.join(reported_only))
+                note = '; '.join(note_parts) if note_parts else 'no gaps'
+                pair_status[pair_id] = 'gaps scanned'
+                print(f'    [scan {completed}/{total}] {pair_id}: {note}')
+
+        self._backfill_progress.update(current_pair=None, completed=0)
+        if refill_work:
+            print(f'  [backfill] Phase 2b: refilling {len(refill_work)} recent gap(s) sequentially')
+        else:
+            print('  [backfill] Phase 2b: no recent gaps to refill')
+        for refill_idx, (pair_id, ticker, interval, gap_ts) in enumerate(refill_work, 1):
+            pair_status[pair_id] = 'refilling holes'
+            self._backfill_progress.update(current_pair=pair_id, completed=refill_idx)
+            t0 = _time.monotonic()
+            try:
+                refill_interval_from(
+                    ticker,
+                    interval,
+                    gap_ts,
+                    client_id=backfill_client_id,
+                )
+            except Exception as exc:
+                pair_status[pair_id] = f'refill failed: {exc}'
+                print(
+                    f'    [refill {refill_idx}/{len(refill_work)}] {pair_id}: '
+                    f'{interval}@{gap_ts} FAILED after {_time.monotonic() - t0:.1f}s: {exc}'
+                )
+                raise
+            print(
+                f'    [refill {refill_idx}/{len(refill_work)}] {pair_id}: '
+                f'{interval}@{gap_ts} ({_time.monotonic() - t0:.1f}s)'
+            )
+
+        def _prepare_pair(pair_id: str, pair_info: dict) -> dict:
+            ticker = pair_info.get('ticker')
+            started = _time.monotonic()
+            timings: dict[str, float] = {}
+
+            def _set_step(step: str) -> None:
+                pair_status[pair_id] = step
+                self._backfill_progress['current_pair'] = pair_id
+                self._backfill_progress['current_detail'] = step
+
+            if not ticker:
+                return {
+                    'pair_id': pair_id,
+                    'ticker': ticker,
+                    'error': 'no ticker',
+                }
+
+            now_utc = pd.Timestamp.now(tz='UTC')
+            _set_step('loading hourly cache')
+            t_step = _time.monotonic()
+            hourly_df = load_ohlc(ticker, '1h')
+            timings['hourly_load_s'] = _time.monotonic() - t_step
+            if hourly_df.empty:
+                return {
+                    'pair_id': pair_id,
+                    'ticker': ticker,
+                    'error': 'no hourly data',
+                }
+
+            hourly_start = pd.Timestamp(hourly_df.index[0])
+            if hourly_start.tzinfo is None:
+                hourly_start = hourly_start.tz_localize('UTC')
+            else:
+                hourly_start = hourly_start.tz_convert('UTC')
+            daily_start = hourly_start - pd.Timedelta(days=max(int(self.zone_history_days), 1))
+            _set_step('loading daily cache')
+            t_step = _time.monotonic()
+            daily_df = load_ohlc(
+                ticker,
+                '1d',
+                start=daily_start.to_pydatetime(),
+                end=now_utc.to_pydatetime(),
+            )
+            timings['daily_load_s'] = _time.monotonic() - t_step
+            zones = []
+            support = None
+            resistance = None
+            if not daily_df.empty:
+                _set_step('detecting zones')
+                t_step = _time.monotonic()
+                daily_window = slice_daily_window(daily_df, daily_df.index[-1], self.zone_history_days)
+                zones = detect_zones(daily_window)
+                ref_price = float(daily_df['Close'].iloc[-1])
+                support, resistance = _get_tz(zones, ref_price)
+                timings['zone_detect_s'] = _time.monotonic() - t_step
+            else:
+                timings['zone_detect_s'] = 0.0
+
+            minute_start = max(hourly_start, now_utc - pd.Timedelta(days=max(int(minute_seed_days), 1)))
+            _set_step('loading minute cache')
+            t_step = _time.monotonic()
+            minute_df = load_ohlc(
+                ticker,
+                '1m',
+                start=minute_start.to_pydatetime(),
+                end=now_utc.to_pydatetime(),
+            )
+            timings['minute_load_s'] = _time.monotonic() - t_step
+
+            return {
+                'pair_id': pair_id,
+                'ticker': ticker,
+                'daily_df': daily_df,
+                'zones': zones,
+                'support': support,
+                'resistance': resistance,
+                'hourly_df': hourly_df,
+                'minute_df': minute_df,
+                'refill_holes': gap_scan_results.get(pair_id, {}).get('refill_holes', []),
+                'reported_only_holes': gap_scan_results.get(pair_id, {}).get('reported_only_holes', []),
+                'timings': timings,
+                'elapsed': _time.monotonic() - started,
+                'error': None,
+            }
+
+        seed_workers = max(1, min(4, total))
+        with ThreadPoolExecutor(max_workers=seed_workers, thread_name_prefix='startup-seed') as executor:
+            futures = {
+                executor.submit(_prepare_pair, pair_id, pair_info): (idx, pair_id, pair_info)
+                for idx, (pair_id, pair_info) in enumerate(pair_list)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                _, pair_id, pair_info = futures[future]
+                completed += 1
+                self._backfill_progress.update(current_pair=pair_id, completed=completed)
+                ticker = pair_info.get('ticker')
+                try:
+                    payload = future.result()
+                except Exception as exc:
+                    pair_status[pair_id] = 'seed failed'
+                    print(f'    [{completed}/{total}] {pair_id}: seed FAILED: {exc}')
+                    continue
+
+                if payload.get('error') is not None:
+                    pair_status[pair_id] = str(payload['error'])
+                    print(f'    [{completed}/{total}] {pair_id}: {payload["error"]}')
+                    continue
+
+                daily_df = payload['daily_df']
+                zones = payload['zones']
+                support = payload['support']
+                resistance = payload['resistance']
+                hourly_df = payload['hourly_df']
+                minute_df = payload['minute_df']
+
+                pair_status[pair_id] = 'seeding accumulator'
+                self._backfill_progress['current_pair'] = pair_id
+                self._backfill_progress['current_detail'] = 'seeding accumulator'
+                if not daily_df.empty and ticker:
+                    daily_cache[(ticker, int(self.zone_history_days))] = daily_df
+                    zone_cache[(ticker, int(self.zone_history_days))] = zones
+                    self._scanner._zones[pair_id] = (support, resistance, zones)
+
+                self._accumulator.seed(pair_id, hourly_df)
+                self._accumulator.seed_minutes(pair_id, minute_df)
+                if ticker:
+                    hourly_cache[ticker] = self._accumulator.get_hourly_df(pair_id)
+
+                pair_status[pair_id] = 'ready'
+                note_parts: list[str] = []
+                if payload['refill_holes']:
+                    note_parts.append(
+                        "refilled " + ', '.join(f'{interval}@{gap_ts}' for interval, gap_ts in payload['refill_holes'])
+                    )
+                if payload['reported_only_holes']:
+                    note_parts.append(f"reported only {', '.join(payload['reported_only_holes'])}")
+                refill_note = f"; {'; '.join(note_parts)}" if note_parts else ''
+                timings = payload.get('timings') or {}
+                timing_note = (
+                    f" [h1 {timings.get('hourly_load_s', 0.0):.1f}s"
+                    f", d1 {timings.get('daily_load_s', 0.0):.1f}s"
+                    f", zones {timings.get('zone_detect_s', 0.0):.1f}s"
+                    f", m1 {timings.get('minute_load_s', 0.0):.1f}s]"
+                )
+                print(
+                    f'    [{completed}/{total}] {pair_id}: '
+                    f'{len(daily_df)} daily, {len(hourly_df)} hourly, {len(minute_df)} seed minute bars'
+                    f'{refill_note}{timing_note} ({payload["elapsed"]:.1f}s)'
+                )
+        self._backfill_progress.update(completed=total)
+        self._backfill_progress['current_detail'] = ''
+        print(f'  [backfill] Phase 2 done in {_time.monotonic()-phase2_start:.1f}s')
+        self._realtime_bars_enabled = True
+
+        # Phase 3: Full walk-forward scan from the seeded cache window.
+        phase3_start = _time.monotonic()
+        scan_pairs = [
+            (pair_id, pair_info)
+            for pair_id, pair_info in pair_list
+            if not is_pair_fully_blocked(pair_id, self.params)
+        ]
+        scan_total = len(scan_pairs)
+        print(f'  [backfill] Phase 3: walk-forward scan for {scan_total} pairs')
+        self._backfill_progress.update(phase='scan', current_pair=None, completed=0, total=scan_total)
         closed_trades = load_closed_trade_summaries()
         portfolio_state = build_portfolio_state(closed_trades, params=self.params)
+        seed_seen_wf_trades()
+        completed = 0
+        signals = []
+        pair_rows = []
+        wf_signals = []
+        phase3_workers = max(1, min(scan_total, int(os.getenv('FX_SR_PHASE3_WORKERS', '18') or '18')))
 
-        signals, pair_rows, wf_signals = collect_scan_rows(
-            pairs=self.pairs,
-            params=self.params,
-            zone_history_days=self.zone_history_days,
-            hourly_data_cache=hourly_cache,
-            execution_mode=self.execution_mode,
-            portfolio_state=portfolio_state,
-            hourly_days=self.hourly_days,
-        )
+        def _run_phase3_local(pair_id: str, pair_info: dict) -> tuple[PairScanRow, object | None, list, float]:
+            t0 = _time.monotonic()
+            row, signal, pair_wf_signals = _scan_pair(
+                pair_id,
+                pair_info,
+                self.params,
+                self.zone_history_days,
+                {},
+                {},
+                set(),
+                daily_data_cache=daily_cache,
+                zone_cache=zone_cache,
+                hourly_data_cache=hourly_cache,
+                minute_data_cache=None,
+                execution_mode=self.execution_mode,
+                portfolio_state=portfolio_state,
+                hourly_days=self.hourly_days,
+            )
+            return row, signal, pair_wf_signals, (_time.monotonic() - t0)
+
+        if phase3_workers <= 1:
+            for pair_id, pair_info in scan_pairs:
+                row, signal, pair_wf_signals, elapsed = _run_phase3_local(pair_id, pair_info)
+                completed += 1
+                self._pair_rows[row.pair] = row
+                self._backfill_progress.update(current_pair=pair_id, completed=completed)
+                sig_label = f', signal={signal.direction}' if signal else ''
+                print(f'    [{completed}/{scan_total}] {pair_id}: {row.state}{sig_label} ({elapsed:.1f}s)')
+                pair_rows.append(row)
+                if signal is not None:
+                    signals.append(signal)
+                wf_signals.extend(pair_wf_signals)
+        else:
+            print(f'  [backfill] Phase 3 workers: {phase3_workers} process(es)')
+            with ProcessPoolExecutor(max_workers=phase3_workers) as executor:
+                futures = {}
+                for pair_id, pair_info in scan_pairs:
+                    ticker = pair_info.get('ticker')
+                    futures[executor.submit(
+                        run_startup_scan_pair,
+                        pair_id=pair_id,
+                        pair_info=pair_info,
+                        params=self.params,
+                        zone_history_days=self.zone_history_days,
+                        execution_mode=self.execution_mode,
+                        portfolio_state=portfolio_state,
+                        hourly_days=self.hourly_days,
+                        daily_df=daily_cache.get((ticker, int(self.zone_history_days))) if ticker else None,
+                        zones=zone_cache.get((ticker, int(self.zone_history_days))) if ticker else None,
+                        hourly_df=hourly_cache.get(ticker) if ticker else None,
+                        minute_df=None,
+                    )] = (pair_id, pair_info, _time.monotonic())
+
+                for future in as_completed(futures):
+                    pair_id, pair_info, started = futures[future]
+                    try:
+                        payload = future.result()
+                        row = payload['row']
+                        signal = payload['signal']
+                        pair_wf_signals = payload['wf_signals']
+                        apply_startup_scan_artifacts(
+                            pair_id,
+                            seen_trade_keys=payload.get('seen_trade_keys'),
+                            walk_forward_cache_entry=payload.get('walk_forward_cache_entry'),
+                        )
+                        elapsed = _time.monotonic() - started
+                    except Exception as exc:
+                        print(f'    [phase3 worker fallback] {pair_id}: {exc}')
+                        row, signal, pair_wf_signals, elapsed = _run_phase3_local(pair_id, pair_info)
+
+                    completed += 1
+                    self._pair_rows[row.pair] = row
+                    self._backfill_progress.update(current_pair=pair_id, completed=completed)
+                    sig_label = f', signal={signal.direction}' if signal else ''
+                    print(f'    [{completed}/{scan_total}] {pair_id}: {row.state}{sig_label} ({elapsed:.1f}s)')
+                    pair_rows.append(row)
+                    if signal is not None:
+                        signals.append(signal)
+                    wf_signals.extend(pair_wf_signals)
+
+        print(f'  [backfill] Phase 3 done in {_time.monotonic()-phase3_start:.1f}s '
+              f'({len(signals)} signals, {len(pair_rows)} pairs)')
         # Compute daily closed-trade P&L at startup
         from .live_history import _compute_daily_pnl_gbp
         from .db import _connect, get_db_path, init_db
@@ -2363,12 +3172,25 @@ class LiveDashboardHub:
         # Start a progress broadcast task
         progress_stop = asyncio.Event()
 
+        _last_pair_count = [0]
+
         async def _broadcast_progress():
             while not progress_stop.is_set():
                 async with self._lock:
                     self.summary = self._build_summary(status='backfilling')
                     summary = dict(self.summary)
-                await self._broadcast({'type': 'backfill_progress', 'summary': summary})
+                    # When new pairs have been scanned, send full snapshot so
+                    # the dashboard grid populates incrementally.
+                    current_count = len(self._pair_rows)
+                    send_snapshot = current_count > _last_pair_count[0]
+                    if send_snapshot:
+                        _last_pair_count[0] = current_count
+                        state = self._export_state()
+                # Broadcast outside the lock to avoid holding it during I/O
+                if send_snapshot:
+                    await self._broadcast({'type': 'snapshot', 'state': state})
+                else:
+                    await self._broadcast({'type': 'backfill_progress', 'summary': summary})
                 try:
                     await asyncio.wait_for(progress_stop.wait(), timeout=0.5)
                 except asyncio.TimeoutError:
@@ -2434,7 +3256,10 @@ class LiveDashboardHub:
         self._accumulator.on_bar_complete(self._on_hourly_bar_complete)
 
         async with self._lock:
-            self._pair_rows = {row.pair: row for row in pair_rows}
+            # pair_rows were already stored incrementally during Phase 2;
+            # merge here to pick up any late updates without losing state.
+            for row in pair_rows:
+                self._pair_rows[row.pair] = row
             self._sync_active_signal_tracking(pair_rows)
             self._tracked = tracked
             if balance is not None:
@@ -2586,6 +3411,14 @@ class LiveDashboardHub:
         start_background_writer()
         from .live_history import record_system_event
         record_system_event('startup', f'profile={self.strategy_label} mode={self.execution_mode}')
+        if self._blocked_live_pairs:
+            blocked_pairs = ', '.join(sorted(self._blocked_live_pairs))
+            await self._broadcast_log('info', f'Skipping fully blocked pairs: {blocked_pairs}')
+
+        if self._ensure_quote_stream_started():
+            await self._broadcast_log('success', 'Live quote stream thread started.')
+        else:
+            await self._broadcast_log('info', 'Live quote stream already running.')
 
         # Phase 1: backfill historical data with progress
         await self._run_backfill()
@@ -2594,20 +3427,17 @@ class LiveDashboardHub:
             self._scan_executor,
             self._hydrate_execution_activity,
         )
+        replayed_bars = await self._replay_startup_bars()
         async with self._lock:
+            self._apply_live_quotes()
             self.summary = self._build_summary(status=self.summary.get('status', 'live'))
-        await self._broadcast_log('info', 'Startup scans complete, connecting quote stream...')
+            state = self._export_state()
+        await self._broadcast({'type': 'snapshot', 'state': state})
+        if replayed_bars:
+            await self._broadcast_log('info', f'Replayed {replayed_bars} buffered live bars.')
+        await self._broadcast_log('info', 'Startup scans complete.')
 
-        # Phase 2: start real-time bar streaming
-        self._quote_thread = threading.Thread(
-            target=self._run_realtime_bar_stream,
-            name='ibkr-realtime-bars',
-            daemon=True,
-        )
-        self._quote_thread.start()
-        await self._broadcast_log('success', 'Live quote stream thread started.')
-
-        # Phase 3: start bar persistence (bulk-save to PostgreSQL every ~60s)
+        # Phase 2: start bar persistence (bulk-save to PostgreSQL every ~60s)
         pair_ticker_map = {
             pair_id: pair_info['ticker']
             for pair_id, pair_info in self.pairs.items()
@@ -2616,7 +3446,7 @@ class LiveDashboardHub:
         self._accumulator.start_persistence(pair_ticker_map)
         await self._broadcast_log('info', 'Bar persistence thread started.')
 
-        # Phase 4: start low-frequency housekeeping
+        # Phase 3: start low-frequency housekeeping
         self._scan_task = asyncio.create_task(self._housekeeping_loop())
         await self._broadcast_log('info', 'Housekeeping loop running.')
 
@@ -3444,6 +4274,7 @@ def run_live_web_app(
     """Run the browser-based live dashboard server."""
 
     _configure_windows_event_loop_policy()
+    init_db()
     app = web.Application()
     app["hub"] = LiveDashboardHub(
         pairs=pairs,

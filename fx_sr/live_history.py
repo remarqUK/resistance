@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Optional
 import pandas as pd
 
 from .config import PAIRS
+from .data import fx_market_is_open
 from .db import _connect, _normalize_ts, _table_columns, db_transaction, get_db_path, init_db
 
 
@@ -150,6 +151,7 @@ def ensure_detected_signal_table(db_path: str | None = None) -> str:
 
 
 _ENSURE_TABLE_PATHS: set[str] = set()
+_ENSURE_TABLE_LOCK = threading.Lock()
 
 
 def _serialize_ts(value) -> str | None:
@@ -170,216 +172,216 @@ def _ensure_table(db_path: str | None = None) -> str:
     if db_path is None:
         db_path = get_db_path()
 
-    if db_path in _ENSURE_TABLE_PATHS:
+    with _ENSURE_TABLE_LOCK:
+        if db_path in _ENSURE_TABLE_PATHS:
+            return db_path
+
+        init_db(db_path, migrate_legacy=False)
+        conn = _connect(db_path)
+        ts_type = "TIMESTAMPTZ"
+        real_type = "DOUBLE PRECISION"
+        int_type = "BIGINT"
+        try:
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS detected_signal (
+                    signal_id             TEXT PRIMARY KEY,
+                    pair                  TEXT NOT NULL,
+                    direction             TEXT NOT NULL,
+                    signal_time           {ts_type} NOT NULL,
+                    detected_at           {ts_type} NOT NULL,
+                    entry_price           {real_type} NOT NULL,
+                    sl_price              {real_type} NOT NULL,
+                    tp_price              {real_type} NOT NULL,
+                    zone_upper            {real_type} NOT NULL,
+                    zone_lower            {real_type} NOT NULL,
+                    zone_strength         TEXT NOT NULL,
+                    zone_type             TEXT NOT NULL,
+                    quality_score         {real_type} NOT NULL DEFAULT 0,
+                    status                TEXT NOT NULL,
+                    transacted            INTEGER NOT NULL DEFAULT 0,
+                    execution_enabled     INTEGER NOT NULL DEFAULT 0,
+                    planned_units         {int_type},
+                    risk_amount           {real_type},
+                    account_currency      TEXT,
+                    notional_account      {real_type},
+                    order_id              {int_type},
+                    take_profit_order_id  {int_type},
+                    stop_loss_order_id    {int_type},
+                    note                  TEXT,
+                    executed_at           {ts_type},
+                    opened_at             {ts_type},
+                    opened_price          {real_type},
+                    open_units            {int_type},
+                    remaining_units       {int_type},
+                    fill_count            {int_type},
+                    last_fill_at          {ts_type},
+                    broker_order_status   TEXT,
+                    exit_signal_at        {ts_type},
+                    exit_signal_reason    TEXT,
+                    exit_signal_price     {real_type},
+                    closed_at             {ts_type},
+                    closed_price          {real_type},
+                    close_reason          TEXT,
+                    close_source          TEXT,
+                    pnl_pips              {real_type},
+                    execution_mode        TEXT,
+                    ibkr_account          TEXT,
+                    submitted_entry_price {real_type},
+                    submitted_tp_price    {real_type},
+                    submitted_sl_price    {real_type},
+                    submit_bid            {real_type},
+                    submit_ask            {real_type},
+                    submit_spread         {real_type},
+                    quote_source          TEXT,
+                    quote_time            {ts_type},
+                    last_updated_at       {ts_type} NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS detected_signal_fill (
+                    exec_id      TEXT PRIMARY KEY,
+                    signal_id    TEXT NOT NULL,
+                    pair         TEXT NOT NULL,
+                    direction    TEXT NOT NULL,
+                    order_id     {int_type},
+                    fill_time    {ts_type},
+                    fill_price   {real_type} NOT NULL,
+                    fill_units   {int_type} NOT NULL,
+                    cum_qty      {real_type},
+                    avg_price    {real_type},
+                    side         TEXT,
+                    order_ref    TEXT,
+                    recorded_at  {ts_type} NOT NULL
+                )
+                """
+            )
+            existing = _table_columns(conn, "detected_signal")
+            for col, ddl in (
+                ('execution_mode', 'TEXT'),
+                ('ibkr_account', 'TEXT'),
+                ('submitted_entry_price', real_type),
+                ('submitted_tp_price', real_type),
+                ('submitted_sl_price', real_type),
+                ('submit_bid', real_type),
+                ('submit_ask', real_type),
+                ('submit_spread', real_type),
+                ('quote_source', 'TEXT'),
+                ('quote_time', ts_type),
+                ('remaining_units', 'INTEGER'),
+                ('fill_count', 'INTEGER'),
+                ('last_fill_at', ts_type),
+                ('broker_order_status', 'TEXT'),
+            ):
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE detected_signal ADD COLUMN {col} {ddl}")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_time
+                ON detected_signal (pair, signal_time DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_status
+                ON detected_signal (status, transacted, pair, direction)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_status_time
+                ON detected_signal (pair, status, signal_time DESC, detected_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_status_last_updated
+                ON detected_signal (status, pair, last_updated_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_claim
+                ON detected_signal (
+                    pair,
+                    direction,
+                    status,
+                    opened_at,
+                    executed_at,
+                    detected_at
+                )
+                WHERE transacted = 1 AND closed_at IS NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_reconcile
+                ON detected_signal (order_id, status, pair)
+                WHERE transacted = 1 AND closed_at IS NULL AND order_id IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_signal_time
+                ON detected_signal_fill (signal_id, fill_time DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_signal_time_asc
+                ON detected_signal_fill (signal_id, fill_time ASC, recorded_at ASC, exec_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_order
+                ON detected_signal_fill (order_id, fill_time DESC)
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS pair_scan_log (
+                    id         BIGSERIAL PRIMARY KEY,
+                    scan_time  {ts_type} NOT NULL,
+                    pair       TEXT NOT NULL,
+                    state      TEXT NOT NULL,
+                    note       TEXT,
+                    price      {real_type},
+                    signal_generated BOOLEAN NOT NULL DEFAULT FALSE,
+                    direction  TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pair_scan_log_pair_time
+                ON pair_scan_log (pair, scan_time DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_pair_scan_log_time
+                ON pair_scan_log (scan_time DESC)
+                """
+            )
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS system_event (
+                    id         BIGSERIAL PRIMARY KEY,
+                    event_time {ts_type} NOT NULL DEFAULT NOW(),
+                    event_type TEXT NOT NULL,
+                    detail     TEXT
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _ENSURE_TABLE_PATHS.add(db_path)
         return db_path
-
-    init_db(db_path)
-    conn = _connect(db_path)
-    ts_type = "TIMESTAMPTZ"
-    real_type = "DOUBLE PRECISION"
-    int_type = "BIGINT"
-    try:
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS detected_signal (
-                signal_id             TEXT PRIMARY KEY,
-                pair                  TEXT NOT NULL,
-                direction             TEXT NOT NULL,
-                signal_time           {ts_type} NOT NULL,
-                detected_at           {ts_type} NOT NULL,
-                entry_price           {real_type} NOT NULL,
-                sl_price              {real_type} NOT NULL,
-                tp_price              {real_type} NOT NULL,
-                zone_upper            {real_type} NOT NULL,
-                zone_lower            {real_type} NOT NULL,
-                zone_strength         TEXT NOT NULL,
-                zone_type             TEXT NOT NULL,
-                quality_score         {real_type} NOT NULL DEFAULT 0,
-                status                TEXT NOT NULL,
-                transacted            INTEGER NOT NULL DEFAULT 0,
-                execution_enabled     INTEGER NOT NULL DEFAULT 0,
-                planned_units         {int_type},
-                risk_amount           {real_type},
-                account_currency      TEXT,
-                notional_account      {real_type},
-                order_id              {int_type},
-                take_profit_order_id  {int_type},
-                stop_loss_order_id    {int_type},
-                note                  TEXT,
-                executed_at           {ts_type},
-                opened_at             {ts_type},
-                opened_price          {real_type},
-                open_units            {int_type},
-                remaining_units       {int_type},
-                fill_count            {int_type},
-                last_fill_at          {ts_type},
-                broker_order_status   TEXT,
-                exit_signal_at        {ts_type},
-                exit_signal_reason    TEXT,
-                exit_signal_price     {real_type},
-                closed_at             {ts_type},
-                closed_price          {real_type},
-                close_reason          TEXT,
-                close_source          TEXT,
-                pnl_pips              {real_type},
-                execution_mode        TEXT,
-                ibkr_account          TEXT,
-                submitted_entry_price {real_type},
-                submitted_tp_price    {real_type},
-                submitted_sl_price    {real_type},
-                submit_bid            {real_type},
-                submit_ask            {real_type},
-                submit_spread         {real_type},
-                quote_source          TEXT,
-                quote_time            {ts_type},
-                last_updated_at       {ts_type} NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS detected_signal_fill (
-                exec_id      TEXT PRIMARY KEY,
-                signal_id    TEXT NOT NULL,
-                pair         TEXT NOT NULL,
-                direction    TEXT NOT NULL,
-                order_id     {int_type},
-                fill_time    {ts_type},
-                fill_price   {real_type} NOT NULL,
-                fill_units   {int_type} NOT NULL,
-                cum_qty      {real_type},
-                avg_price    {real_type},
-                side         TEXT,
-                order_ref    TEXT,
-                recorded_at  {ts_type} NOT NULL
-            )
-            """
-        )
-        # Migrate existing tables that lack the new columns
-        existing = _table_columns(conn, "detected_signal")
-        for col, ddl in (
-            ('execution_mode', 'TEXT'),
-            ('ibkr_account', 'TEXT'),
-            ('submitted_entry_price', real_type),
-            ('submitted_tp_price', real_type),
-            ('submitted_sl_price', real_type),
-            ('submit_bid', real_type),
-            ('submit_ask', real_type),
-            ('submit_spread', real_type),
-            ('quote_source', 'TEXT'),
-            ('quote_time', ts_type),
-            ('remaining_units', 'INTEGER'),
-            ('fill_count', 'INTEGER'),
-            ('last_fill_at', ts_type),
-            ('broker_order_status', 'TEXT'),
-        ):
-            if col not in existing:
-                conn.execute(f"ALTER TABLE detected_signal ADD COLUMN {col} {ddl}")
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_time
-            ON detected_signal (pair, signal_time DESC)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_status
-            ON detected_signal (status, transacted, pair, direction)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_status_time
-            ON detected_signal (pair, status, signal_time DESC, detected_at DESC)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_status_last_updated
-            ON detected_signal (status, pair, last_updated_at DESC)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_claim
-            ON detected_signal (
-                pair,
-                direction,
-                status,
-                opened_at,
-                executed_at,
-                detected_at
-            )
-            WHERE transacted = 1 AND closed_at IS NULL
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_reconcile
-            ON detected_signal (order_id, status, pair)
-            WHERE transacted = 1 AND closed_at IS NULL AND order_id IS NOT NULL
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_signal_time
-            ON detected_signal_fill (signal_id, fill_time DESC)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_signal_time_asc
-            ON detected_signal_fill (signal_id, fill_time ASC, recorded_at ASC, exec_id)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_order
-            ON detected_signal_fill (order_id, fill_time DESC)
-            """
-        )
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS pair_scan_log (
-                id         BIGSERIAL PRIMARY KEY,
-                scan_time  {ts_type} NOT NULL,
-                pair       TEXT NOT NULL,
-                state      TEXT NOT NULL,
-                note       TEXT,
-                price      {real_type},
-                signal_generated BOOLEAN NOT NULL DEFAULT FALSE,
-                direction  TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_pair_scan_log_pair_time
-            ON pair_scan_log (pair, scan_time DESC)
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_pair_scan_log_time
-            ON pair_scan_log (scan_time DESC)
-            """
-        )
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS system_event (
-                id         BIGSERIAL PRIMARY KEY,
-                event_time {ts_type} NOT NULL DEFAULT NOW(),
-                event_type TEXT NOT NULL,
-                detail     TEXT
-            )
-            """
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    _ENSURE_TABLE_PATHS.add(db_path)
-    return db_path
 
 
 def record_system_event(event_type: str, detail: str | None = None) -> None:
@@ -905,14 +907,9 @@ def get_or_fetch_today_snapshot(
 
     cached_row = _attach_today_equity(cached_row)
 
-    # Only fetch on weekdays during plausible market hours (Sun 22:00 – Fri 22:00 UTC)
+    # Only fetch while the FX market should be open.
     now_utc = _dt.datetime.now(_dt.timezone.utc)
-    weekday = now_utc.weekday()  # Mon=0 … Sun=6
-    if weekday == 5:  # Saturday — market closed
-        return cached_row
-    if weekday == 6 and now_utc.hour < 22:  # Sunday before open
-        return cached_row
-    if weekday == 4 and now_utc.hour >= 22:  # Friday after close
+    if not fx_market_is_open(now_utc):
         return cached_row
 
     try:

@@ -663,6 +663,16 @@ function pushLog(entry) {
   renderLog();
 }
 
+function backfillPhaseLabel(phase) {
+  if (phase === "zones") return "Computing zones";
+  if (phase === "hourly") return "Loading hourly";
+  if (phase === "bars") return "Fetching market data";
+  if (phase === "seed") return "Scanning gaps and seeding cache";
+  if (phase === "scan") return "Running initial scan";
+  if (phase === "done") return "Ready";
+  return "Loading";
+}
+
 function renderSummary() {
   const summary = state.summary || {};
   const backfill = summary.backfill || {};
@@ -678,7 +688,10 @@ function renderSummary() {
   }
 
   els.signalCount.textContent = String(summary.signal_count || 0);
-  els.pendingCount.textContent = `${summary.pending_count || 0} pending blockers`;
+  const pendingPairs = Array.isArray(summary.pending_pairs) && summary.pending_pairs.length
+    ? ` • ${summary.pending_pairs.join(", ")}`
+    : "";
+  els.pendingCount.textContent = `${summary.pending_count || 0} pending blockers${pendingPairs}`;
   els.positionCount.textContent = String(summary.position_count || 0);
 
   // Execution mode with trading-paused indicator during backfill
@@ -775,10 +788,11 @@ function renderScanProgress() {
   }
 
   if (summary.status === "backfilling" && backfill.phase && backfill.phase !== "done") {
-    const phase = backfill.phase === "zones" ? "Loading zones" : backfill.phase === "hourly" ? "Loading hourly" : "Scanning";
+    const phase = backfillPhaseLabel(backfill.phase);
     const pct = backfill.total > 0 ? Math.round((backfill.completed / backfill.total) * 100) : 0;
     const current = backfill.current_pair ? ` Â· ${backfill.current_pair}` : "";
-    els.scanProgress.textContent = `${phase}: ${backfill.completed}/${backfill.total} (${pct}%)${current}`;
+    const detail = backfill.current_detail ? ` · ${backfill.current_detail}` : "";
+    els.scanProgress.textContent = `${phase}: ${backfill.completed}/${backfill.total} (${pct}%)${current}${detail}`;
     return;
   }
 
@@ -1117,6 +1131,16 @@ function connect() {
     }
     if (message.type === "pair_update") {
       upsertPair(message.row, message.summary);
+      return;
+    }
+    if (message.type === "positions_update") {
+      state.positions = message.positions || [];
+      state.alerts = message.alerts || [];
+      state.summary = message.summary || state.summary;
+      renderSummary();
+      renderWatchlist();
+      renderPositions();
+      renderAlerts();
       return;
     }
     if (message.type === "snapshot") {

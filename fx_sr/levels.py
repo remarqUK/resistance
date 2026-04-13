@@ -73,26 +73,39 @@ def find_daily_pivots(df: pd.DataFrame, left: int = 5, right: int = 5):
     return highs, lows
 
 
+def _cluster_pivots_dbscan(pivots, tolerance_pct: float) -> List[List]:
+    """Cluster pivots using DBSCAN on the primary price (index 1).
+
+    Uses min_samples=1 so every pivot belongs to a cluster (no noise
+    discarding), but nearby pivots within tolerance get grouped together.
+    This is equivalent to the old greedy clustering but without
+    sort-order dependency.
+    """
+    from sklearn.cluster import DBSCAN
+
+    prices = np.array([p[1] for p in pivots]).reshape(-1, 1)
+    median_price = float(np.median(prices))
+    eps = tolerance_pct / 100.0 * median_price
+
+    labels = DBSCAN(eps=eps, min_samples=1).fit_predict(prices)
+
+    clusters: dict[int, list] = {}
+    for label, pivot in zip(labels, pivots):
+        clusters.setdefault(label, []).append(pivot)
+
+    return list(clusters.values())
+
+
 def _build_resistance_zones(pivots, tolerance_pct: float) -> List[dict]:
     """Build resistance zones from pivot highs.
 
     For each pivot high, the zone is [body_top, high] - the rejection wick area.
-    Cluster nearby pivots and combine their zones.
+    Cluster nearby pivots using DBSCAN and combine their zones.
     """
     if not pivots:
         return []
 
-    # Sort by the high price
-    sorted_pivots = sorted(pivots, key=lambda x: x[1])
-    clusters = [[sorted_pivots[0]]]
-
-    for pivot in sorted_pivots[1:]:
-        cluster = clusters[-1]
-        cluster_ref = np.mean([p[1] for p in cluster])  # average high
-        if abs(pivot[1] - cluster_ref) / cluster_ref * 100 <= tolerance_pct:
-            cluster.append(pivot)
-        else:
-            clusters.append([pivot])
+    clusters = _cluster_pivots_dbscan(pivots, tolerance_pct)
 
     zones = []
     for cluster in clusters:
@@ -117,22 +130,12 @@ def _build_support_zones(pivots, tolerance_pct: float) -> List[dict]:
     """Build support zones from pivot lows.
 
     For each pivot low, the zone is [low, body_bottom] - the rejection wick area.
-    Cluster nearby pivots and combine their zones.
+    Cluster nearby pivots using DBSCAN and combine their zones.
     """
     if not pivots:
         return []
 
-    # Sort by the low price
-    sorted_pivots = sorted(pivots, key=lambda x: x[1])
-    clusters = [[sorted_pivots[0]]]
-
-    for pivot in sorted_pivots[1:]:
-        cluster = clusters[-1]
-        cluster_ref = np.mean([p[1] for p in cluster])  # average low
-        if abs(pivot[1] - cluster_ref) / cluster_ref * 100 <= tolerance_pct:
-            cluster.append(pivot)
-        else:
-            clusters.append([pivot])
+    clusters = _cluster_pivots_dbscan(pivots, tolerance_pct)
 
     zones = []
     for cluster in clusters:

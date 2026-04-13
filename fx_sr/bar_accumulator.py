@@ -100,6 +100,47 @@ class HourlyBarAccumulator:
             self._completed_minutes[pair] = df
 
         self._current_minute_bar.pop(pair, None)
+        self._rebuild_current_hour_from_seeded_minutes(pair)
+
+    def _rebuild_current_hour_from_seeded_minutes(self, pair: str) -> None:
+        """Reconstruct the in-progress hourly bar from seeded minute history."""
+
+        minute_df = self._completed_minutes.get(pair)
+        if minute_df is None or minute_df.empty:
+            self._current.pop(pair, None)
+            return
+
+        last_minute = pd.Timestamp(minute_df.index[-1])
+        if last_minute.tzinfo is None:
+            last_minute = last_minute.tz_localize('UTC')
+        else:
+            last_minute = last_minute.tz_convert('UTC')
+
+        hour = _hour_start(last_minute)
+        hour_end = hour + pd.Timedelta(hours=1)
+        hour_slice = minute_df[(minute_df.index >= hour) & (minute_df.index < hour_end)]
+        if hour_slice.empty:
+            self._current.pop(pair, None)
+            return
+
+        completed = self._completed.get(pair)
+        if completed is not None and not completed.empty:
+            last_completed_hour = pd.Timestamp(completed.index[-1])
+            if last_completed_hour.tzinfo is None:
+                last_completed_hour = last_completed_hour.tz_localize('UTC')
+            else:
+                last_completed_hour = last_completed_hour.tz_convert('UTC')
+            if last_completed_hour > hour:
+                return
+
+        self._current[pair] = {
+            'hour': hour,
+            'open': float(hour_slice['Open'].iloc[0]),
+            'high': float(hour_slice['High'].max()),
+            'low': float(hour_slice['Low'].min()),
+            'close': float(hour_slice['Close'].iloc[-1]),
+            'volume': float(hour_slice['Volume'].sum()),
+        }
 
     def on_bar_complete(self, callback: Callable[[str, pd.Timestamp], None]) -> None:
         """Register a callback fired when an hourly bar completes.
@@ -276,7 +317,7 @@ class HourlyBarAccumulator:
         else:
             self._completed_minutes[pair] = new_row
 
-    def get_completed_df(self, pair: str, tail_n: int = 168) -> pd.DataFrame:
+    def get_completed_df(self, pair: str, tail_n: int = 0) -> pd.DataFrame:
         """Return completed hourly bars only, excluding the in-progress bar."""
 
         completed = self._completed.get(pair)
@@ -289,7 +330,7 @@ class HourlyBarAccumulator:
             return completed.iloc[-tail_n:]
         return completed
 
-    def get_hourly_df(self, pair: str, tail_n: int = 168) -> pd.DataFrame:
+    def get_hourly_df(self, pair: str, tail_n: int = 0) -> pd.DataFrame:
         """Return completed hourly bars + the in-progress bar as the last row."""
 
         completed = self._completed.get(pair)

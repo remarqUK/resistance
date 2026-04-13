@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import sys
 
-from fx_sr.profiles import PAIRS, PROFILES
+from fx_sr.profiles import PAIRS, PROFILES, get_profile
 from fx_sr.backtest import (
     _load_cached_backtest_data,
     calculate_execution_aware_compounding_pnl,
@@ -171,6 +171,15 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
         'dd_risk_start': [3.0, 4.0, 5.0, 6.0, 7.0],
         'dd_risk_full': [14.0, 16.0, 18.0, 20.0],
         'dd_risk_floor': [0.3, 0.4, 0.5, 0.6],
+        # ATR-based SL
+        'atr_sl_multiplier': [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+        # Partial close
+        'partial_close_fraction': [0.3, 0.4, 0.5, 0.6, 0.7],
+        'partial_close_target_r': [0.5, 0.75, 1.0, 1.25, 1.5],
+        # Trailing stop
+        'trailing_mode': ['none', 'breakeven', 'fixed_r'],
+        'trailing_fixed_r': [0.3, 0.5, 0.75, 1.0],
+        'trailing_activate_r': [0.5, 0.75, 1.0, 1.5],
     }
 
     variants = [{}]
@@ -189,6 +198,11 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
         ('max_hold_bars', ('rr_ratio', 'early_exit_r')),
         ('quality_risk_max', ('quality_risk_min', 'rr_ratio')),
         ('dd_risk_start', ('dd_risk_full', 'dd_risk_floor')),
+        # TP/SL mode combos with entry filters
+        ('atr_sl_multiplier', ('zone_penetration_pct', 'min_zone_touches')),
+        ('partial_close_target_r', ('partial_close_fraction', 'trailing_mode')),
+        ('trailing_mode', ('trailing_fixed_r', 'trailing_activate_r')),
+        ('zone_penetration_pct', ('atr_sl_multiplier', 'partial_close_target_r')),
     ]
 
     for anchor_key, extra_keys in entry_grid:
@@ -251,9 +265,13 @@ def _fill_cache_gaps(profile: dict) -> None:
             _log(f'      {pair_id} {iv}: FAILED ({exc})')
 
 
-def _fetch_data(profile: dict, execution_mode: str = 'next_bar') -> tuple[dict, dict, dict]:
+def _fetch_data(profile: dict, execution_mode: str = 'next_bar', skip_fill: bool = False) -> tuple[dict, dict, dict]:
     """Fill any cache gaps (same as run.py fill), then load data sequentially."""
-    _fill_cache_gaps(profile)
+    if not skip_fill:
+        _fill_cache_gaps(profile)
+    else:
+        _log('  Skipping cache fill (--skip-fill)')
+
 
     hourly_days = int(profile['hourly_days'])
     zone_history_days = int(profile['zone_history_days'])
@@ -470,6 +488,11 @@ def _parse_args():
         default=None,
         help='Override execution mode (default: use profile setting)',
     )
+    parser.add_argument(
+        '--skip-fill',
+        action='store_true',
+        help='Skip IBKR cache fill, use whatever data is already cached',
+    )
     return parser.parse_args()
 
 
@@ -477,7 +500,7 @@ def main():
     args = _parse_args()
 
     max_workers = max(1, min(30, args.max_workers))
-    profile = dict(PROFILES[args.profile])
+    profile = dict(get_profile(args.profile))
     if args.days is not None:
         profile['hourly_days'] = int(args.days)
     if args.zone_days is not None:
@@ -489,7 +512,7 @@ def main():
     execution_mode = args.execution_mode or profile.get('execution_mode', 'next_bar')
 
     _log(f'Loading cached data for profile: {_label_profile(args.profile)} [execution_mode={execution_mode}]')
-    data, hourly_data, minute_data = _fetch_data(profile, execution_mode=execution_mode)
+    data, hourly_data, minute_data = _fetch_data(profile, execution_mode=execution_mode, skip_fill=args.skip_fill)
     pair_order = sorted(hourly_data.keys())
     _log(f'Loaded {len(pair_order)} pairs')
 

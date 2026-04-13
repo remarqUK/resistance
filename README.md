@@ -155,6 +155,25 @@ python run.py live --no-positions
   - 5 minutes: 2 beeps
   - 2 minutes: 3 beeps
 
+### Live startup warm cache
+
+The browser live runner performs a three-phase startup backfill before it begins the real-time bar stream:
+
+1. load daily data and detect zones
+2. load hourly and minute bars into the in-memory accumulator
+3. run the full per-pair walk-forward scan used to reconstruct current live state
+
+Phase 3 is intentionally expensive because it replays the strategy from cached data so startup state matches backtest/live execution logic. To avoid paying that full cost on every restart, the dashboard now stores a startup warm cache in `app_settings` and persists it incrementally per pair as phase 3 completes.
+
+- The warm cache is reused per pair when the loaded daily/hourly/minute cache fingerprint still matches the last successful startup for that pair.
+- If the fingerprint changed, startup still uses the saved artifact as a resume point and replays only a recent tail plus new bars after the saved boundary, instead of blindly replaying the full history window again.
+- The first startup after a new cache fill or after a cache miss is still expensive.
+- Later restarts can skip already-warmed pairs and restore their `PairScanRow` and signal state directly.
+- Parameter/config changes already invalidate warm-cache reuse because the cache key includes the startup config and `repr(self.params)`.
+- Strategy code changes do not automatically invalidate old warm artifacts unless the startup warm-cache version is bumped in code.
+
+If you change strategy logic in a way that affects walk-forward results, invalidate the startup warm cache before trusting restored phase-3 state.
+
 ### 4. L2 capture
 
 ```bash

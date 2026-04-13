@@ -57,6 +57,10 @@ export interface PositionRow {
   pnl_pips?: number;
   status?: string;
   decimals?: number;
+  is_remainder?: boolean;
+  position_fraction?: number;
+  trade_group_id?: string | null;
+  sl_at_breakeven?: boolean;
 }
 
 export interface AlertRow {

@@ -94,6 +94,28 @@ What this does:
 
 Do not use `--no-positions` in normal live operation. Position tracking is what links broker positions back to the original detected signal and later marks them closed correctly.
 
+### 3a. Startup warmup behavior
+
+The dashboard does not start the real-time stream immediately. Startup first runs a backfill/warmup pass so live state matches the walk-forward logic used elsewhere:
+
+1. daily cache load + zone detection
+2. hourly/minute cache load into the accumulator
+3. full per-pair walk-forward reconstruction
+
+Phase 3 can be slow on the first run because it replays the strategy from cached bars, not because it is waiting on live broker data.
+
+The live dashboard now stores a startup warm cache incrementally per pair in `app_settings`. On a later restart:
+
+- if that pair's cached data fingerprint still matches, phase 3 restores the saved result directly
+- if the cached data moved on, phase 3 uses the saved artifact as a resume point and replays only a recent tail plus the newer bars
+
+Practical implications:
+
+- first startup after a cache refresh can still be slow
+- later restarts should get faster as more pairs have warm-cache entries
+- warm-cache reuse is invalidated automatically by startup config / parameter changes
+- strategy code changes may require manual invalidation or a warm-cache version bump in code
+
 ### 3b. Dashboard controls and views
 
 - Header controls:

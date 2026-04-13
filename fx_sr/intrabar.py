@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .levels import SRZone
+from .levels import SRZone, is_price_halfway_in_zone, is_price_in_zone
 from .strategy import Signal, StrategyParams, select_entry_signal
 
 
@@ -34,6 +34,7 @@ def find_intrabar_signal(
     params: StrategyParams,
     support_zone: SRZone | None,
     resistance_zone: SRZone | None,
+    current_atr: float = 0.0,
 ) -> tuple[Signal, pd.Timestamp] | None:
     """Return the first signal candidate and its exact trigger timestamp.
 
@@ -50,6 +51,19 @@ def find_intrabar_signal(
     end = minute_idx.searchsorted(bar_end_ts, side='left')
 
     for i in range(start, end):
+        close_price = float(minute_df.iloc[i]['Close'])
+        support_candidate = (
+            support_zone is not None
+            and is_price_in_zone(close_price, support_zone)
+            and is_price_halfway_in_zone(close_price, support_zone, params.zone_penetration_pct)
+        )
+        resistance_candidate = (
+            resistance_zone is not None
+            and is_price_in_zone(close_price, resistance_zone)
+            and is_price_halfway_in_zone(close_price, resistance_zone, params.zone_penetration_pct)
+        )
+        if not support_candidate and not resistance_candidate:
+            continue
         signal = select_entry_signal(
             hourly_df=minute_df,
             bar_idx=i,
@@ -57,6 +71,7 @@ def find_intrabar_signal(
             params=params,
             support_zone=support_zone,
             resistance_zone=resistance_zone,
+            current_atr=current_atr,
         )
         if signal is not None:
             return signal, pd.Timestamp(signal.time)

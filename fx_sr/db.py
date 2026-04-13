@@ -8,12 +8,31 @@ from __future__ import annotations
 import io
 import os
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from urllib.parse import urlparse
 from typing import Optional, Sequence, Tuple
 
 import pandas as pd
+
+_LOAD_OHLC_TIMING = str(os.getenv('FX_SR_LOAD_OHLC_TIMING', '')).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _maybe_log_load_ohlc_timing(
+    *,
+    ticker: str,
+    interval: str,
+    row_count: int,
+    stages: dict[str, float],
+    backend: str,
+) -> None:
+    """Emit opt-in timing for load_ohlc() stage breakdown."""
+    if not _LOAD_OHLC_TIMING:
+        return
+    ordered = ', '.join(f'{name}={value:.2f}s' for name, value in stages.items())
+    print(f'      [load_ohlc] {ticker} {interval} rows={row_count} backend={backend} {ordered}')
+
 
 try:
     import psycopg
@@ -471,6 +490,21 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS provider_gap_exception (
+            ticker       SMALLINT NOT NULL CHECK (ticker > 0),
+            interval     SMALLINT NOT NULL CHECK (interval IN (1, 2, 3)),
+            gap_ts       TIMESTAMPTZ NOT NULL,
+            source       TEXT NOT NULL DEFAULT 'ibkr',
+            note         TEXT,
+            recorded_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (ticker, interval, gap_ts)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_provider_gap_exception_lookup
+        ON provider_gap_exception (ticker, interval, gap_ts)
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS order_audit_log (
             id              BIGSERIAL PRIMARY KEY,
             event_ts        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -709,8 +743,8 @@ def _migrate_legacy_postgres_schema(conn: _CompatConnection) -> None:
     """)
 
 
-def init_db(db_path: str | None = None) -> None:
-    """Create cache tables and apply schema migration where needed."""
+def init_db(db_path: str | None = None, *, migrate_legacy: bool = True) -> None:
+    """Create cache tables and optionally apply legacy schema migration where needed."""
 
     if db_path is None:
         db_path = get_db_path()
@@ -723,6 +757,11 @@ def init_db(db_path: str | None = None) -> None:
         conn = _connect(db_path)
         try:
             _init_postgres_schema(conn)
+            if not migrate_legacy:
+                conn.commit()
+                _DB_SCHEMA_READY.add(db_path)
+                return
+
             _migrate_legacy_postgres_schema(conn)
 
             existing_columns = _table_columns(conn, 'backtest_result')
@@ -968,7 +1007,7 @@ def save_backtest_result(
 
     if db_path is None:
         db_path = get_db_path()
-    init_db(db_path)
+    init_db(db_path, migrate_legacy=False)
     now = _normalize_ts(datetime.utcnow())
 
     delay = 0.1
@@ -1037,7 +1076,7 @@ def load_backtest_result(
         db_path = get_db_path()
     if not _db_exists(db_path):
         return None
-    init_db(db_path)
+    init_db(db_path, migrate_legacy=False)
 
     conn = _connect(db_path)
     try:
@@ -1082,7 +1121,7 @@ def load_backtest_results(
         db_path = get_db_path()
     if not _db_exists(db_path):
         return []
-    init_db(db_path)
+    init_db(db_path, migrate_legacy=False)
 
     query = """
         SELECT pair, run_id, params_hash, hourly_days, zone_history_days, data_signature,
@@ -1249,6 +1288,7 @@ def load_ohlc(
 
     conn = _connect(db_path)
     try:
+        t_total = time.perf_counter()
         db_ticker = _ticker_to_db_value(conn, ticker)
         db_interval = _interval_to_db_value(conn, interval)
         query = "SELECT ts, open, high, low, close, volume FROM ohlc WHERE ticker=%s AND interval=%s"
@@ -1266,6 +1306,7 @@ def load_ohlc(
         if _POSTGRES_DRIVER == 'psycopg':
             copy_sql = f"COPY ({query}) TO STDOUT WITH (FORMAT CSV, HEADER TRUE)"
             try:
+                t_copy = time.perf_counter()
                 with psycopg.connect(db_path) as raw_conn:
                     _apply_raw_session_timeouts(raw_conn)
                     csv_buffer = io.BytesIO()
@@ -1273,34 +1314,160 @@ def load_ohlc(
                         with raw_cursor.copy(copy_sql, params) as copy:
                             while data := copy.read():
                                 csv_buffer.write(bytes(data))
-                    csv_buffer.seek(0)
-                    df = pd.read_csv(csv_buffer)
+                copy_elapsed = time.perf_counter() - t_copy
+                t_parse = time.perf_counter()
+                csv_buffer.seek(0)
+                df = pd.read_csv(csv_buffer)
+                parse_elapsed = time.perf_counter() - t_parse
                 if df.empty:
+                    _maybe_log_load_ohlc_timing(
+                        ticker=ticker,
+                        interval=interval,
+                        row_count=0,
+                        stages={
+                            'copy': copy_elapsed,
+                            'parse': parse_elapsed,
+                            'index': 0.0,
+                            'total': time.perf_counter() - t_total,
+                        },
+                        backend='copy',
+                    )
                     return pd.DataFrame()
+                t_index = time.perf_counter()
                 df.columns = ['ts', 'Open', 'High', 'Low', 'Close', 'Volume']
                 df["ts"] = pd.to_datetime(df["ts"], utc=True)
                 df = df.set_index("ts")
+                index_elapsed = time.perf_counter() - t_index
+                _maybe_log_load_ohlc_timing(
+                    ticker=ticker,
+                    interval=interval,
+                    row_count=len(df),
+                    stages={
+                        'copy': copy_elapsed,
+                        'parse': parse_elapsed,
+                        'index': index_elapsed,
+                        'total': time.perf_counter() - t_total,
+                    },
+                    backend='copy',
+                )
                 return df
             except Exception:
                 rows = None
 
+        t_query = time.perf_counter()
         cursor = conn.execute(query, params)
         rows = cursor.fetchall()
+        query_elapsed = time.perf_counter() - t_query
     finally:
         conn.close()
 
     if not rows:
+        _maybe_log_load_ohlc_timing(
+            ticker=ticker,
+            interval=interval,
+            row_count=0,
+            stages={
+                'query': query_elapsed if 'query_elapsed' in locals() else 0.0,
+                'frame': 0.0,
+                'index': 0.0,
+                'total': time.perf_counter() - t_total if 't_total' in locals() else 0.0,
+            },
+            backend='fetchall',
+        )
         return pd.DataFrame()
 
+    t_frame = time.perf_counter()
     df = pd.DataFrame(rows, columns=['ts', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    frame_elapsed = time.perf_counter() - t_frame
+    t_index = time.perf_counter()
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     df = df.set_index("ts")
+    index_elapsed = time.perf_counter() - t_index
+    _maybe_log_load_ohlc_timing(
+        ticker=ticker,
+        interval=interval,
+        row_count=len(df),
+        stages={
+            'query': query_elapsed if 'query_elapsed' in locals() else 0.0,
+            'frame': frame_elapsed,
+            'index': index_elapsed,
+            'total': time.perf_counter() - t_total if 't_total' in locals() else 0.0,
+        },
+        backend='fetchall',
+    )
     return df
+
+
+def has_provider_gap_exception(
+    ticker: str,
+    interval: str,
+    gap_ts: datetime | pd.Timestamp | str,
+    *,
+    db_path: str | None = None,
+) -> bool:
+    """Return True when a provider-confirmed gap exception exists."""
+
+    if db_path is None:
+        db_path = get_db_path()
+    init_db(db_path, migrate_legacy=False)
+    conn = _connect(db_path)
+    try:
+        db_ticker = _ticker_to_db_value(conn, ticker)
+        db_interval = _interval_to_db_value(conn, interval)
+        gap = _normalize_ts(gap_ts)
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM provider_gap_exception
+            WHERE ticker = %s AND interval = %s AND gap_ts = %s
+            """,
+            (db_ticker, db_interval, gap),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def save_provider_gap_exception(
+    ticker: str,
+    interval: str,
+    gap_ts: datetime | pd.Timestamp | str,
+    *,
+    source: str = 'ibkr',
+    note: str | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Persist one provider-confirmed gap exception."""
+
+    if db_path is None:
+        db_path = get_db_path()
+    init_db(db_path, migrate_legacy=False)
+    conn = _connect(db_path)
+    try:
+        db_ticker = _ticker_to_db_value(conn, ticker)
+        db_interval = _interval_to_db_value(conn, interval)
+        gap = _normalize_ts(gap_ts)
+        conn.execute(
+            """
+            INSERT INTO provider_gap_exception (ticker, interval, gap_ts, source, note, recorded_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (ticker, interval, gap_ts) DO UPDATE SET
+                source = EXCLUDED.source,
+                note = EXCLUDED.note,
+                recorded_at = NOW()
+            """,
+            (db_ticker, db_interval, gap, source, note),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_cached_range(
     ticker: str,
     interval: str,
+    start: datetime = None,
+    end: datetime = None,
     db_path: str | None = None,
 ) -> Optional[Tuple[str, str, int]]:
     """Return cached first/last timestamp and row count."""
@@ -1314,10 +1481,15 @@ def get_cached_range(
     try:
         db_ticker = _ticker_to_db_value(conn, ticker)
         db_interval = _interval_to_db_value(conn, interval)
-        cursor = conn.execute(
-            "SELECT MIN(ts), MAX(ts), COUNT(*) FROM ohlc WHERE ticker=%s AND interval=%s",
-            (db_ticker, db_interval),
-        )
+        query = "SELECT MIN(ts), MAX(ts), COUNT(*) FROM ohlc WHERE ticker=%s AND interval=%s"
+        params = [db_ticker, db_interval]
+        if start is not None:
+            query += " AND ts >= %s"
+            params.append(_normalize_ts(start))
+        if end is not None:
+            query += " AND ts <= %s"
+            params.append(_normalize_ts(end))
+        cursor = conn.execute(query, params)
         row = cursor.fetchone()
     finally:
         conn.close()
@@ -1325,6 +1497,71 @@ def get_cached_range(
     if row is None or row[0] is None:
         return None
     return row[0], row[1], row[2]
+
+
+def find_ohlc_gap_candidates(
+    ticker: str,
+    interval: str,
+    *,
+    start: datetime = None,
+    end: datetime = None,
+    db_path: str | None = None,
+    limit: int = 512,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Return candidate (prev_ts, ts) pairs where a bar gap may exist."""
+
+    if db_path is None:
+        db_path = get_db_path()
+    if not _db_exists(db_path):
+        return []
+
+    gap_interval = {
+        '1d': '2 days',
+        '1h': '2 hours',
+        '1m': '2 minutes',
+    }[interval]
+
+    conn = _connect(db_path)
+    try:
+        db_ticker = _ticker_to_db_value(conn, ticker)
+        db_interval = _interval_to_db_value(conn, interval)
+        where_parts = ["ticker=%s", "interval=%s"]
+        params: list[object] = [db_ticker, db_interval]
+        if start is not None:
+            where_parts.append("ts >= %s")
+            params.append(_normalize_ts(start))
+        if end is not None:
+            where_parts.append("ts <= %s")
+            params.append(_normalize_ts(end))
+        where_sql = " AND ".join(where_parts)
+        safe_limit = max(1, int(limit))
+        cursor = conn.execute(
+            f"""
+            WITH ordered AS (
+                SELECT
+                    ts,
+                    LAG(ts) OVER (ORDER BY ts) AS prev_ts
+                FROM ohlc
+                WHERE {where_sql}
+            )
+            SELECT prev_ts, ts
+            FROM ordered
+            WHERE prev_ts IS NOT NULL
+              AND ts > prev_ts + INTERVAL '{gap_interval}'
+            ORDER BY ts
+            LIMIT {safe_limit}
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    return [
+        (pd.Timestamp(row[0]), pd.Timestamp(row[1]))
+        for row in rows
+        if row[0] is not None and row[1] is not None
+    ]
 
 
 def get_cache_summary(db_path: str | None = None) -> pd.DataFrame:

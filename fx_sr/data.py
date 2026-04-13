@@ -13,11 +13,127 @@ Data sources (in priority order):
 from datetime import datetime, timedelta, timezone
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from .db import init_db, get_cached_range, load_ohlc, save_ohlc
+from .db import (
+    find_ohlc_gap_candidates,
+    get_cached_range,
+    has_provider_gap_exception,
+    init_db,
+    load_ohlc,
+    save_ohlc,
+    save_provider_gap_exception,
+)
 from . import ibkr
+
+
+def _easter_sunday(year: int) -> pd.Timestamp:
+    """Return Easter Sunday for a Gregorian year."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return pd.Timestamp(year=year, month=month, day=day, tz='UTC')
+
+
+def _is_fx_daily_holiday(ts: pd.Timestamp | datetime | str) -> bool:
+    """Return True when a daily FX bar is not expected on that UTC date."""
+    current = _as_utc(ts).normalize()
+    month_day = (current.month, current.day)
+    if month_day in {(1, 1), (12, 25)}:
+        return True
+    easter = _easter_sunday(current.year)
+    good_friday = easter - pd.Timedelta(days=2)
+    return current == good_friday.normalize()
+
+
+def _easter_monday_delayed_reopen(year: int) -> pd.Timestamp:
+    """Return the special Easter-weekend FX reopen time in UTC."""
+    easter = _easter_sunday(year).normalize()
+    return easter + pd.Timedelta(days=1)
+
+
+def _special_weekend_reopen_time(ts: pd.Timestamp | datetime | str) -> pd.Timestamp | None:
+    """Return a special weekend reopen timestamp when holiday trading hours differ."""
+    current = _as_utc(ts)
+    days_to_sunday = (6 - current.weekday()) % 7
+    sunday = current.normalize() + pd.Timedelta(days=days_to_sunday)
+    easter = _easter_sunday(sunday.year).normalize()
+    if sunday == easter:
+        return _easter_monday_delayed_reopen(sunday.year)
+    return None
+
+
+def _next_expected_daily_bar_time(ts: pd.Timestamp | datetime | str) -> pd.Timestamp:
+    """Advance to the next expected daily FX bar timestamp."""
+    next_ts = _as_utc(ts).normalize() + pd.Timedelta(days=1)
+    while next_ts.weekday() >= 5 or _is_fx_daily_holiday(next_ts):
+        next_ts += pd.Timedelta(days=1)
+    return next_ts
+
+
+def _last_cached_label(cached: pd.DataFrame) -> str:
+    """Return a compact UTC label for the latest cached timestamp."""
+    if cached.empty:
+        return 'n/a'
+    last = pd.Timestamp(cached.index[-1])
+    if last.tzinfo is None:
+        last = last.tz_localize('UTC')
+    else:
+        last = last.tz_convert('UTC')
+    return last.isoformat()
+
+
+def _trailing_gap_days(cached: pd.DataFrame, *, interval: str) -> int:
+    """Return how many days of data are missing at the trailing (recent) end.
+
+    Returns 0 when the cache is up to date, or a positive number of days
+    that need fetching from a live source.  Weekend gaps are accounted for
+    (FX markets are closed Sat–Sun).
+    """
+    if cached.empty:
+        return 999  # no cache at all — caller should use its default days
+
+    now = pd.Timestamp.now('UTC')
+    last = pd.Timestamp(cached.index[-1])
+    if last.tzinfo is None:
+        last = last.tz_localize('UTC')
+    else:
+        last = last.tz_convert('UTC')
+
+    # Tolerance: how old can the last bar be before we consider it stale?
+    # Allow 2× the bar interval to account for the currently-forming bar
+    # plus a small buffer.  On weekends, FX is closed ~48 h so we add that.
+    tolerances = {'1d': pd.Timedelta(days=2), '1h': pd.Timedelta(hours=2), '1m': pd.Timedelta(minutes=2)}
+    tolerance = tolerances.get(interval, pd.Timedelta(hours=2))
+
+    # If it's weekend (Saturday or Sunday before market open), extend
+    # tolerance to cover the Friday-close → Sunday-open gap.
+    weekday = now.weekday()  # 0=Mon … 6=Sun
+    if weekday == 5:  # Saturday
+        tolerance += pd.Timedelta(days=1)
+    elif weekday == 6:  # Sunday
+        tolerance += pd.Timedelta(days=2)
+
+    gap = now - last
+    if gap <= tolerance:
+        return 0
+
+    # Compute business days in the gap as the fetch size
+    trading = _trading_days_between(last, now)
+    return max(1, trading + 1)
 
 
 def _fetch_live(
@@ -25,9 +141,16 @@ def _fetch_live(
     interval: str,
     days: int,
     client_id: int | None = None,
+    timeout_s: float | None = None,
 ) -> pd.DataFrame:
     """Fetch fresh data from IBKR."""
-    df = ibkr.fetch_historical(ticker_symbol, interval, days, client_id=client_id)
+    df = ibkr.fetch_historical(
+        ticker_symbol,
+        interval,
+        days,
+        client_id=client_id,
+        timeout_s=timeout_s,
+    )
     if df is None or df.empty:
         return pd.DataFrame()
     return df
@@ -42,6 +165,502 @@ def _as_utc(ts: pd.Timestamp | datetime | str) -> pd.Timestamp:
     """Normalize a timestamp to tz-aware UTC."""
     value = pd.Timestamp(ts)
     return value.tz_localize('UTC') if value.tzinfo is None else value.tz_convert('UTC')
+
+
+def fx_market_is_open(ts: pd.Timestamp | datetime | str | None = None) -> bool:
+    """Return whether bars are expected at a UTC timestamp.
+
+    Data has a daily maintenance break from 17:00 to 17:14 New York time and
+    the weekend closure runs from Friday 17:00 New York time to Sunday 17:15
+    New York time, except for special holiday-delayed reopens.
+    """
+
+    now_utc = _as_utc(ts or pd.Timestamp.now(tz='UTC'))
+    now_ny = now_utc.tz_convert(ZoneInfo('America/New_York'))
+    weekday = now_ny.weekday()  # Mon=0 ... Sun=6
+    minute_of_day = now_ny.hour * 60 + now_ny.minute
+    close_minute = 17 * 60
+    reopen_minute = 17 * 60 + 15
+    special_reopen = _special_weekend_reopen_time(now_utc)
+    if weekday == 5:
+        return False
+    if weekday == 6:
+        if special_reopen is not None:
+            return False
+        if minute_of_day < reopen_minute:
+            return False
+    if weekday == 4 and minute_of_day >= close_minute:
+        return False
+    if weekday in {0, 1, 2, 3} and close_minute <= minute_of_day < reopen_minute:
+        return False
+    if special_reopen is not None and now_utc < special_reopen:
+        return False
+    return True
+
+
+def _interval_delta(interval: str) -> pd.Timedelta:
+    """Return the nominal bar delta for a supported interval."""
+
+    return {
+        '1d': pd.Timedelta(days=1),
+        '1h': pd.Timedelta(hours=1),
+        '1m': pd.Timedelta(minutes=1),
+    }[interval]
+
+
+def _weekend_reopen_time(ts: pd.Timestamp | datetime | str) -> pd.Timestamp:
+    """Return the next UTC session restart timestamp."""
+
+    current_utc = _as_utc(ts)
+    special_reopen = _special_weekend_reopen_time(current_utc)
+    if special_reopen is not None and current_utc < special_reopen:
+        return special_reopen
+    current_ny = current_utc.tz_convert(ZoneInfo('America/New_York'))
+    weekday = current_ny.weekday()
+    ny_day = current_ny.normalize()
+    reopen_today_ny = ny_day + pd.Timedelta(hours=17, minutes=15)
+    if weekday == 6 and current_ny <= reopen_today_ny:
+        return reopen_today_ny.tz_convert('UTC')
+
+    days_until_sunday = (6 - weekday) % 7
+    if days_until_sunday == 0 and current_ny > reopen_today_ny:
+        days_until_sunday = 7
+    sunday_ny = ny_day + pd.Timedelta(days=days_until_sunday)
+    reopen_ny = sunday_ny + pd.Timedelta(hours=17, minutes=15)
+    return reopen_ny.tz_convert('UTC')
+
+
+def _is_weekend_transition(
+    prev_ts: pd.Timestamp | datetime | str,
+    current_ts: pd.Timestamp | datetime | str,
+    interval: str,
+) -> bool:
+    """Return True when a gap spans the normal FX weekend closure."""
+
+    prev_utc = _as_utc(prev_ts)
+    current_utc = _as_utc(current_ts)
+    prev_ny = prev_utc.tz_convert(ZoneInfo('America/New_York'))
+    current_ny = current_utc.tz_convert(ZoneInfo('America/New_York'))
+
+    if current_utc <= prev_utc:
+        return False
+    if prev_ny.weekday() != 4:
+        return False
+    if current_ny.weekday() not in {6, 0}:
+        return False
+
+    close_ny = prev_ny.normalize() + pd.Timedelta(hours=17)
+    last_valid_start = close_ny - _interval_delta(interval)
+    if prev_ny < last_valid_start:
+        return False
+    return True
+
+
+def _next_expected_bar_time(ts: pd.Timestamp | datetime | str, interval: str) -> pd.Timestamp:
+    """Advance one expected trading bar, skipping FX weekend closures."""
+
+    current = _as_utc(ts)
+    if interval == '1d':
+        return _next_expected_daily_bar_time(current)
+
+    if interval == '1h':
+        ny = current.tz_convert(ZoneInfo('America/New_York'))
+        reopen_utc = _weekend_reopen_time(current)
+        reopen_ny = reopen_utc.tz_convert(ZoneInfo('America/New_York'))
+        if ny.weekday() == 6 and current == reopen_utc:
+            return current.ceil('h')
+
+    step = _interval_delta(interval)
+    next_ts = current + step
+    while not fx_market_is_open(next_ts):
+        next_ts = _weekend_reopen_time(next_ts)
+    return next_ts
+
+
+def _aligned_expected_bar_at_or_after(
+    ts: pd.Timestamp | datetime | str,
+    interval: str,
+) -> pd.Timestamp:
+    """Return the first expected bar timestamp at or after a timestamp."""
+
+    current = _as_utc(ts)
+    if interval == '1d':
+        current = current.normalize()
+        while current.weekday() >= 5 or _is_fx_daily_holiday(current):
+            current += pd.Timedelta(days=1)
+    elif interval == '1h':
+        reopen_utc = _weekend_reopen_time(current)
+        ny = current.tz_convert(ZoneInfo('America/New_York'))
+        reopen_ny = reopen_utc.tz_convert(ZoneInfo('America/New_York'))
+        if ny.weekday() == 6 and current <= reopen_utc:
+            current = reopen_utc
+        elif ny.weekday() == 6 and reopen_utc < current < current.ceil('h'):
+            current = current.ceil('h')
+        else:
+            current = current.floor('h')
+    elif interval == '1m':
+        reopen_utc = _weekend_reopen_time(current)
+        ny = current.tz_convert(ZoneInfo('America/New_York'))
+        if ny.weekday() == 6 and current <= reopen_utc:
+            current = reopen_utc
+        else:
+            current = current.floor('min')
+
+    if fx_market_is_open(current):
+        return current
+    if interval in {'1h', '1m'}:
+        return _weekend_reopen_time(current)
+    return _next_expected_bar_time(current - _interval_delta(interval), interval)
+
+
+def _provider_gap_setting_key(
+    ticker_symbol: str,
+    interval: str,
+    gap_ts: pd.Timestamp | datetime | str,
+) -> str:
+    """Return the stable key for a provider-confirmed missing bar."""
+
+    gap = _as_utc(gap_ts)
+    return f'{ticker_symbol}|{interval}|{gap.isoformat()}'
+
+
+def _is_provider_confirmed_gap(
+    ticker_symbol: str,
+    interval: str,
+    gap_ts: pd.Timestamp | datetime | str,
+) -> bool:
+    """Return True when a missing bar was previously confirmed absent at IBKR."""
+
+    return has_provider_gap_exception(ticker_symbol, interval, _as_utc(gap_ts))
+
+
+def _remember_provider_confirmed_gap(
+    ticker_symbol: str,
+    interval: str,
+    gap_ts: pd.Timestamp | datetime | str,
+) -> None:
+    """Persist one provider-confirmed missing bar so future scans can skip it."""
+
+    gap = _as_utc(gap_ts)
+    save_provider_gap_exception(
+        ticker_symbol,
+        interval,
+        gap,
+        source='ibkr',
+        note=f'provider-confirmed gap {_provider_gap_setting_key(ticker_symbol, interval, gap)}',
+    )
+
+
+def find_first_missing_bar(
+    cached: pd.DataFrame,
+    interval: str,
+    *,
+    ticker_symbol: str | None = None,
+    now: pd.Timestamp | datetime | str | None = None,
+    check_trailing: bool = True,
+) -> pd.Timestamp | None:
+    """Return the first missing timestamp inside cached data, or at the trailing edge."""
+
+    if cached is None or cached.empty:
+        return None
+
+    normalized = cached.index
+    previous = _as_utc(normalized[0])
+    for current_raw in normalized[1:]:
+        current = _as_utc(current_raw)
+        if interval in {'1h', '1m'} and _is_weekend_transition(previous, current, interval):
+            previous = current
+            continue
+        expected = _next_expected_bar_time(previous, interval)
+        if current > expected:
+            if (
+                ticker_symbol is not None
+                and _is_provider_confirmed_gap(ticker_symbol, interval, expected)
+            ):
+                previous = current
+                continue
+            return expected
+        previous = current
+
+    if not check_trailing:
+        return None
+
+    now_ts = _as_utc(now or pd.Timestamp.now(tz='UTC'))
+    if not fx_market_is_open(now_ts):
+        return None
+
+    tolerance = {
+        '1d': pd.Timedelta(days=3),
+        '1h': pd.Timedelta(hours=2),
+        '1m': pd.Timedelta(minutes=2),
+    }[interval]
+    last_ts = _as_utc(normalized[-1])
+    if now_ts - last_ts <= tolerance:
+        return None
+    expected = _next_expected_bar_time(last_ts, interval)
+    if (
+        ticker_symbol is not None
+        and _is_provider_confirmed_gap(ticker_symbol, interval, expected)
+    ):
+        return None
+    return expected
+
+
+def find_first_missing_cached_bar(
+    ticker_symbol: str,
+    interval: str,
+    *,
+    start: pd.Timestamp | datetime | str | None = None,
+    end: pd.Timestamp | datetime | str | None = None,
+    now: pd.Timestamp | datetime | str | None = None,
+    check_trailing: bool = True,
+) -> pd.Timestamp | None:
+    """Find the first missing cached bar using SQL-side gap detection."""
+
+    window_range = get_cached_range(ticker_symbol, interval, start=start, end=end)
+    if window_range is None:
+        return None
+
+    first_ts, last_ts, _rows = window_range
+    if start is not None:
+        expected_start = _aligned_expected_bar_at_or_after(start, interval)
+        first_seen = _as_utc(first_ts)
+        if first_seen > expected_start and not _is_provider_confirmed_gap(
+            ticker_symbol,
+            interval,
+            expected_start,
+        ):
+            return expected_start
+
+    for prev_ts, current_ts in find_ohlc_gap_candidates(
+        ticker_symbol,
+        interval,
+        start=start,
+        end=end,
+        limit=512,
+    ):
+        if interval in {'1h', '1m'} and _is_weekend_transition(prev_ts, current_ts, interval):
+            continue
+        expected = _next_expected_bar_time(prev_ts, interval)
+        if _is_provider_confirmed_gap(ticker_symbol, interval, expected):
+            continue
+        current = _as_utc(current_ts)
+        if current > expected:
+            return expected
+
+    if not check_trailing:
+        return None
+
+    now_ts = _as_utc(now or pd.Timestamp.now(tz='UTC'))
+    if end is not None and now_ts > _as_utc(end):
+        now_ts = _as_utc(end)
+    if not fx_market_is_open(now_ts):
+        return None
+
+    tolerance = {
+        '1d': pd.Timedelta(days=3),
+        '1h': pd.Timedelta(hours=2),
+        '1m': pd.Timedelta(minutes=2),
+    }[interval]
+    last_seen = _as_utc(last_ts)
+    if now_ts - last_seen <= tolerance:
+        return None
+    return _next_expected_bar_time(last_seen, interval)
+
+
+def refill_interval_from(
+    ticker_symbol: str,
+    interval: str,
+    start_ts: pd.Timestamp | datetime | str,
+    *,
+    client_id: int | None = None,
+) -> pd.DataFrame:
+    """Refetch one interval from the first missing bar to now and persist it."""
+
+    start = _as_utc(start_ts)
+    now = pd.Timestamp.now(tz='UTC')
+    fetch_days = max(1, int(math.ceil((now - start).total_seconds() / 86400.0)) + 1)
+
+    if interval == '1m':
+        end_ts = now
+        chunk_days = 3
+        max_chunk_days = chunk_days
+        slow_chunk_threshold_s = 20.0
+        fetched_any = False
+        while end_ts > start:
+            remaining_days = max((end_ts - start).total_seconds() / 86400.0, 0.0)
+            fetch_chunk_days = max(1, min(max_chunk_days, math.ceil(remaining_days)))
+            attempted_chunk_days: list[int] = []
+            df = None
+            last_attempt_elapsed_s = 0.0
+            current_chunk_days = fetch_chunk_days
+            while current_chunk_days >= 1:
+                attempted_chunk_days.append(current_chunk_days)
+                attempt_started = pd.Timestamp.now(tz='UTC')
+                df = ibkr.fetch_historical(
+                    ticker_symbol,
+                    '1m',
+                    current_chunk_days,
+                    client_id=client_id,
+                    end_datetime=end_ts,
+                    timeout_s=30,
+                )
+                last_attempt_elapsed_s = (
+                    pd.Timestamp.now(tz='UTC') - attempt_started
+                ).total_seconds()
+                if df is not None and not df.empty:
+                    break
+                if current_chunk_days == 1:
+                    break
+                next_chunk_days = max(1, current_chunk_days // 2)
+                if next_chunk_days == current_chunk_days:
+                    next_chunk_days = current_chunk_days - 1
+                current_chunk_days = next_chunk_days
+                max_chunk_days = min(max_chunk_days, current_chunk_days)
+            if df is None or df.empty:
+                raise RuntimeError(
+                    f'IBKR returned no {interval} bars for {ticker_symbol} '
+                    f'while refilling from {start} (request end {end_ts}, '
+                    f'chunk attempts={attempted_chunk_days})'
+                )
+            fetched_any = True
+            if current_chunk_days < max_chunk_days:
+                max_chunk_days = current_chunk_days
+            elif last_attempt_elapsed_s >= slow_chunk_threshold_s and current_chunk_days > 1:
+                max_chunk_days = current_chunk_days - 1
+            save_ohlc(ticker_symbol, '1m', df)
+            next_end = pd.Timestamp(df.index.min())
+            if next_end.tzinfo is None:
+                next_end = next_end.tz_localize('UTC')
+            else:
+                next_end = next_end.tz_convert('UTC')
+            next_end = next_end - pd.Timedelta(minutes=1)
+            if next_end >= end_ts:
+                break
+            end_ts = next_end
+        if not fetched_any:
+            raise RuntimeError(f'IBKR returned no {interval} bars for {ticker_symbol} while refilling from {start}')
+        refilled = load_ohlc(
+            ticker_symbol,
+            interval,
+            start=start.to_pydatetime(),
+            end=now.to_pydatetime(),
+        )
+        while True:
+            remaining_gap = find_first_missing_cached_bar(
+                ticker_symbol,
+                interval,
+                start=start,
+                end=now,
+                now=now,
+            )
+            if remaining_gap is None:
+                break
+            if not _provider_confirms_unfillable_gap(
+                ticker_symbol,
+                interval,
+                remaining_gap,
+                client_id=client_id,
+            ):
+                raise RuntimeError(
+                    f'{ticker_symbol} {interval} refill incomplete: first missing bar still at {remaining_gap}'
+                )
+            _remember_provider_confirmed_gap(ticker_symbol, interval, remaining_gap)
+            print(
+                f'      {ticker_symbol} {interval}: IBKR also has no bar at {remaining_gap}; '
+                'recorded provider-gap exception; continuing gap scan'
+            )
+            continue
+        return refilled
+
+    df = _fetch_live(ticker_symbol, interval, fetch_days, client_id=client_id, timeout_s=30)
+    if df is None or df.empty:
+        raise RuntimeError(
+            f'IBKR returned no {interval} bars for {ticker_symbol} while refilling from {start}'
+        )
+    save_ohlc(ticker_symbol, interval, df)
+    refilled = load_ohlc(
+        ticker_symbol,
+        interval,
+        start=start.to_pydatetime(),
+        end=now.to_pydatetime(),
+    )
+    while True:
+        remaining_gap = find_first_missing_cached_bar(
+            ticker_symbol,
+            interval,
+            start=start,
+            end=now,
+            now=now,
+        )
+        if remaining_gap is None:
+            break
+        if not _provider_confirms_unfillable_gap(
+            ticker_symbol,
+            interval,
+            remaining_gap,
+            client_id=client_id,
+        ):
+            raise RuntimeError(
+                f'{ticker_symbol} {interval} refill incomplete: first missing bar still at {remaining_gap}'
+            )
+        _remember_provider_confirmed_gap(ticker_symbol, interval, remaining_gap)
+        print(
+            f'      {ticker_symbol} {interval}: IBKR also has no bar at {remaining_gap}; '
+            'recorded provider-gap exception; continuing gap scan'
+        )
+        continue
+    return refilled
+
+
+def _provider_confirms_unfillable_gap(
+    ticker_symbol: str,
+    interval: str,
+    gap_ts: pd.Timestamp | datetime | str,
+    *,
+    client_id: int | None = None,
+) -> bool:
+    """Return True when IBKR historical data itself is missing the same bar."""
+
+    gap = _as_utc(gap_ts)
+    if interval == '1m':
+        fetch_days = 2
+        end_ts = gap + pd.Timedelta(days=1)
+        lookback = pd.Timedelta(minutes=30)
+        lookahead = pd.Timedelta(minutes=30)
+    elif interval == '1h':
+        fetch_days = 7
+        end_ts = gap + pd.Timedelta(days=2)
+        lookback = pd.Timedelta(hours=6)
+        lookahead = pd.Timedelta(hours=6)
+    else:
+        return False
+
+    provider_df = ibkr.fetch_historical(
+        ticker_symbol,
+        interval,
+        fetch_days,
+        client_id=client_id,
+        end_datetime=end_ts,
+        timeout_s=30,
+    )
+    if provider_df is None or provider_df.empty:
+        return False
+
+    provider_index = pd.DatetimeIndex(provider_df.index)
+    if provider_index.tz is None:
+        provider_index = provider_index.tz_localize('UTC')
+    else:
+        provider_index = provider_index.tz_convert('UTC')
+    provider_df = provider_df.copy()
+    provider_df.index = provider_index
+
+    if gap in provider_df.index:
+        return False
+
+    earlier = provider_df[(provider_df.index >= gap - lookback) & (provider_df.index < gap)]
+    later = provider_df[(provider_df.index > gap) & (provider_df.index <= gap + lookahead)]
+    return not earlier.empty and not later.empty
 
 
 def _remaining_days_to_fetch(
@@ -332,20 +951,30 @@ def fetch_daily_data(
     cached = pd.DataFrame()
     if not force_refresh:
         cached = load_ohlc(ticker_symbol, '1d', start, end)
-        min_rows = max(20, int(days * 0.5))
-        if _is_cache_fresh(
-            cached,
-            interval='1d',
-            requested_days=days,
-            min_rows=min_rows,
-        ):
+        gap_days = _trailing_gap_days(cached, interval='1d')
+        if gap_days <= 0:
+            print(f'      {ticker_symbol} 1d: cache up to date ({len(cached)} rows)')
             return cached
-        if allow_stale_cache and len(cached) >= min_rows:
+        if allow_stale_cache and not cached.empty:
+            print(
+                f'      {ticker_symbol} 1d: using cached history without refresh '
+                f'({len(cached)} rows, last { _last_cached_label(cached) }, trailing gap {gap_days}d)'
+            )
             return cached
+        # Only fetch the gap, not the full window
+        fetch_days = min(days, gap_days)
+        print(f'      {ticker_symbol} 1d: cache has {len(cached)} rows, gap {gap_days}d, fetching {fetch_days}d from IBKR...')
+    else:
+        fetch_days = days
 
-    df = _fetch_live(ticker_symbol, '1d', days, client_id=client_id)
+    df = _fetch_live(ticker_symbol, '1d', fetch_days, client_id=client_id)
     if not df.empty:
         save_ohlc(ticker_symbol, '1d', df)
+        print(f'      {ticker_symbol} 1d: IBKR returned {len(df)} rows')
+        # Merge with cached data if we only fetched the gap
+        if not cached.empty:
+            combined = pd.concat([cached[~cached.index.isin(df.index)], df]).sort_index()
+            return combined
         return df
 
     return cached if not force_refresh and not cached.empty else pd.DataFrame()
@@ -365,22 +994,29 @@ def fetch_hourly_data(
     cached = pd.DataFrame()
     if not force_refresh:
         cached = load_ohlc(ticker_symbol, '1h', start, end)
-        # Small windows like 1 day only contain ~24 hourly bars, so requiring
-        # 48 rows forces unnecessary live refreshes and parallel IBKR collisions.
-        min_rows = max(24, int(days * 10))
-        if _is_cache_fresh(
-            cached,
-            interval='1h',
-            requested_days=days,
-            min_rows=min_rows,
-        ):
+        gap_days = _trailing_gap_days(cached, interval='1h')
+        if gap_days <= 0:
+            print(f'      {ticker_symbol} 1h: cache up to date ({len(cached)} rows)')
             return cached
-        if allow_stale_cache and len(cached) >= min_rows:
+        if allow_stale_cache and not cached.empty:
+            print(
+                f'      {ticker_symbol} 1h: using cached history without refresh '
+                f'({len(cached)} rows, last { _last_cached_label(cached) }, trailing gap {gap_days}d)'
+            )
             return cached
+        # Only fetch the gap, not the full window
+        fetch_days = min(days, gap_days)
+        print(f'      {ticker_symbol} 1h: cache has {len(cached)} rows, gap {gap_days}d, fetching {fetch_days}d from IBKR...')
+    else:
+        fetch_days = days
 
-    df = _fetch_live(ticker_symbol, '1h', days, client_id=client_id)
+    df = _fetch_live(ticker_symbol, '1h', fetch_days, client_id=client_id)
     if not df.empty:
         save_ohlc(ticker_symbol, '1h', df)
+        print(f'      {ticker_symbol} 1h: IBKR returned {len(df)} rows')
+        if not cached.empty:
+            combined = pd.concat([cached[~cached.index.isin(df.index)], df]).sort_index()
+            return combined
         return df
 
     return cached if not force_refresh and not cached.empty else pd.DataFrame()
@@ -489,19 +1125,26 @@ def fetch_minute_data_cached(
     start = end - timedelta(days=days)
 
     cached = load_ohlc(ticker_symbol, '1m', start, end)
-    if _is_cache_fresh(
-        cached,
-        interval='1m',
-        requested_days=days,
-        min_rows=max(60, days * 500),
-    ):
+    gap_days = _trailing_gap_days(cached, interval='1m')
+    if gap_days <= 0:
+        print(f'      {ticker_symbol} 1m: cache up to date ({len(cached)} rows)')
         return cached
     if allow_stale_cache and not cached.empty:
+        print(
+            f'      {ticker_symbol} 1m: using cached history without refresh '
+            f'({len(cached)} rows, last { _last_cached_label(cached) }, trailing gap {gap_days}d)'
+        )
         return cached
+    fetch_days = min(days, gap_days)
+    print(f'      {ticker_symbol} 1m: cache has {len(cached)} rows, gap {gap_days}d, fetching {fetch_days}d from IBKR...')
 
-    df = _fetch_live(ticker_symbol, '1m', days, client_id=client_id)
+    df = _fetch_live(ticker_symbol, '1m', fetch_days, client_id=client_id)
     if not df.empty:
         save_ohlc(ticker_symbol, '1m', df)
+        print(f'      {ticker_symbol} 1m: IBKR returned {len(df)} rows')
+        if not cached.empty:
+            combined = pd.concat([cached[~cached.index.isin(df.index)], df]).sort_index()
+            return combined
         return df
 
     return cached if not cached.empty else pd.DataFrame()

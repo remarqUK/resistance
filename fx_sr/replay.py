@@ -353,7 +353,8 @@ def _known_compounding_profiles() -> dict[str, dict]:
     """Map profile parameter hashes to the balance assumptions used in the UI."""
 
     known_profiles: dict[str, dict] = {}
-    for name, profile in PROFILES.items():
+    for name in PROFILES:
+        profile = get_profile(name)
         profile_params = params_from_profile(profile)
         known_profiles[_params_signature(profile_params)] = {
             'profile_name': name,

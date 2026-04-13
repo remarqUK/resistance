@@ -55,6 +55,83 @@ To compare: run a backtest, then start live on the same profile/days. Diff the J
 
 Set `trade_snapshot_logging: false` in the profile or params to disable once parity is confirmed. The `logs/` directory is gitignored.
 
+## Zone Detection
+
+Support/resistance zones are detected from daily OHLC in `fx_sr/levels.py`.
+
+### Algorithm
+
+1. **Pivot detection**: `find_daily_pivots()` identifies swing highs/lows using a 5-bar left/right window (configurable via `pivot_window`)
+2. **DBSCAN clustering**: `_cluster_pivots_dbscan()` groups nearby pivots using density-based clustering (`sklearn.cluster.DBSCAN`, `min_samples=1`). The `cluster_tolerance` parameter (default 0.08%) is converted to an absolute price distance via the median pivot price. Unlike the previous greedy sequential clustering, DBSCAN is order-independent and produces consistent results regardless of data ordering.
+3. **Zone bounds**: Resistance = `[min(body_tops), max(highs)]`, Support = `[min(lows), max(body_bottoms)]`
+4. **Width filter**: Zones wider than `max_zone_width_pct` (default 0.35%) are discarded
+5. **Touch counting**: Daily candles that enter and bounce from the zone are counted
+6. **Strength grading**: Zones with 3+ touches are "major" (tradeable), others are "minor"
+7. **Merging**: Overlapping zones are combined; post-merge width filter re-applied
+
+### Key Parameters
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `pivot_window` | `5` | Bars left/right for pivot detection |
+| `cluster_tolerance` | `0.08` | DBSCAN eps as % of median price |
+| `max_zone_width_pct` | `0.35` | Reject zones wider than this % |
+| `zone_history_days` | `180` | Daily lookback for zone detection |
+| `max_sl_pct` | `0.25` | Skip signals where SL distance > this % of entry |
+
+## Strategy: TP/SL Calculation
+
+The default `high_volume` profile uses a multi-layer exit system built on S/R zone entries.
+
+### Stop Loss — ATR-based (`sl_mode='atr'`)
+
+SL is placed beyond the zone edge by an ATR-scaled buffer instead of a fixed percentage:
+- **LONG**: `sl = zone.lower - ATR(14) * atr_sl_multiplier`
+- **SHORT**: `sl = zone.upper + ATR(14) * atr_sl_multiplier`
+
+ATR is pre-computed once per walk-forward from hourly OHLC (`fx_sr/atr.py:compute_atr()`). Falls back to fixed `sl_buffer_pct` when ATR is unavailable (first 14 bars). The `max_sl_pct` filter still rejects trades where SL distance exceeds a threshold.
+
+### Take Profit — RR ratio
+
+TP is set at `entry ± risk * rr_ratio` (default 1.1R). The optional `tp_mode='zone'` targets the opposing S/R zone edge instead, with a minimum RR floor (`tp_zone_min_rr`).
+
+### Partial Close
+
+When `partial_close_enabled=True`, the walk-forward splits a trade at an intermediate target:
+1. Price reaches `partial_close_target_r` (default 1.0R)
+2. A copy of the trade is finalized as `PARTIAL_TP` with `position_fraction` (default 0.5)
+3. The remainder continues with SL moved to breakeven and `is_remainder=True`
+
+Split trades share a `trade_group_id`. In portfolio simulation, remainder trades inherit their group's admission — they don't consume a separate correlation or margin slot.
+
+### Trailing Stop
+
+After partial close, the remainder's SL can trail via `trailing_mode`:
+- `'breakeven'` — SL at entry price (default for `high_volume`)
+- `'fixed_r'` — SL trails at `best_price - trailing_fixed_r * risk`, floored at entry
+- `'atr'` — SL trails at `best_price - entry_atr * trailing_atr_multiplier`, floored at entry
+
+Trailing activates after price reaches `trailing_activate_r` in profit. Gated by `trailing_requires_partial` (default `True`) so only remainder trades trail.
+
+### Configurable Modes
+
+All TP/SL behavior is configurable per profile via `StrategyParams`. Key fields:
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `sl_mode` | `'atr'` | `'fixed'` or `'atr'` |
+| `atr_period` | `14` | ATR lookback in hourly bars |
+| `atr_sl_multiplier` | `1.0` | SL = zone_edge ± ATR * this |
+| `tp_mode` | `'rr'` | `'rr'` or `'zone'` |
+| `partial_close_enabled` | `True` | Split trade at intermediate target |
+| `partial_close_fraction` | `0.5` | Fraction to close at target |
+| `partial_close_target_r` | `1.0` | R-multiple trigger for partial |
+| `trailing_mode` | `'breakeven'` | `'none'`, `'breakeven'`, `'fixed_r'`, `'atr'` |
+
+### Profile Inheritance
+
+Profiles can use `'_base': 'profile_name'` to inherit all settings from a parent and override specific fields. `get_profile()` resolves this. A/B test profiles (`high_volume_zone_tp`, `high_volume_full`, etc.) use this to extend `high_volume`.
+
 ## Frontend
 
 The dashboard is a **React SPA** (`frontend/live-dashboard/src/`), built with Vite and served as static files from `fx_sr/web_live/react/`. All frontend page changes must go in React components (`.tsx` files in `frontend/live-dashboard/src/pages/`), **not** in vanilla HTML files in `fx_sr/web_live/`.

@@ -305,7 +305,7 @@ PROFILES = {
     },
 
     'high_volume': {
-        'description': 'Nick hybrid: quality sizing + early cut + corr cap, 785 trades, +73.9B, 16.7% DD, -3.86R worst streak',
+        'description': 'ATR SL + partial close at 1R + breakeven trail: 368 trades, 66.8% WR, 3.2% DD',
 
         # Zone detection
         'pivot_window': 5,
@@ -330,7 +330,16 @@ PROFILES = {
         # Exit rules — Nick-informed
         'rr_ratio': 1.1,
         'sl_buffer_pct': 0.15,
+        'sl_mode': 'atr',
+        'atr_period': 14,
+        'atr_sl_multiplier': 1.0,
         'early_exit_r': 0.35,
+        'partial_close_enabled': True,
+        'partial_close_fraction': 0.5,
+        'partial_close_target_r': 1.1,
+        'trailing_mode': 'breakeven',
+        'trailing_activate_r': 1.1,
+        'trailing_requires_partial': True,
         'max_hold_bars': 72,
         'sideways_bars': 15,
         'sideways_threshold': 0.3,
@@ -510,6 +519,52 @@ PROFILES = {
         'starting_balance': 1000.0,
         'risk_pct': 5.0,
     },
+    # ---- A/B test profiles for alternative TP/SL modes ----
+
+    'high_volume_atr_sl': {
+        'description': 'high_volume + ATR-based SL buffer (volatility-adapted stops)',
+        '_base': 'high_volume',
+        'sl_mode': 'atr',
+        'atr_period': 14,
+        'atr_sl_multiplier': 1.0,
+    },
+
+    'high_volume_zone_tp': {
+        'description': 'high_volume + zone-to-zone TP targeting',
+        '_base': 'high_volume',
+        'tp_mode': 'zone',
+        'tp_zone_min_rr': 0.6,
+        'tp_zone_fallback_rr': 1.0,
+    },
+
+    'high_volume_partial': {
+        'description': 'high_volume + partial close at 1R (50%) + breakeven trail on remainder',
+        '_base': 'high_volume',
+        'partial_close_enabled': True,
+        'partial_close_fraction': 0.5,
+        'partial_close_target_r': 1.0,
+        'trailing_mode': 'breakeven',
+        'trailing_activate_r': 1.0,
+        'trailing_requires_partial': True,
+    },
+
+    'high_volume_full': {
+        'description': 'high_volume + ATR SL + zone TP + partial close + fixed_r trailing',
+        '_base': 'high_volume',
+        'sl_mode': 'atr',
+        'atr_period': 14,
+        'atr_sl_multiplier': 1.0,
+        'tp_mode': 'zone',
+        'tp_zone_min_rr': 0.6,
+        'tp_zone_fallback_rr': 1.0,
+        'partial_close_enabled': True,
+        'partial_close_fraction': 0.5,
+        'partial_close_target_r': 1.0,
+        'trailing_mode': 'fixed_r',
+        'trailing_fixed_r': 0.5,
+        'trailing_activate_r': 1.0,
+        'trailing_requires_partial': True,
+    },
 }
 
 DEFAULT_PROFILE = 'high_volume'
@@ -520,9 +575,16 @@ DEFAULT_PROFILE = 'high_volume'
 # ============================================================================
 
 def get_profile(name: str | None = None) -> dict:
-    """Return a complete profile dict by name. Raises KeyError if unknown."""
+    """Return a complete profile dict by name, resolving _base inheritance."""
     name = name or DEFAULT_PROFILE
-    return PROFILES[name]
+    profile = PROFILES[name]
+    base_name = profile.get('_base')
+    if base_name and base_name in PROFILES:
+        base = dict(PROFILES[base_name])
+        base.update(profile)
+        base.pop('_base', None)
+        return base
+    return profile
 
 
 def list_profiles() -> dict[str, str]:

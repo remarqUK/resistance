@@ -79,6 +79,16 @@ function formatDateOnly(isoString?: string | null) {
   });
 }
 
+function backfillPhaseLabel(phase?: string) {
+  if (phase === 'zones') return 'Computing zones';
+  if (phase === 'hourly') return 'Loading hourly';
+  if (phase === 'bars') return 'Fetching market data';
+  if (phase === 'seed') return 'Scanning gaps and seeding cache';
+  if (phase === 'scan') return 'Running initial scan';
+  if (phase === 'done') return 'Ready';
+  return 'Loading';
+}
+
 const PAUSE_ICON = '\u23F8';
 const RESUME_ICON = '\u25B6';
 const BACKTEST_ICON = '\u21A9';
@@ -247,6 +257,15 @@ function mergeStateWithMessage(previous: DashboardState, message: any): Dashboar
     };
   }
 
+  if (message.type === 'positions_update') {
+    return {
+      ...previous,
+      positions: message.positions || [],
+      alerts: message.alerts || [],
+      summary: message.summary || previous.summary,
+    };
+  }
+
   if (
     message.type === 'scan_status'
     || message.type === 'backfill_progress'
@@ -340,7 +359,7 @@ function scanProgressText(summary: SummaryState) {
   }
 
   if (summary.status === 'backfilling' && backfill.phase && backfill.phase !== 'done') {
-    const phase = backfill.phase === 'zones' ? 'Loading zones' : backfill.phase === 'hourly' ? 'Loading hourly' : 'Scanning';
+    const phase = backfillPhaseLabel(backfill.phase);
     const pct = backfill.total > 0 ? Math.round((backfill.completed / backfill.total) * 100) : 0;
     const current = backfill.current_pair ? ` • ${backfill.current_pair}` : '';
     return `${phase}: ${backfill.completed}/${backfill.total} (${pct}%)${current}`;
@@ -1011,6 +1030,7 @@ export function DashboardPage() {
   const [executionFilterMode, setExecutionFilterMode] = useState<ExecutionFilterMode>('all');
   const [selectedExecutionKey, setSelectedExecutionKey] = useState<string | null>(null);
   const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
+  const [selectedSignalKey, setSelectedSignalKey] = useState<string | null>(null);
   const [closingPositionKey, setClosingPositionKey] = useState<string | null>(null);
   const [showStatement, setShowStatement] = useState(false);
   const [statementData, setStatementData] = useState<any>(null);
@@ -1329,6 +1349,7 @@ export function DashboardPage() {
 
   const backfillPairStatus = summary.backfill?.pair_status || {};
   const backfillPairs = Object.keys(backfillPairStatus).sort();
+  const warmupPhaseLabel = backfillPhaseLabel(summary.backfill?.phase);
 
   return (
     <div className="shell">
@@ -1343,7 +1364,7 @@ export function DashboardPage() {
           <div style={{fontSize: '1.4rem', fontWeight: 700, marginBottom: '12px'}}>
             {connectionState === 'disconnected' ? 'Server disconnected'
               : connectionState === 'connecting' ? 'Connecting to server...'
-              : 'Server warming up'}
+              : `Server warming up • ${warmupPhaseLabel}`}
           </div>
           {(summary.status === 'backfilling' || summary.status === 'starting') && summary.backfill ? (() => {
             const bf = summary.backfill || {};
@@ -1352,11 +1373,13 @@ export function DashboardPage() {
             const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
             const phase = bf.phase || 'loading';
             const currentPair = bf.current_pair || '';
+            const currentDetail = bf.current_detail || '';
             return (
               <>
                 <div style={{fontSize: '0.9rem', color: '#a69882', marginBottom: '16px'}}>
-                  {phase === 'bars' ? 'Fetching market data' : phase === 'zones' ? 'Computing zones' : phase === 'scan' ? 'Running initial scan' : 'Loading'}
+                  {backfillPhaseLabel(phase)}
                   {currentPair ? ` — ${currentPair}` : ''}
+                  {currentDetail ? ` • ${currentDetail}` : ''}
                 </div>
                 <div style={{width: '300px', height: '6px', background: 'rgba(166, 152, 130, 0.2)', borderRadius: '3px', overflow: 'hidden', marginBottom: '8px'}}>
                   <div style={{width: `${pct}%`, height: '100%', background: '#d4a017', borderRadius: '3px', transition: 'width 0.3s'}} />
@@ -1497,7 +1520,10 @@ export function DashboardPage() {
             <article className="metric-card">
               <span className="meta-label">Signals</span>
               <strong id="signal-count">{signals.length || summary.signal_count || 0}</strong>
-              <span id="pending-count" className="metric-detail">{summary.pending_count || 0} pending blockers</span>
+              <span id="pending-count" className="metric-detail">
+                {summary.pending_count || 0} pending blockers
+                {summary.pending_pairs?.length ? ` • ${summary.pending_pairs.join(', ')}` : ''}
+              </span>
             </article>
             <article className="metric-card">
               <span className="meta-label">Tracked positions</span>
@@ -1578,6 +1604,11 @@ export function DashboardPage() {
                         <span className={badgeClass(position.direction)}>{position.direction}</span>
                         {' '}
                         <span className="pair-sub">{Number(position.size || 0).toLocaleString()} units</span>
+                        {position.is_remainder ? (
+                          <span className="pill" style={{marginLeft:'4px',fontSize:'0.65rem',padding:'1px 5px',background:'rgba(31,122,73,0.12)',color:'#1f7a49',border:'1px solid rgba(31,122,73,0.3)'}}>{Math.round((1 - (position.position_fraction ?? 0.5)) * 100)}% banked</span>
+                        ) : position.position_fraction != null && position.position_fraction < 1 ? (
+                          <span className="pill" style={{marginLeft:'4px',fontSize:'0.65rem',padding:'1px 5px',background:'rgba(210,168,23,0.12)',color:'#a68812',border:'1px solid rgba(210,168,23,0.3)'}}>Partial</span>
+                        ) : null}
                         {position.entry_time ? <span className="pair-sub" style={{marginLeft:'auto'}}>{(() => {
                           const d = new Date(position.entry_time);
                           const now = Date.now();
@@ -1595,7 +1626,7 @@ export function DashboardPage() {
                     </div>
                     <div className="mini-meta" style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'6px 12px'}}>
                       <div><span className="value-label">Entry</span><span className="value">{formatNumber(position.entry_price, dec)}</span></div>
-                      <div><span className="value-label">SL</span><span className="value">{formatNumber(position.sl_price, dec)}</span></div>
+                      <div><span className="value-label">SL{position.sl_at_breakeven ? ' (BE)' : ''}</span><span className="value">{formatNumber(position.sl_price, dec)}</span></div>
                       <div><span className="value-label">TP</span><span className="value">{formatNumber(position.tp_price, dec)}</span></div>
                       <div><span className="value-label">Current</span><span className="value">{formatNumber(position.current_price, dec)}</span></div>
                       <div><span className="value-label">P/L pips</span><span className={`value ${pnlUp ? 'up' : 'down'}`}>{formatSigned(position.pnl_pips, 1, ' pips')}</span></div>
@@ -1667,8 +1698,16 @@ export function DashboardPage() {
             <div id="signals-list" className="stack-list">
               {!signals.length ? <div className="empty-card">No active signals.</div> : signals.map((signal) => {
                 const plan = signal.size_plan || {};
+                const sigKey = `${signal.pair}:${signal.direction}`;
+                const sigSelected = sigKey === selectedSignalKey;
+                const dec = signal.decimals ?? PRICE_DISPLAY_DECIMALS;
                 return (
-                  <article key={`${signal.pair}:${signal.direction}`} className="signal-card">
+                  <article
+                    key={sigKey}
+                    className={`signal-card mini-card-clickable ${sigSelected ? 'mini-card-selected' : ''}`}
+                    onClick={() => setSelectedSignalKey((c) => c === sigKey ? null : sigKey)}
+                    style={{ cursor: 'pointer' }}
+                  >
                     <div className="signal-head" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
                       <div className="mini-head-copy">
                         <strong>{signal.pair}</strong>
@@ -1680,9 +1719,9 @@ export function DashboardPage() {
                       <span className={badgeClass('signal')}>SIGNAL</span>
                     </div>
                     <div className="signal-meta">
-                      <div><span className="value-label">Entry</span><span className="value">{formatNumber(signal.entry_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Stop</span><span className="value">{formatNumber(signal.sl_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
-                      <div><span className="value-label">Target</span><span className="value">{formatNumber(signal.tp_price, signal.decimals ?? PRICE_DISPLAY_DECIMALS)}</span></div>
+                      <div><span className="value-label">Entry</span><span className="value">{formatNumber(signal.entry_price, dec)}</span></div>
+                      <div><span className="value-label">Stop</span><span className="value">{formatNumber(signal.sl_price, dec)}</span></div>
+                      <div><span className="value-label">Target</span><span className="value">{formatNumber(signal.tp_price, dec)}</span></div>
                       <div><span className="value-label">Units</span><span className="value">{plan.units ? Number(plan.units).toLocaleString() : '–'}</span></div>
                       <div><span className="value-label">Risk</span><span className="value">{plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${plan.account_currency || ''}` : '–'}</span></div>
                       <div><span className="value-label">Notional</span><span className="value">{plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${plan.account_currency || ''}` : '–'}</span></div>
@@ -1691,6 +1730,19 @@ export function DashboardPage() {
                       <div><span className="value-label">Arrived</span><span className="value">{formatTimestamp(signal.arrived_at)}</span></div>
                       <div><span className="value-label">Last valid</span><span className="value">{formatTimestamp(signal.last_valid_at)}</span></div>
                     </div>
+                    {sigSelected ? (
+                      <div onClick={(e) => e.stopPropagation()} style={{ marginTop: '8px' }}>
+                        <PositionMiniChart
+                          pair={signal.pair}
+                          entryPrice={signal.entry_price}
+                          entryTime={signal.signal_time || signal.arrived_at}
+                          direction={signal.direction}
+                          slPrice={signal.sl_price}
+                          tpPrice={signal.tp_price}
+                          decimals={dec}
+                        />
+                      </div>
+                    ) : null}
                   </article>
                 );
               })}
@@ -1760,7 +1812,19 @@ export function DashboardPage() {
                           <div><span className="value-label">Close</span><span className="value">{formatExecutionPrice(execution.closed_price, execution)}</span></div>
                         ) : null}
                         {isClosed && execution.close_reason ? (
-                          <div><span className="value-label">Reason</span><span className="value">{execution.close_reason}</span></div>
+                          <div><span className="value-label">Reason</span><span className="value">{(() => {
+                            const r = execution.close_reason;
+                            if (r === 'PARTIAL_TP') return `Partial TP (${Math.round((1 - (execution.position_fraction ?? 0.5)) * 100)}% banked)`;
+                            if (r === 'TP') return 'Take Profit';
+                            if (r === 'SL') return 'Stop Loss';
+                            if (r === 'EARLY_EXIT') return 'Early Exit (zone break)';
+                            if (r === 'SIDEWAYS') return 'Sideways (no progress)';
+                            if (r === 'TIME') return 'Time Exit (max hold)';
+                            if (r === 'FRIDAY') return 'Friday Close';
+                            if (r === 'EXTERNAL_CLOSE') return 'Closed externally';
+                            if (r === 'MANUAL') return 'Manual close';
+                            return r;
+                          })()}</span></div>
                         ) : null}
                         {execution.note ? (
                           <div style={{gridColumn:'1 / -1', display:'flex', justifyContent:'space-between', gap:'0.5rem'}}>

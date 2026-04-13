@@ -9,6 +9,7 @@ import io
 import os
 import pandas as pd
 import sys
+import threading
 import time
 from typing import Callable, Dict, List, Optional, Set
 
@@ -333,6 +334,7 @@ _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _WALK_FORWARD_CACHE: Dict[str, tuple[str, Optional[Signal], list]] = {}  # pair -> (cache_key, signal, new_wf_signals)
 _SEEN_WF_TRADES: Dict[str, set] = {}  # pair_id -> set of trade identity keys
 _SEEN_WF_TRADES_SEEDED: bool = False  # True once seeded from DB
+_SEEN_WF_TRADES_LOCK = threading.Lock()
 
 
 @dataclass
@@ -345,6 +347,113 @@ class _PortfolioStateCacheEntry:
 
 
 _PORTFOLIO_STATE_CACHE: Dict[str, _PortfolioStateCacheEntry] = {}
+
+
+def seed_seen_wf_trades() -> None:
+    """Seed seen walk-forward trades from detected-signal history once per process."""
+
+    global _SEEN_WF_TRADES_SEEDED
+    if _SEEN_WF_TRADES_SEEDED:
+        return
+
+    with _SEEN_WF_TRADES_LOCK:
+        if _SEEN_WF_TRADES_SEEDED:
+            return
+
+        seeded: Dict[str, set] = {}
+        try:
+            for row in load_detected_signals():
+                pair = row.get('pair', '')
+                signal_time = row.get('signal_time')
+                direction = row.get('direction', '')
+                if not pair or not signal_time or not direction:
+                    continue
+                ts = pd.Timestamp(signal_time)
+                if ts.tzinfo is not None:
+                    ts = ts.tz_convert('UTC')
+                seeded.setdefault(pair, set()).add(f"{pair}:{ts}:{direction}")
+        except Exception:
+            seeded = {}
+
+        _SEEN_WF_TRADES.clear()
+        _SEEN_WF_TRADES.update(seeded)
+        _SEEN_WF_TRADES_SEEDED = True
+
+
+def apply_startup_scan_artifacts(
+    pair_id: str,
+    *,
+    seen_trade_keys: list[str] | set[str] | None = None,
+    walk_forward_cache_entry: tuple[str, Optional[Signal], list] | None = None,
+) -> None:
+    """Restore per-pair scan caches produced by a startup worker."""
+
+    seed_seen_wf_trades()
+    if seen_trade_keys is not None:
+        _SEEN_WF_TRADES[pair_id] = set(seen_trade_keys)
+    if walk_forward_cache_entry is not None:
+        _WALK_FORWARD_CACHE[pair_id] = walk_forward_cache_entry
+
+
+def run_startup_scan_pair(
+    *,
+    pair_id: str,
+    pair_info: dict,
+    params: StrategyParams,
+    zone_history_days: int,
+    execution_mode: str,
+    portfolio_state: Optional[PortfolioState],
+    hourly_days: int,
+    daily_df,
+    zones,
+    hourly_df,
+    minute_df,
+) -> dict:
+    """Run one startup walk-forward scan in a worker-friendly top-level helper."""
+
+    for env_name in (
+        'OMP_NUM_THREADS',
+        'OPENBLAS_NUM_THREADS',
+        'MKL_NUM_THREADS',
+        'NUMEXPR_NUM_THREADS',
+        'VECLIB_MAXIMUM_THREADS',
+        'BLIS_NUM_THREADS',
+    ):
+        os.environ[env_name] = '1'
+
+    limits_cm = nullcontext()
+    try:
+        from threadpoolctl import threadpool_limits
+        limits_cm = threadpool_limits(limits=1)
+    except Exception:
+        limits_cm = nullcontext()
+
+    ticker = pair_info.get('ticker')
+    cache_key = (ticker, int(zone_history_days))
+    with limits_cm:
+        row, signal, wf_signals = _scan_pair(
+            pair_id,
+            pair_info,
+            params,
+            zone_history_days,
+            {},
+            {},
+            set(),
+            daily_data_cache={cache_key: daily_df} if ticker and daily_df is not None else {},
+            zone_cache={cache_key: zones} if ticker and zones is not None else {},
+            hourly_data_cache={ticker: hourly_df} if ticker and hourly_df is not None else {},
+            minute_data_cache={ticker: minute_df} if ticker and minute_df is not None else {},
+            execution_mode=execution_mode,
+            portfolio_state=portfolio_state,
+            hourly_days=hourly_days,
+        )
+    return {
+        'row': row,
+        'signal': signal,
+        'wf_signals': wf_signals,
+        'seen_trade_keys': sorted(_SEEN_WF_TRADES.get(pair_id, set())),
+        'walk_forward_cache_entry': _WALK_FORWARD_CACHE.get(pair_id),
+    }
 
 
 def _current_day_bucket() -> str:
@@ -881,6 +990,20 @@ def _scan_pair(
             [],
         )
 
+    # Guard: skip walk-forward if too few bars for reliable ATR / signal
+    # detection.  Prevents spurious entries from tiny startup windows.
+    min_bars = params.atr_period + 10 if params.sl_mode == 'atr' else 20
+    if len(scan_df) < min_bars:
+        return (
+            PairScanRow(
+                pair_id, name, decimals, current_price,
+                "WAIT", f"Insufficient data ({len(scan_df)}/{min_bars} bars)",
+                support_text, resistance_text, **zone_fields,
+            ),
+            None,
+            [],
+        )
+
     # Minute data for intrabar signal detection — match the hourly window
     # so every bar in the walk-forward has minute data available.
     minute_df: Optional[pd.DataFrame] = None
@@ -913,14 +1036,22 @@ def _scan_pair(
 
         # Zone provider: identical to backtest — re-derive zones per bar date
         # from the sliding daily window.
+        zone_by_date: dict[object, list[SRZone]] = {}
+
         def _wf_zone_provider(_current_time, current_date, _bar_index):
+            cached_zones = zone_by_date.get(current_date)
+            if cached_zones is not None:
+                return list(cached_zones)
             bar_date = pd.Timestamp(current_date)
             if hasattr(_current_time, 'tzinfo') and _current_time.tzinfo:
                 bar_date = bar_date.tz_localize(_current_time.tzinfo)
             daily_window = slice_daily_window(daily_df, bar_date, zone_history_days)
             if len(daily_window) < 20:
+                zone_by_date[current_date] = []
                 return []
-            return detect_zones(daily_window)
+            zones_for_day = list(detect_zones(daily_window))
+            zone_by_date[current_date] = zones_for_day
+            return list(zones_for_day)
 
         # Load L2 snapshots for the walk-forward window — same as backtest.
         # Returns empty DataFrame when no L2 data exists (common).
@@ -986,23 +1117,7 @@ def _scan_pair(
         # On first run after startup, seed the "seen" set from the database
         # so only trades the live system has already acted on are marked seen.
         # Trades the system never detected remain "unseen" and get surfaced.
-        global _SEEN_WF_TRADES_SEEDED
-        if not _SEEN_WF_TRADES_SEEDED:
-            _SEEN_WF_TRADES_SEEDED = True
-            try:
-                from .live_history import load_detected_signals
-                for row in load_detected_signals():
-                    p = row.get('pair', '')
-                    sig_time = row.get('signal_time')
-                    d = row.get('direction', '')
-                    if p and sig_time and d:
-                        # Normalize to UTC to match WF trade key format
-                        ts = pd.Timestamp(sig_time)
-                        if ts.tzinfo is not None:
-                            ts = ts.tz_convert('UTC')
-                        _SEEN_WF_TRADES.setdefault(p, set()).add(f"{p}:{ts}:{d}")
-            except Exception:
-                pass
+        seed_seen_wf_trades()
 
         new_wf_signals: list[Signal] = []
         seen = _SEEN_WF_TRADES.get(pair_id, set())
@@ -1077,8 +1192,13 @@ def collect_scan_rows(
     portfolio_state: Optional[PortfolioState] = None,
     closed_trades: Optional[List[object]] = None,
     hourly_days: int = 1,
+    progress_cb=None,
 ) -> tuple[List[Signal], List[PairScanRow], List[Signal]]:
-    """Collect structured pair rows, executable signals, and new WF trade signals."""
+    """Collect structured pair rows, executable signals, and new WF trade signals.
+
+    *progress_cb*, if provided, is called after each pair completes:
+    ``progress_cb(idx, total, pair_id, row, signal, elapsed)``
+    """
 
     if pairs is None:
         pairs = PAIRS
@@ -1103,10 +1223,13 @@ def collect_scan_rows(
                 else:
                     tracked_states.setdefault(pair, 'OPEN')
 
+    import time as _time
     signals: List[Signal] = []
     all_wf_signals: List[Signal] = []
     pair_rows: List[PairScanRow] = []
-    for pair_id, pair_info in pairs.items():
+    total = len(pairs)
+    for idx, (pair_id, pair_info) in enumerate(pairs.items()):
+        t0 = _time.monotonic()
         if is_pair_fully_blocked(pair_id, params):
             continue
         row, signal, wf_signals = _scan_pair(
@@ -1127,10 +1250,13 @@ def collect_scan_rows(
             closed_trades=closed_trades,
             hourly_days=hourly_days,
         )
+        elapsed = _time.monotonic() - t0
         pair_rows.append(row)
         if signal:
             signals.append(signal)
         all_wf_signals.extend(wf_signals)
+        if progress_cb is not None:
+            progress_cb(idx, total, pair_id, row, signal, elapsed)
     return signals, pair_rows, all_wf_signals
 
 

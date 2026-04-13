@@ -31,7 +31,7 @@ from .portfolio import (
     is_pair_cooldown_active,
     update_streak_pause_state,
 )
-from .profiles import PROFILES
+from .profiles import PROFILES, get_profile
 from .strategy import (
     Trade, StrategyParams, check_exit, get_market_exit_price,
     build_trade_from_signal, get_tradeable_zones, is_pair_fully_blocked, params_from_profile,
@@ -50,6 +50,7 @@ from .serialization import (
     serialize_zone as shared_serialize_zone,
 )
 from .db import load_backtest_result, save_backtest_result, load_l2_snapshots, load_ohlc
+from .data import find_first_missing_cached_bar
 from . import ibkr
 from .commission import compute_round_turn_commission
 from .sizing import build_position_size_plan_for_risk_amount, calculate_risk_amount
@@ -66,6 +67,7 @@ def _load_cached_data_window(
     *,
     enforce_coverage: bool = True,
     allow_stale_cache: bool = False,
+    validate_gaps: bool = True,
 ) -> pd.DataFrame:
     """Load a trailing interval window from cache and enforce strict coverage checks."""
     if days <= 0:
@@ -83,6 +85,21 @@ def _load_cached_data_window(
         raise BacktestCacheMissingError(
             f'No cached {interval} data for {ticker}; run `python run.py fill` first'
         )
+
+    if validate_gaps:
+        first_missing = find_first_missing_cached_bar(
+            ticker,
+            interval,
+            start=start,
+            end=now,
+            now=now,
+            check_trailing=not allow_stale_cache,
+        )
+        if first_missing is not None:
+            raise BacktestCacheMissingError(
+                f'Cached {interval} data for {ticker} has a gap starting at {first_missing}; '
+                f'run `python run.py fill` first'
+            )
 
     if not enforce_coverage:
         return df
@@ -177,6 +194,7 @@ def _load_cached_backtest_data(
         int(hourly_days),
         enforce_coverage=False,
         allow_stale_cache=allow_stale_cache,
+        validate_gaps=not allow_stale_cache,
     )
     _dbg(f'stage=minute_data rows={len(minute_df)} elapsed={time.perf_counter() - t_stage:.2f}s')
     return daily_df, hourly_df, minute_df
@@ -278,7 +296,7 @@ class _MarginTracker:
         self.balance = new_balance
 
 
-BACKTEST_CACHE_VERSION = '14'
+BACKTEST_CACHE_VERSION = '16'
 
 
 def _serialize_timestamp(value: pd.Timestamp | None) -> str | None:
@@ -421,8 +439,8 @@ def _strategy_params_to_dict(params: StrategyParams) -> dict:
 
 
 def _profile_name_for_params_hash(params_hash: str) -> str | None:
-    for profile_name, profile in PROFILES.items():
-        if _params_signature(params_from_profile(profile)) == params_hash:
+    for profile_name in PROFILES:
+        if _params_signature(params_from_profile(get_profile(profile_name))) == params_hash:
             return profile_name
     return None
 
@@ -1085,27 +1103,39 @@ def _compile_results(
     *,
     pending_trades: List[Trade] | None = None,
 ) -> BacktestResult:
-    """Calculate performance statistics from trade list."""
+    """Calculate performance statistics from trade list.
+
+    Weights pnl by position_fraction for partial close trades so that
+    a 50% partial TP + 50% remainder = correct total P&L.
+    """
     wins = [t for t in trades if t.pnl_pips > 0]
     losses = [t for t in trades if t.pnl_pips <= 0]
     early_exits = [t for t in trades if t.exit_reason in ('EARLY_EXIT', 'SIDEWAYS', 'TIME')]
 
-    gross_profit = sum(t.pnl_pips for t in wins) if wins else 0
-    gross_loss = abs(sum(t.pnl_pips for t in losses)) if losses else 0
-    total_pnl = sum(t.pnl_pips for t in trades)
+    gross_profit = sum(t.pnl_pips * t.position_fraction for t in wins) if wins else 0
+    gross_loss = abs(sum(t.pnl_pips * t.position_fraction for t in losses)) if losses else 0
+    total_pnl = sum(t.pnl_pips * t.position_fraction for t in trades)
 
-    avg_win_r = np.mean([t.pnl_r for t in wins]) if wins else 0
-    avg_loss_r = np.mean([t.pnl_r for t in losses]) if losses else 0
+    total_weight = sum(t.position_fraction for t in wins) if wins else 0
+    avg_win_r = sum(t.pnl_r * t.position_fraction for t in wins) / total_weight if total_weight > 0 else 0
+    total_loss_weight = sum(t.position_fraction for t in losses) if losses else 0
+    avg_loss_r = sum(t.pnl_r * t.position_fraction for t in losses) / total_loss_weight if total_loss_weight > 0 else 0
+
+    # Count trades by fraction so split legs sum to 1 trade, not 2.
+    weighted_total = sum(t.position_fraction for t in trades)
+    weighted_wins = sum(t.position_fraction for t in wins)
+    weighted_losses = sum(t.position_fraction for t in losses)
+    weighted_early = sum(t.position_fraction for t in early_exits)
 
     return BacktestResult(
         pair=pair,
-        total_trades=len(trades),
-        winning_trades=len(wins),
-        losing_trades=len(losses),
-        early_exits=len(early_exits),
-        win_rate=len(wins) / len(trades) * 100 if trades else 0,
+        total_trades=round(weighted_total),
+        winning_trades=round(weighted_wins),
+        losing_trades=round(weighted_losses),
+        early_exits=round(weighted_early),
+        win_rate=weighted_wins / weighted_total * 100 if weighted_total > 0 else 0,
         total_pnl_pips=total_pnl,
-        avg_pnl_pips=total_pnl / len(trades) if trades else 0,
+        avg_pnl_pips=total_pnl / sum(t.position_fraction for t in trades) if trades else 0,
         avg_win_r=avg_win_r,
         avg_loss_r=avg_loss_r,
         max_win_pips=max((t.pnl_pips for t in trades), default=0),
@@ -1574,8 +1604,9 @@ def run_all_backtests_parallel(
         else:
             fetch_workers = None
     if fetch_workers is None:
-        fetch_workers = 1
+        fetch_workers = min(total, 4)
     _debug(f'phase1: fetch_workers={fetch_workers} total_pairs={total}')
+    print(f"  Phase 1 fetch workers: {fetch_workers}")
     try:
         fetch_futures = {}
         fetch_started = {}
@@ -1606,14 +1637,16 @@ def run_all_backtests_parallel(
                     return_when=FIRST_COMPLETED,
                 )
                 if not done_futures:
-                    pending_pairs = [fetch_futures[f] for f in list(pending)[:3]]
                     oldest = max(
                         (time.perf_counter() - fetch_started[f] for f in pending),
                         default=0.0,
                     )
+                    active_workers = min(fetch_workers, len(pending))
+                    queued = max(len(pending) - active_workers, 0)
                     _wait(
                         f'phase1: waiting after {time.perf_counter() - t_phase:.1f}s; '
-                        f'pending={len(pending)} oldest_pending={oldest:.1f}s (e.g. {pending_pairs})'
+                        f'pending={len(pending)} active~{active_workers} queued~{queued} '
+                        f'oldest_pending={oldest:.1f}s'
                     )
                     continue
 
@@ -1760,6 +1793,7 @@ def run_all_backtests_parallel(
     # --- Phase 3+4: Zone pre-computation + walk-forwards (single process pool) ---
     # Build zone computation tasks so we can saturate all cores.
     t_phase = time.time()
+    t_phase_perf = time.perf_counter()
     t_phase3 = time.perf_counter()
     # First pass: collect all dates per pair
     pair_dates: Dict[str, tuple] = {}
@@ -1824,7 +1858,7 @@ def run_all_backtests_parallel(
                         default=0.0,
                     )
                     _wait(
-                        f'phase3: waiting after {time.perf_counter() - t_phase:.1f}s; '
+                        f'phase3: waiting after {time.perf_counter() - t_phase_perf:.1f}s; '
                         f'zone pending={len(pending_zone)} oldest_pending={oldest:.1f}s sample={sample}'
                     )
                     continue
@@ -1890,7 +1924,7 @@ def run_all_backtests_parallel(
                         default=0.0,
                     )
                     _wait(
-                        f'phase4: waiting after {time.perf_counter() - t_phase:.1f}s; '
+                        f'phase4: waiting after {time.perf_counter() - t_phase_perf:.1f}s; '
                         f'walk pending={len(pending_walk)} oldest_pending={oldest:.1f}s sample={sample}'
                     )
                     continue
@@ -1907,12 +1941,12 @@ def run_all_backtests_parallel(
                         f'phase4: walk task complete pair={pair} '
                         f'elapsed={time.perf_counter() - walk_started[future]:.2f}s'
                     )
-        save_backtest_result(
-            pair=pair,
-            run_id=run_id,
-            params_hash=params_hash,
-            hourly_days=hourly_days,
-            zone_history_days=zone_history_days,
+                    save_backtest_result(
+                        pair=pair,
+                        run_id=run_id,
+                        params_hash=params_hash,
+                        hourly_days=hourly_days,
+                        zone_history_days=zone_history_days,
                         execution_mode=execution_mode,
                         data_signature=data_sig,
                         ticker=pairs[pair].get('ticker', pair),
@@ -2258,12 +2292,18 @@ def calculate_execution_aware_compounding_pnl(
         peak_balance=float(starting_balance),
     )
     active: list[_ActiveExecutionExposure] = []
+    deferred_partials: list[_ActiveExecutionExposure] = []
     margin_tracker = _MarginTracker(float(starting_balance), account_currency) if params.enforce_margin else None
+
+    # Track admitted trade groups so remainder halves inherit admission
+    admitted_groups: dict[str, tuple[float, object]] = {}  # group_id -> (risk_amount, size_plan)
 
     idx = 0
     while idx < len(candidates):
         batch_time = candidates[idx][1].entry_time
         active = _settle_execution_exposures(active, entry_time=batch_time, state=state, margin_tracker=margin_tracker)
+        # Also settle deferred partial close legs at their actual exit_time
+        deferred_partials = _settle_execution_exposures(deferred_partials, entry_time=batch_time, state=state, margin_tracker=None)
 
         current_balance = (
             float(state.balance)
@@ -2308,6 +2348,14 @@ def calculate_execution_aware_compounding_pnl(
         )
 
         for batch_idx, (pair_id, trade) in enumerate(batch):
+            # Remainder trades inherit their group's admission — skip all checks
+            group_id = getattr(trade, 'trade_group_id', None)
+            if group_id and getattr(trade, 'is_remainder', False) and group_id in admitted_groups:
+                parent_risk, parent_plan = admitted_groups[group_id]
+                planned[batch_idx] = (pair_id, trade, float(parent_risk), parent_plan, float(parent_risk))
+                # Don't add a new exposure — the parent already holds the slot
+                continue
+
             block = state.entry_block(pair_id, batch_time)
             if block is not None:
                 _record_execution_skip(skipped, skip_counts, pair_id, trade, block[0])
@@ -2432,6 +2480,10 @@ def calculate_execution_aware_compounding_pnl(
             planned_reserved_risk += float(risk_amount)
             if size_plan.margin_required is not None:
                 batch_margin_used += float(size_plan.margin_required)
+            # Record admitted group so remainder trades can inherit
+            group_id = getattr(trade, 'trade_group_id', None)
+            if group_id and not getattr(trade, 'is_remainder', False):
+                admitted_groups[group_id] = (float(risk_amount), size_plan)
             exposures.append(
                 CorrelationExposure(
                     pair=pair_id,
@@ -2444,30 +2496,54 @@ def calculate_execution_aware_compounding_pnl(
         for batch_idx in sorted(planned):
             pair_id, trade, _reserved_risk_amount, size_plan, actual_risk_amount = planned[batch_idx]
 
-            # Compute commission and deduct from P&L
+            # Compute commission and deduct from P&L — pro-rate by position
+            # fraction so partial close and remainder each pay their share.
+            fraction = float(getattr(trade, 'position_fraction', 1.0))
+            commission_units = max(1, int(size_plan.units * fraction))
             commission_cost = 0.0
-            if size_plan.units > 0 and params.commission_bps > 0:
+            if commission_units > 0 and params.commission_bps > 0:
                 commission_cost = _compute_trade_commission(
-                    pair_id, size_plan.units, trade.entry_price,
+                    pair_id, commission_units, trade.entry_price,
                     account_currency, price_lookup,
                     params.commission_bps, params.commission_min_usd,
                 )
             trade.commission_cost = commission_cost
-            pnl_amount = float(actual_risk_amount) * float(trade.pnl_r) - commission_cost
+            pnl_amount = float(actual_risk_amount) * fraction * float(trade.pnl_r) - commission_cost
             report_balance += pnl_amount
             trade_log.append((pair_id, trade, float(actual_risk_amount), pnl_amount, report_balance))
-            exposure = _ActiveExecutionExposure(
-                pair=pair_id,
-                trade=trade,
-                risk_amount=float(actual_risk_amount),
-                pnl_amount=pnl_amount,
-                margin_required=float(size_plan.margin_required or 0.0),
-            )
-            active.append(exposure)
-            if margin_tracker is not None and size_plan.margin_required is not None and size_plan.margin_required > 0:
-                key = f"{pair_id}_{id(trade)}"
-                margin_tracker.add_position(key, float(size_plan.margin_required))
-                margin_tracker.sync_balance(report_balance)
+
+            # For split trades: the partial close leg (exit_reason=PARTIAL_TP)
+            # is already settled — don't add it to active.  The remainder leg
+            # holds the slot with fractional risk/margin and releases when it
+            # actually closes.
+            is_remainder = getattr(trade, 'is_remainder', False)
+            is_partial_close = getattr(trade, 'exit_reason', None) == 'PARTIAL_TP'
+            if is_partial_close:
+                # Defer recording until _settle_execution_exposures so that
+                # cooldowns and balance update at exit_time, not admission time.
+                deferred_partials.append(_ActiveExecutionExposure(
+                    pair=pair_id,
+                    trade=trade,
+                    risk_amount=float(actual_risk_amount) * fraction,
+                    pnl_amount=pnl_amount,
+                    margin_required=0.0,  # no margin slot — remainder holds it
+                ))
+            else:
+                exposure_risk = float(actual_risk_amount) * fraction if is_remainder else float(actual_risk_amount)
+                exposure_margin = float(size_plan.margin_required or 0.0) * fraction if is_remainder else float(size_plan.margin_required or 0.0)
+                exposure = _ActiveExecutionExposure(
+                    pair=pair_id,
+                    trade=trade,
+                    risk_amount=exposure_risk,
+                    pnl_amount=pnl_amount,
+                    margin_required=exposure_margin,
+                )
+                active.append(exposure)
+                if margin_tracker is not None and exposure_margin > 0:
+                    key = f"{pair_id}_{id(trade)}"
+                    margin_tracker.add_position(key, exposure_margin)
+                if margin_tracker is not None:
+                    margin_tracker.sync_balance(report_balance)
 
     return ExecutionAwarePortfolioResult(
         trade_log=trade_log,
@@ -2531,7 +2607,8 @@ def calculate_compounding_pnl(
         )
 
         risk_amt = calculate_risk_amount(balance, effective_risk)
-        pnl = risk_amt * t.pnl_r
+        fraction = float(getattr(t, 'position_fraction', 1.0))
+        pnl = risk_amt * fraction * t.pnl_r
         balance += pnl
         if balance > peak_balance:
             peak_balance = balance

@@ -539,6 +539,7 @@ def fetch_historical(
     days: int,
     client_id: Optional[int] = None,
     end_datetime: datetime | pd.Timestamp | str | None = None,
+    timeout_s: float | None = None,
 ) -> Optional[pd.DataFrame]:
     """Fetch historical OHLC data from TWS.
 
@@ -590,10 +591,26 @@ def fetch_historical(
 
     request_end = _format_historical_end_datetime(end_datetime)
 
-    max_attempts = 3
+    request_timeout = 60.0 if timeout_s is None else max(1.0, float(timeout_s))
+    deadline = None if timeout_s is None else time.monotonic() + request_timeout
+    max_attempts = 3 if timeout_s is None else 1
     for attempt in range(1, max_attempts + 1):
         try:
-            with _historical_fetch_slot():
+            slot_timeout = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f'historical fetch exceeded {request_timeout:.1f}s timeout for {pair} ({interval})'
+                    )
+                slot_timeout = min(_HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS, remaining)
+            with _historical_fetch_slot(slot_timeout):
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f'historical fetch exceeded {request_timeout:.1f}s timeout for {pair} ({interval})'
+                        )
                 bars = ib.reqHistoricalData(
                     contract,
                     endDateTime=request_end,
@@ -602,6 +619,7 @@ def fetch_historical(
                     whatToShow='MIDPOINT',
                     useRTH=False,
                     formatDate=2,
+                    timeout=min(request_timeout, remaining) if deadline is not None else request_timeout,
                 )
             _respect_historical_request_gap()
 

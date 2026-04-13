@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
@@ -19,11 +20,13 @@ from .strategy import (
     Trade,
     build_trade_from_signal,
     check_exit,
+    check_partial_close,
     check_price_exit,
     get_market_exit_price,
     get_tradeable_zones,
     select_entry_signal,
 )
+from .atr import compute_atr
 from .intrabar import find_intrabar_signal, intrabar_execution_time
 
 
@@ -44,17 +47,23 @@ def _check_exit_minute_resolution(
     params: StrategyParams,
     pip: float,
     minute_index: pd.Index | None = None,
+    start_after: pd.Timestamp | None = None,
 ) -> Optional[tuple[str, float, pd.Timestamp]]:
-    """Check TP/SL using minute OHLC within the hourly bar's window.
+    """Check partial close + TP/SL using minute OHLC within the hourly bar's window.
 
-    Iterates each minute bar chronologically; the first minute that triggers
-    a TP or SL wins.  This eliminates the "both hit same bar → SL wins"
-    pessimism of hourly-only evaluation.
+    Iterates each minute bar chronologically.  Partial close is checked
+    first each minute — if it fires, the trade is split by the caller
+    and re-evaluation continues on the remainder via ``start_after``.
 
     Non-price exits (FRIDAY, EARLY_EXIT, SIDEWAYS, TIME) are NOT checked
     here — they remain evaluated at hourly granularity by the caller.
 
+    Args:
+        start_after: if set, skip minute bars at or before this timestamp.
+            Used to resume checking after a partial close split.
+
     Returns (exit_reason, exit_price, exit_time) or None.
+    Exit reasons include 'PARTIAL_TP' for partial close events.
     """
     if minute_df is None or minute_df.empty:
         return None
@@ -63,7 +72,12 @@ def _check_exit_minute_resolution(
     bar_start = hourly_time
     bar_end = hourly_time + pd.Timedelta(hours=1)
     index = minute_index if minute_index is not None else minute_df.index
-    start_pos = index.searchsorted(bar_start, side='left')
+    if start_after is not None:
+        # Use side='left' to include the same minute that triggered the
+        # partial close — the remainder might hit TP/SL on that same candle.
+        start_pos = index.searchsorted(start_after, side='left')
+    else:
+        start_pos = index.searchsorted(bar_start, side='left')
     end_pos = index.searchsorted(bar_end, side='left')
     if start_pos >= end_pos or start_pos >= len(index):
         return None
@@ -86,12 +100,19 @@ def _check_exit_minute_resolution(
             if trade.best_favorable_price is None or low < trade.best_favorable_price:
                 trade.best_favorable_price = low
 
+        # Check both partial close and SL on this minute bar.
+        # If both trigger on the same candle, SL wins (conservative).
+        partial_price = check_partial_close(trade, high, low, params)
         result = check_price_exit(
             trade, high, low, close,
             params=params, pip=pip,
             bar_time=ts, bars_held=bars_held,
             allow_friday=False, allow_sideways=False, allow_time=False,
         )
+        if result and result[0] == 'SL':
+            return (result[0], result[1], ts)
+        if partial_price is not None:
+            return ('PARTIAL_TP', partial_price, ts)
         if result:
             return (result[0], result[1], ts)
 
@@ -270,6 +291,7 @@ def resolve_entry_signal_for_bar(
     execution_mode: str,
     minute_df: pd.DataFrame | None = None,
     align_signal_time: bool = False,
+    current_atr: float = 0.0,
 ) -> tuple[Optional[Signal], Optional[pd.Timestamp]]:
     """Resolve a candidate signal and its preferred submit timestamp for a bar."""
 
@@ -286,6 +308,7 @@ def resolve_entry_signal_for_bar(
             params,
             nearest_support,
             nearest_resistance,
+            current_atr=current_atr,
         )
         if intrabar_signal is not None:
             signal, intrabar_submit_time = intrabar_signal
@@ -298,6 +321,7 @@ def resolve_entry_signal_for_bar(
             params=params,
             support_zone=nearest_support,
             resistance_zone=nearest_resistance,
+            current_atr=current_atr,
         )
         if signal is not None and execution_mode == 'next_bar':
             intrabar_submit_time = _next_bar_submit_time(current_bar_time)
@@ -338,6 +362,9 @@ def run_walk_forward(
 
     debug = bool(debug) or _walk_debug_enabled()
     _snap = bool(snapshot_source and params.trade_snapshot_logging)
+
+    # Pre-compute ATR series for ATR-based SL/trailing modes
+    atr_series = compute_atr(hourly_df, period=params.atr_period) if params.sl_mode == 'atr' or params.trailing_mode == 'atr' else None
 
     def _dbg(message: str) -> None:
         if debug:
@@ -439,22 +466,63 @@ def run_walk_forward(
                     if current_trade.best_favorable_price is None or bar_best < current_trade.best_favorable_price:
                         current_trade.best_favorable_price = bar_best
 
-                exit_time = current_time
-                result = check_exit(
-                    current_trade,
-                    bar_high=row['High'],
-                    bar_low=row['Low'],
-                    bar_close=row['Close'],
-                    bar_time=current_time,
-                    bars_held=bars_held,
-                    params=params,
-                    pip=pip,
+                # Check hourly-level partial close (when no minute data)
+                partial_price = check_partial_close(
+                    current_trade, float(row['High']), float(row['Low']), params,
                 )
-                if result:
-                    exit_reason, exit_price = result
+                if partial_price is not None:
+                    exit_reason = 'PARTIAL_TP'
+                    exit_price = partial_price
+                    exit_time = current_time
                 else:
-                    exit_reason = None
+                    exit_time = current_time
+                    result = check_exit(
+                        current_trade,
+                        bar_high=row['High'],
+                        bar_low=row['Low'],
+                        bar_close=row['Close'],
+                        bar_time=current_time,
+                        bars_held=bars_held,
+                        params=params,
+                        pip=pip,
+                    )
+                    if result:
+                        exit_reason, exit_price = result
+                    else:
+                        exit_reason = None
                 hourly_exit_elapsed += time.perf_counter() - t_hourly_exit
+
+            # --- Handle partial close: split trade, don't terminate ---
+            if exit_reason == 'PARTIAL_TP':
+                partial_close_time = exit_time
+                group_id = current_trade.trade_group_id or f'{current_trade.entry_time}_{pair}'
+                # Finalize closed portion
+                closed_portion = copy.copy(current_trade)
+                closed_portion.trade_group_id = group_id
+                closed_portion.position_fraction = params.partial_close_fraction
+                closed_trade = finalize_trade(
+                    closed_portion, exit_time, exit_price, 'PARTIAL_TP', bars_held, pip,
+                )
+                trades.append(closed_trade)
+                exits_finalized += 1
+                # Mutate current_trade to become the remainder
+                current_trade.trade_group_id = group_id
+                current_trade.position_fraction = 1.0 - params.partial_close_fraction
+                current_trade.is_remainder = True
+                # Move SL to breakeven for the remainder
+                if current_trade.direction == 'LONG':
+                    current_trade.sl_price = max(current_trade.entry_price, current_trade.sl_price)
+                else:
+                    current_trade.sl_price = min(current_trade.entry_price, current_trade.sl_price)
+                exit_reason = None  # trade continues
+                # Re-check remainder against remaining minutes in this hour
+                remainder_result = _check_exit_minute_resolution(
+                    current_trade, minute_df, current_time, bars_held,
+                    params, pip, minute_index=minute_index,
+                    start_after=partial_close_time,
+                )
+                if remainder_result:
+                    exit_reason, exit_price, exit_time = remainder_result
 
             if exit_reason is not None:
                 exits_finalized += 1
@@ -550,6 +618,9 @@ def run_walk_forward(
                             sl_price=execution_plan.stop_price,
                             tp_price=execution_plan.take_profit_price,
                         )
+                        if current_trade is not None:
+                            _bar_atr = float(atr_series.iloc[i]) if atr_series is not None and i < len(atr_series) else 0.0
+                            current_trade.entry_atr = 0.0 if _bar_atr != _bar_atr else _bar_atr
                     else:
                         current_trade = None
                     if current_trade is not None:
@@ -592,22 +663,61 @@ def run_walk_forward(
             else:
                 hourly_exit_checks += 1
                 t_open_hourly = time.perf_counter()
-                exit_time = current_time
-                result = check_exit(
-                    opened_trade,
-                    bar_high=row['High'],
-                    bar_low=row['Low'],
-                    bar_close=row['Close'],
-                    bar_time=current_time,
-                    bars_held=0,
-                    params=params,
-                    pip=pip,
+                # Check hourly-level partial close
+                partial_price = check_partial_close(
+                    opened_trade, float(row['High']), float(row['Low']), params,
                 )
-                if result:
-                    exit_reason, exit_price = result
+                if partial_price is not None:
+                    exit_reason = 'PARTIAL_TP'
+                    exit_price = partial_price
+                    exit_time = current_time
                 else:
-                    exit_reason = None
+                    exit_time = current_time
+                    result = check_exit(
+                        opened_trade,
+                        bar_high=row['High'],
+                        bar_low=row['Low'],
+                        bar_close=row['Close'],
+                        bar_time=current_time,
+                        bars_held=0,
+                        params=params,
+                        pip=pip,
+                    )
+                    if result:
+                        exit_reason, exit_price = result
+                    else:
+                        exit_reason = None
                 hourly_exit_elapsed += time.perf_counter() - t_open_hourly
+
+            # Handle partial close on entry bar: split trade, don't terminate
+            if exit_reason == 'PARTIAL_TP':
+                partial_close_time = exit_time
+                group_id = opened_trade.trade_group_id or f'{opened_trade.entry_time}_{pair}'
+                closed_portion = copy.copy(opened_trade)
+                closed_portion.trade_group_id = group_id
+                closed_portion.position_fraction = params.partial_close_fraction
+                closed_trade = finalize_trade(
+                    closed_portion, exit_time, exit_price, 'PARTIAL_TP', 0, pip,
+                )
+                trades.append(closed_trade)
+                exits_finalized += 1
+                # Mutate current_trade (which is opened_trade) to become remainder
+                current_trade.trade_group_id = group_id
+                current_trade.position_fraction = 1.0 - params.partial_close_fraction
+                current_trade.is_remainder = True
+                if current_trade.direction == 'LONG':
+                    current_trade.sl_price = max(current_trade.entry_price, current_trade.sl_price)
+                else:
+                    current_trade.sl_price = min(current_trade.entry_price, current_trade.sl_price)
+                exit_reason = None  # trade continues
+                # Re-check remainder against remaining minutes in this hour
+                remainder_result = _check_exit_minute_resolution(
+                    current_trade, minute_df, current_time, 0,
+                    params, pip, minute_index=minute_index,
+                    start_after=partial_close_time,
+                )
+                if remainder_result:
+                    exit_reason, exit_price, exit_time = remainder_result
 
             if exit_reason is not None:
                 exit_trade = finalize_trade(
@@ -651,6 +761,9 @@ def run_walk_forward(
             is_entry_blocked is not None and is_entry_blocked(current_time)
         ):
             t_signal = time.perf_counter()
+            current_atr = float(atr_series.iloc[i]) if atr_series is not None and i < len(atr_series) else 0.0
+            if current_atr != current_atr:  # NaN check
+                current_atr = 0.0
             signal, intrabar_submit_time = resolve_entry_signal_for_bar(
                 hourly_df=hourly_df,
                 bar_idx=i,
@@ -662,6 +775,7 @@ def run_walk_forward(
                 execution_mode=execution_mode,
                 minute_df=minute_df,
                 align_signal_time=False,
+                current_atr=current_atr,
             )
             signal_scan_elapsed += time.perf_counter() - t_signal
             if signal is not None:
@@ -721,6 +835,7 @@ def run_walk_forward(
                             sl_price=execution_plan.stop_price,
                             tp_price=execution_plan.take_profit_price,
                         )
+                        current_trade.entry_atr = current_atr
                         trade_entry_bar = i
                         opened_trade = current_trade
                         entries_started += 1

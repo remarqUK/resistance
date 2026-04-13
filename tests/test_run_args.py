@@ -241,7 +241,7 @@ class RunArgumentTests(unittest.TestCase):
             return 4
 
         with patch('run._configure_ibkr', return_value=60), \
-                patch('run._find_cache_gap_work_items', side_effect=[
+                patch('fx_sr.fill_pipeline.find_cache_gap_work_items', side_effect=[
                     [('EURUSD', 'EURUSD=X', '1m', None)],
                     [],
                 ]), \
@@ -268,7 +268,7 @@ class RunArgumentTests(unittest.TestCase):
         )
 
         with patch('run._configure_ibkr', return_value=60), \
-                patch('run._find_cache_gap_work_items', side_effect=[
+                patch('fx_sr.fill_pipeline.find_cache_gap_work_items', side_effect=[
                     [('EURUSD', 'EURUSD=X', '1m', None)],
                     [],
                 ]) as find_items_mock, \
@@ -316,8 +316,8 @@ class RunArgumentTests(unittest.TestCase):
             return int(kwargs['cached_range'][2])
 
         with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
-                patch('fx_sr.db.init_db'), \
-                patch('fx_sr.db.get_cache_summary', return_value=summary), \
+                patch('fx_sr.fill_pipeline.init_db'), \
+                patch('fx_sr.fill_pipeline.get_cache_summary', return_value=summary), \
                 patch('fx_sr.fill_pipeline.effective_cached_bar_count', side_effect=fake_effective_cached_bar_count), \
                 patch('fx_sr.fill_pipeline._remaining_days_to_fetch', return_value=0):
             gaps = run._find_cache_gaps(target_days=30, now=pd.Timestamp('2026-04-13T12:00:00+00:00'))

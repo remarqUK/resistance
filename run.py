@@ -8,6 +8,7 @@ import threading
 import uuid
 import sys
 import time
+import warnings
 
 # Unbuffer stdout so progress output appears immediately
 sys.stdout.reconfigure(line_buffering=True)
@@ -1032,7 +1033,13 @@ def _find_cache_gaps(
     daily_extra_days: int = 0,
     only_pair: str | None = None,
 ) -> list[tuple[str, str, str]]:
-    """Return list of (pair, ticker, interval) tuples that are missing or stale."""
+    """Deprecated compatibility wrapper around ``fx_sr.fill_pipeline.find_cache_gaps``."""
+
+    warnings.warn(
+        'run._find_cache_gaps() is deprecated; use fx_sr.fill_pipeline.find_cache_gaps() instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return fill_pipeline.find_cache_gaps(
         pairs=PAIRS,
         target_days=target_days,
@@ -1050,7 +1057,14 @@ def _find_cache_gap_work_items(
     only_pair: str | None = None,
     verbose: bool = False,
 ) -> list[tuple[str, str, str, object]]:
-    """Return gap work items including the first missing timestamp when known."""
+    """Deprecated compatibility wrapper around ``fx_sr.fill_pipeline.find_cache_gap_work_items``."""
+
+    warnings.warn(
+        'run._find_cache_gap_work_items() is deprecated; use '
+        'fx_sr.fill_pipeline.find_cache_gap_work_items() instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return fill_pipeline.find_cache_gap_work_items(
         pairs=PAIRS,
         target_days=target_days,
@@ -1068,7 +1082,14 @@ def _find_cache_gaps_verbose(
     daily_extra_days: int = 0,
     only_pair: str | None = None,
 ) -> list[tuple[str, str, str, str]]:
-    """Like _find_cache_gaps but returns (pair, ticker, interval, detail) with diagnostic info."""
+    """Deprecated compatibility wrapper around ``fx_sr.fill_pipeline.find_cache_gaps_verbose``."""
+
+    warnings.warn(
+        'run._find_cache_gaps_verbose() is deprecated; use '
+        'fx_sr.fill_pipeline.find_cache_gaps_verbose() instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return fill_pipeline.find_cache_gaps_verbose(
         pairs=PAIRS,
         target_days=target_days,
@@ -1111,7 +1132,13 @@ def cmd_fill(args):
 
     print(f'  Scanning for gaps...')
     gap_scan_start = time.perf_counter()
-    gap_items = _find_cache_gap_work_items(target_days, daily_extra_days=daily_extra_days, only_pair=pair_filter, verbose=True)
+    gap_items = fill_pipeline.find_cache_gap_work_items(
+        pairs=PAIRS,
+        target_days=target_days,
+        daily_extra_days=daily_extra_days,
+        only_pair=pair_filter,
+        verbose=True,
+    )
     gap_scan_elapsed = time.perf_counter() - gap_scan_start
     print(f'  Scan complete ({gap_scan_elapsed:.1f}s)')
     if debug:
@@ -1122,8 +1149,9 @@ def cmd_fill(args):
         return
 
     if verbose:
-        gaps_verbose = _find_cache_gaps_verbose(
-            target_days,
+        gaps_verbose = fill_pipeline.find_cache_gaps_verbose(
+            pairs=PAIRS,
+            target_days=target_days,
             daily_extra_days=daily_extra_days,
             only_pair=pair_filter,
         )
@@ -1216,8 +1244,9 @@ def cmd_fill(args):
     # Re-check
     print('  Rechecking gaps...')
     recheck_start = time.perf_counter()
-    remaining = _find_cache_gap_work_items(
-        target_days,
+    remaining = fill_pipeline.find_cache_gap_work_items(
+        pairs=PAIRS,
+        target_days=target_days,
         daily_extra_days=daily_extra_days,
         only_pair=pair_filter,
         verbose=True,

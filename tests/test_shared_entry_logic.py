@@ -154,7 +154,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         def zones(_):
             return [_support_zone(1.1000, 1.1010)]
 
-        with patch('fx_sr.backtest.detect_zones', side_effect=zones):
+        with patch('fx_sr.walkforward.detect_zones', side_effect=zones):
             result = run_backtest(daily_df, hourly_df, 'EURUSD', params=params, zone_history_days=20)
 
         self.assertEqual(result.total_trades, 0)
@@ -162,6 +162,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         padded = _pad_hourly_df(hourly_df)
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=padded), \
+                patch('fx_sr.walkforward.detect_zones', side_effect=zones), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             row, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -204,7 +205,7 @@ class SharedEntryLogicTests(unittest.TestCase):
                 _support_zone(1.0900, 1.0910),
             ]
 
-        with patch('fx_sr.backtest.detect_zones', side_effect=zones):
+        with patch('fx_sr.walkforward.detect_zones', side_effect=zones):
             result = run_backtest(
                 daily_df,
                 hourly_df,
@@ -223,6 +224,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=padded_live), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
+                patch('fx_sr.walkforward.detect_zones', side_effect=zones), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -269,7 +271,7 @@ class SharedEntryLogicTests(unittest.TestCase):
                 _resistance_zone(1.1100, 1.1110),
             ]
 
-        with patch('fx_sr.backtest.detect_zones', side_effect=zones):
+        with patch('fx_sr.walkforward.detect_zones', side_effect=zones):
             result = run_backtest(
                 daily_df,
                 hourly_df,
@@ -288,6 +290,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=padded_live), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
+                patch('fx_sr.walkforward.detect_zones', side_effect=zones), \
                 patch('fx_sr.live.detect_zones', side_effect=zones):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -332,6 +335,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=padded), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
+                patch('fx_sr.walkforward.detect_zones', return_value=[_support_zone(1.0900, 1.0910)]), \
                 patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.0900, 1.0910)]):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -378,6 +382,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
                 patch('fx_sr.live.fetch_hourly_data', return_value=padded), \
                 patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df), \
+                patch('fx_sr.walkforward.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]), \
                 patch('fx_sr.live.detect_zones', return_value=[_support_zone(1.1000, 1.1010)]):
             _, signal, _wf = _scan_pair(
                 'EURUSD',
@@ -418,7 +423,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         ]
         zone_cache = {('EURUSD', '2026-02-03'): zones}
 
-        with patch('fx_sr.backtest.detect_zones', return_value=zones):
+        with patch('fx_sr.walkforward.detect_zones', return_value=zones):
             standard = run_backtest(
                 daily_df,
                 hourly_df,
@@ -464,7 +469,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         minute_df = _build_minute_df([('2026-02-05 02:00:00', 1.1004)])
         zone = _support_zone(1.1000, 1.1010)
 
-        with patch('fx_sr.backtest.detect_zones', return_value=[zone]):
+        with patch('fx_sr.walkforward.detect_zones', return_value=[zone]):
             result = run_backtest(
                 daily_df,
                 hourly_df,
@@ -500,7 +505,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         )
         zone = _support_zone(1.1000, 1.1010)
 
-        with patch('fx_sr.backtest.detect_zones', return_value=[zone]):
+        with patch('fx_sr.walkforward.detect_zones', return_value=[zone]):
             result = run_backtest(
                 daily_df,
                 hourly_df,
@@ -535,7 +540,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         minute_df = _build_minute_df([('2026-02-05 01:59:00', 1.1004)])
         zone = _support_zone(1.1000, 1.1010)
 
-        with patch('fx_sr.backtest.detect_zones', return_value=[zone]):
+        with patch('fx_sr.walkforward.detect_zones', return_value=[zone]):
             result = run_backtest(
                 daily_df,
                 hourly_df,
@@ -571,7 +576,7 @@ class SharedEntryLogicTests(unittest.TestCase):
         )
         zone = _support_zone(1.1000, 1.1010)
 
-        with patch('fx_sr.backtest.detect_zones', return_value=[zone]):
+        with patch('fx_sr.walkforward.detect_zones', return_value=[zone]):
             result = run_backtest(
                 daily_df,
                 hourly_df,

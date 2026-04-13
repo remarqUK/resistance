@@ -15,7 +15,9 @@ from typing import Callable, Dict, List, Optional, Set
 
 from .config import PAIRS, DEFAULT_ZONE_HISTORY_DAYS
 from .data import fetch_daily_data, fetch_hourly_data, fetch_minute_data_cached
+from .data_pipeline import PairDataBundle
 from .db import load_l2_snapshots
+from .engine import PairEngine
 from .execution import build_execution_plan, historical_execution_quote
 from .levels import detect_zones, get_nearest_zones, SRZone, is_price_in_zone
 from .live_history import (
@@ -41,7 +43,7 @@ from .strategy import (
     get_tradeable_zones,
     is_pair_fully_blocked,
 )
-from .walkforward import resolve_entry_signal_for_bar, run_walk_forward, slice_daily_window
+from .walkforward import WalkForwardState, resolve_entry_signal_for_bar, slice_daily_window
 from .sizing import (
     PositionSizePlan,
     build_position_size_plan,
@@ -332,6 +334,7 @@ _LIVE_DAILY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _LIVE_ZONE_CACHE: Dict[tuple[str, int], tuple[str, List[SRZone]]] = {}
 _LIVE_HOURLY_DATA_CACHE: Dict[tuple[str, int], tuple[str, object]] = {}
 _WALK_FORWARD_CACHE: Dict[str, tuple[str, Optional[Signal], list]] = {}  # pair -> (cache_key, signal, new_wf_signals)
+_WALK_FORWARD_STATE: Dict[str, WalkForwardState] = {}  # pair -> resumable checkpoint
 _SEEN_WF_TRADES: Dict[str, set] = {}  # pair_id -> set of trade identity keys
 _SEEN_WF_TRADES_SEEDED: bool = False  # True once seeded from DB
 _SEEN_WF_TRADES_LOCK = threading.Lock()
@@ -1015,8 +1018,9 @@ def _scan_pair(
             minute_data_cache=minute_data_cache,
         )
 
-    # Walk-forward: process the full hourly data sequentially, exactly like
-    # the backtest does.  Cache the result so we don't re-run every scan cycle.
+    # Walk-forward: process hourly data sequentially, exactly like the backtest.
+    # Use saved WalkForwardState to resume from the last checkpoint when the
+    # hourly data has only grown by new bars — avoids replaying all history.
     hourly_bucket = _current_hour_bucket()
     last_bar_key = str(scan_df.index[-1])
     minute_freshness = ''
@@ -1034,25 +1038,6 @@ def _scan_pair(
     else:
         pip = float(pair_info.get('pip', 0.0001))
 
-        # Zone provider: identical to backtest — re-derive zones per bar date
-        # from the sliding daily window.
-        zone_by_date: dict[object, list[SRZone]] = {}
-
-        def _wf_zone_provider(_current_time, current_date, _bar_index):
-            cached_zones = zone_by_date.get(current_date)
-            if cached_zones is not None:
-                return list(cached_zones)
-            bar_date = pd.Timestamp(current_date)
-            if hasattr(_current_time, 'tzinfo') and _current_time.tzinfo:
-                bar_date = bar_date.tz_localize(_current_time.tzinfo)
-            daily_window = slice_daily_window(daily_df, bar_date, zone_history_days)
-            if len(daily_window) < 20:
-                zone_by_date[current_date] = []
-                return []
-            zones_for_day = list(detect_zones(daily_window))
-            zone_by_date[current_date] = zones_for_day
-            return list(zones_for_day)
-
         # Load L2 snapshots for the walk-forward window — same as backtest.
         # Returns empty DataFrame when no L2 data exists (common).
         l2_snapshots = load_l2_snapshots(
@@ -1060,36 +1045,47 @@ def _scan_pair(
             start=scan_df.index[0],
             end=scan_df.index[-1],
         )
-
-        # Execution quote provider: identical to backtest — resolve quotes
-        # from L2/minute data at submit time, with same fallback rules.
-        _allow_h1 = not params.strict_backtest_execution and params.allow_h1_execution_fallback
-        def _wf_execution_quote_provider(signal, submit_time, _bar_index, row):
-            return historical_execution_quote(
-                signal.pair,
-                submit_time,
-                params,
-                minute_df=minute_df,
-                l2_snapshots=l2_snapshots,
-                allow_h1_fallback=_allow_h1,
-                fallback_mid_price=float(row['Open']),
-            )
-
-        # Match backtest exactly: full hourly data, same quote provider,
-        # no cooldown callback. force_close_end=False so the current open
-        # trade is preserved (backtest uses True for clean stats only).
-        wf_result = run_walk_forward(
-            scan_df,
-            pair=pair_id,
-            params=params,
-            pip=pip,
-            zone_provider=_wf_zone_provider,
-            execution_quote_provider=_wf_execution_quote_provider,
-            minute_df=minute_df,
+        engine = PairEngine(
+            pair_id,
+            pair_info,
+            params,
+            zone_history_days=zone_history_days,
+            hourly_days=hourly_days,
             execution_mode=execution_mode,
-            force_close_end=False,
             snapshot_source='live',
         )
+        engine.load_bundle(
+            PairDataBundle(
+                pair=pair_id,
+                ticker=pair_info['ticker'],
+                daily_df=daily_df,
+                hourly_df=scan_df,
+                minute_df=minute_df if minute_df is not None else pd.DataFrame(),
+                l2_snapshots=l2_snapshots,
+                pip=pip,
+            )
+        )
+
+        # Try to resume from saved state — only replay new bars
+        saved_state = _WALK_FORWARD_STATE.get(pair_id)
+        wf_result = None
+        if saved_state is not None and saved_state.last_bar_time in scan_df.index:
+            try:
+                engine.restore_state(saved_state)
+                wf_result = engine.process_new_bars(
+                    scan_df,
+                    minute_df=minute_df,
+                )
+            except (RuntimeError, ValueError, IndexError):
+                wf_result = None  # fall back to full replay
+
+        if wf_result is None:
+            # Cold start or state invalidated — full replay
+            wf_result = engine.run_historical(force_close_end=False)
+
+        # Save state for incremental resume on next scan
+        if engine.state is not None:
+            _WALK_FORWARD_STATE[pair_id] = engine.state
 
         # If the walk-forward has an open trade at the current bar, build a
         # signal from it so the execution pipeline can reprice with a live quote.
@@ -1111,12 +1107,6 @@ def _scan_pair(
             )
 
         # Detect NEW walk-forward trades not seen in previous scans.
-        # These are trades the backtest would show but live previously missed
-        # because the trade had already closed before the scan ran.
-        #
-        # On first run after startup, seed the "seen" set from the database
-        # so only trades the live system has already acted on are marked seen.
-        # Trades the system never detected remain "unseen" and get surfaced.
         seed_seen_wf_trades()
 
         new_wf_signals: list[Signal] = []
@@ -1139,12 +1129,10 @@ def _scan_pair(
                     zone_type='support' if t.direction == 'LONG' else 'resistance',
                     quality_score=t.quality_score,
                 )
-                # Attach WF outcome for diagnostic logging
                 wf_sig._wf_exit_reason = t.exit_reason
                 wf_sig._wf_pnl_r = t.pnl_r
                 wf_sig._wf_exit_time = t.exit_time
                 new_wf_signals.append(wf_sig)
-        # Also mark the open trade as seen if present
         if wf_result.open_trade is not None:
             t = wf_result.open_trade
             tkey = f"{pair_id}:{t.entry_time}:{t.direction}"

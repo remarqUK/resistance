@@ -4,9 +4,13 @@
 import argparse
 from dataclasses import replace
 import os
+import threading
 import uuid
 import sys
 import time
+
+# Unbuffer stdout so progress output appears immediately
+sys.stdout.reconfigure(line_buffering=True)
 
 from fx_sr import ibkr
 from fx_sr.backtest import (
@@ -57,6 +61,7 @@ from fx_sr.strategy import (
     StrategyParams,
     params_from_profile,
 )
+from fx_sr import fill_pipeline
 
 
 def _configure_ibkr(args, *, allow_client_id_fallback: bool = True) -> int:
@@ -72,6 +77,12 @@ def _configure_ibkr(args, *, allow_client_id_fallback: bool = True) -> int:
     if hist_workers is not None:
         ibkr.set_historical_fetch_concurrency(hist_workers)
     return ibkr.TWS_CLIENT_ID
+
+
+def _fill_client_id_base(active_client_id: int) -> int:
+    """Return a dedicated client-id base for CLI cache fills."""
+
+    return int(active_client_id) + 2000
 
 
 def _requested_profile_name(args) -> str | None:
@@ -111,7 +122,7 @@ def _build_backtest_run_config(
         'risk_pct': risk_pct,
         'selection_label': selection_label,
     }
-    if execution_mode != 'next_bar':
+    if execution_mode != 'intrabar':
         run_config_kwargs['execution_mode'] = execution_mode
 
     return build_backtest_run_config_json(
@@ -1019,64 +1030,16 @@ def _find_cache_gaps(
     *,
     now=None,
     daily_extra_days: int = 0,
+    only_pair: str | None = None,
 ) -> list[tuple[str, str, str]]:
     """Return list of (pair, ticker, interval) tuples that are missing or stale."""
-
-    from fx_sr.data import _remaining_days_to_fetch
-    from fx_sr.db import get_cache_summary, init_db
-
-    import pandas as pd
-
-    init_db()
-    summary = get_cache_summary()
-    now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
-    intervals = ['1d', '1h', '1m']
-    effective_days = {
-        '1d': target_days + max(0, daily_extra_days),
-        '1h': target_days,
-        '1m': target_days,
-    }
-
-    # Build lookup
-    cached = {}
-    for _, row in summary.iterrows():
-        cached[(row['ticker'], row['interval'])] = (
-            pd.Timestamp(row['first_ts']),
-            pd.Timestamp(row['last_ts']),
-            int(row['bars']),
-        )
-
-    # Expected minimum bars per interval for target_days
-    # FX trades ~5d/week: hourly ~16*days, minute ~1000*days; daily threshold uses backtest-style coverage
-    # (1440 min/day * 5/7 weekdays ≈ 1028 bars/day; use 1000 as floor)
-    start = now_ts - pd.Timedelta(days=int(effective_days['1d']))
-    trading_days = len(pd.bdate_range(start.normalize(), now_ts.normalize(), freq='B'))
-    trading_day_ratio = 5 / 7
-    min_bars = {
-        '1d': max(1, int(trading_days * 0.9)),
-        '1h': int(effective_days['1h'] * 16),
-        '1m': int(effective_days['1m'] * 1000 * trading_day_ratio),
-    }
-    gaps = []
-    for pair_id, pair_info in PAIRS.items():
-        ticker = pair_info['ticker']
-        for iv in intervals:
-            if (ticker, iv) not in cached:
-                gaps.append((pair_id, ticker, iv))
-                continue
-            first_ts, last_ts, bars = cached[(ticker, iv)]
-            if bars < min_bars[iv]:
-                gaps.append((pair_id, ticker, iv))
-                continue
-            if _remaining_days_to_fetch(
-                interval=iv,
-                requested_days=effective_days[iv],
-                cached_range=(first_ts, last_ts, bars),
-                now=now_ts,
-            ) > 0:
-                gaps.append((pair_id, ticker, iv))
-
-    return gaps
+    return fill_pipeline.find_cache_gaps(
+        pairs=PAIRS,
+        target_days=target_days,
+        now=now,
+        daily_extra_days=daily_extra_days,
+        only_pair=only_pair,
+    )
 
 
 def _find_cache_gap_work_items(
@@ -1084,55 +1047,18 @@ def _find_cache_gap_work_items(
     *,
     now=None,
     daily_extra_days: int = 0,
+    only_pair: str | None = None,
+    verbose: bool = False,
 ) -> list[tuple[str, str, str, object]]:
     """Return gap work items including the first missing timestamp when known."""
-
-    from fx_sr.data import find_first_missing_bar
-    from fx_sr.db import load_ohlc
-
-    import pandas as pd
-
-    now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
-    work_items: list[tuple[str, str, str, object]] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    for pair_id, ticker, interval in _find_cache_gaps(
-        target_days,
-        now=now_ts,
+    return fill_pipeline.find_cache_gap_work_items(
+        pairs=PAIRS,
+        target_days=target_days,
+        now=now,
         daily_extra_days=daily_extra_days,
-    ):
-        cached = load_ohlc(ticker, interval)
-        gap_start = find_first_missing_bar(cached, interval, now=now_ts) if not cached.empty else None
-        work_items.append((pair_id, ticker, interval, gap_start))
-        seen.add((pair_id, ticker, interval))
-
-    for pair_id, pair_info in PAIRS.items():
-        ticker = pair_info['ticker']
-        for interval in ('1d', '1h', '1m'):
-            if (pair_id, ticker, interval) in seen:
-                continue
-            cached = load_ohlc(ticker, interval)
-            if cached.empty:
-                continue
-            gap_start = find_first_missing_bar(cached, interval, now=now_ts)
-            if gap_start is not None:
-                work_items.append((pair_id, ticker, interval, gap_start))
-
-    return work_items
-
-
-def _weekday_gap_days(from_ts, to_ts) -> int:
-    """Estimate missing trading-calendar days between two timestamps (weekdays only)."""
-
-    import pandas as pd
-
-    if from_ts is None or to_ts is None:
-        return 0
-    start = pd.Timestamp(from_ts).normalize() + pd.Timedelta(days=1)
-    end = pd.Timestamp(to_ts).normalize()
-    if end <= start:
-        return 0
-    return len(pd.bdate_range(start, end, freq='B'))
+        only_pair=only_pair,
+        verbose=verbose,
+    )
 
 
 def _find_cache_gaps_verbose(
@@ -1140,78 +1066,22 @@ def _find_cache_gaps_verbose(
     *,
     now=None,
     daily_extra_days: int = 0,
+    only_pair: str | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Like _find_cache_gaps but returns (pair, ticker, interval, detail) with diagnostic info."""
-
-    from fx_sr.data import _remaining_days_to_fetch
-    from fx_sr.db import get_cache_summary, init_db
-
-    import pandas as pd
-
-    init_db()
-    summary = get_cache_summary()
-    now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
-    intervals = ['1d', '1h', '1m']
-    effective_days = {
-        '1d': target_days + max(0, daily_extra_days),
-        '1h': target_days,
-        '1m': target_days,
-    }
-
-    cached = {}
-    for _, row in summary.iterrows():
-        cached[(row['ticker'], row['interval'])] = (
-            pd.Timestamp(row['first_ts']),
-            pd.Timestamp(row['last_ts']),
-            int(row['bars']),
-        )
-
-    start = now_ts - pd.Timedelta(days=int(effective_days['1d']))
-    trading_days = len(pd.bdate_range(start.normalize(), now_ts.normalize(), freq='B'))
-    trading_day_ratio = 5 / 7
-    min_bars = {
-        '1d': max(1, int(trading_days * 0.9)),
-        '1h': int(effective_days['1h'] * 16),
-        '1m': int(effective_days['1m'] * 1000 * trading_day_ratio),
-    }
-    gaps = []
-    for pair_id, pair_info in PAIRS.items():
-        ticker = pair_info['ticker']
-        for iv in intervals:
-            if (ticker, iv) not in cached:
-                gaps.append((pair_id, ticker, iv, 'no cached data'))
-                continue
-            first_ts, last_ts, bars = cached[(ticker, iv)]
-            remaining = _remaining_days_to_fetch(
-                interval=iv,
-                requested_days=effective_days[iv],
-                cached_range=(first_ts, last_ts, bars),
-                now=now_ts,
-            )
-            weekday_gap = _weekday_gap_days(last_ts, now_ts)
-            if bars < min_bars[iv]:
-                gaps.append((
-                    pair_id, ticker, iv,
-                    f'bars={bars} < min {min_bars[iv]}, '
-                    f'range={first_ts} -> {last_ts}, need={remaining}d, '
-                    f'weekdays_since_last={weekday_gap}',
-                ))
-                continue
-            if remaining > 0:
-                gaps.append((
-                    pair_id, ticker, iv,
-                    f'bars={bars}, range={first_ts} -> {last_ts}, '
-                    f'need={remaining}d, weekdays_since_last={weekday_gap}',
-                ))
-
-    return gaps
+    return fill_pipeline.find_cache_gaps_verbose(
+        pairs=PAIRS,
+        target_days=target_days,
+        now=now,
+        daily_extra_days=daily_extra_days,
+        only_pair=only_pair,
+    )
 
 
 def cmd_fill(args):
     """Identify cache gaps and fill them from IBKR."""
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from fx_sr.data import download_single_interval, refill_interval_from
+    import pandas as pd
     from fx_sr.db import get_db_path, init_db
 
     active_client_id = _configure_ibkr(args)
@@ -1222,30 +1092,43 @@ def cmd_fill(args):
     if debug:
         verbose = True
     daily_target_days = target_days + daily_extra_days
+    pair_filter = getattr(args, 'pair', None)
+    if pair_filter:
+        pair_filter = pair_filter.upper().replace('/', '')
+        if pair_filter not in PAIRS:
+            print(f'  Unknown pair: {pair_filter}')
+            print(f"  Available: {', '.join(PAIRS.keys())}")
+            sys.exit(1)
 
     init_db()
     print(f'\n  Database: {get_db_path()}')
     print(f'  IBKR client ID: {active_client_id}')
-    print(
-        f'  Target: {target_days}d across all pairs and intervals '
-        f'(daily target {daily_target_days}d with +{daily_extra_days}d zone history)'
-    )
+    pair_label = pair_filter if pair_filter else 'all pairs'
+    if daily_extra_days > 0:
+        print(f'  Target: {target_days}d for {pair_label}, daily {daily_target_days}d (+{daily_extra_days}d zone history)')
+    else:
+        print(f'  Target: {target_days}d for {pair_label}')
 
+    print(f'  Scanning for gaps...')
     gap_scan_start = time.perf_counter()
-    gap_items = _find_cache_gap_work_items(target_days, daily_extra_days=daily_extra_days)
+    gap_items = _find_cache_gap_work_items(target_days, daily_extra_days=daily_extra_days, only_pair=pair_filter, verbose=True)
     gap_scan_elapsed = time.perf_counter() - gap_scan_start
+    print(f'  Scan complete ({gap_scan_elapsed:.1f}s)')
     if debug:
         print(f'  [dbg] gap scan took {gap_scan_elapsed:.2f}s')
 
     if not gap_items:
-        print('\n  All 22 pairs fully synced for 1d, 1h, and 1m. Nothing to do.')
+        print(f'\n  {pair_label.title()} fully synced for 1d, 1h, and 1m. Nothing to do.')
         return
 
     if verbose:
         gaps_verbose = _find_cache_gaps_verbose(
             target_days,
             daily_extra_days=daily_extra_days,
+            only_pair=pair_filter,
         )
+        if pair_filter:
+            gaps_verbose = [(p, t, iv, d) for p, t, iv, d in gaps_verbose if p == pair_filter]
         print(f'\n  Gaps found ({len(gap_items)}):')
         for pair_id, _ticker, iv, detail in gaps_verbose:
             print(f'    {pair_id:<10} {iv:<4} {detail}')
@@ -1264,82 +1147,81 @@ def cmd_fill(args):
     # connection across all its work items (avoids Error 326 collisions).
     hist_fetch_workers = max(1, ibkr.set_historical_fetch_concurrency(getattr(args, 'ib_historical_fetch_concurrency', None)))
     MAX_WORKERS = min(3, hist_fetch_workers)
-    work_items = [
-        (
-            pair_id,
-            PAIRS[pair_id],
-            iv,
-            daily_target_days if iv == '1d' else target_days,
-            active_client_id + idx,
-            gap_start,
-        )
-        for idx, (pair_id, _ticker, iv, gap_start) in enumerate(gap_items)
-    ]
+    base_fill_client_id = _fill_client_id_base(active_client_id)
+    client_id_suffix = (
+        f'{base_fill_client_id}'
+        if MAX_WORKERS == 1
+        else f'{base_fill_client_id}-{base_fill_client_id + MAX_WORKERS - 1}'
+    )
+    print(f'  Fill worker client IDs: {client_id_suffix}')
+    work_items = fill_pipeline.build_fill_execution_items(
+        gap_items,
+        pairs=PAIRS,
+        target_days=target_days,
+        daily_target_days=daily_target_days,
+    )
 
-    def _run_work_item(pair_id, pair_info, iv, item_days, cid, gap_start):
-        item_start = time.perf_counter()
-        if debug:
-            print(f'  [dbg] work item start: {pair_id} {iv} -> client {cid}')
-        if gap_start is not None:
-            rows = len(
-                refill_interval_from(
-                    pair_info['ticker'],
-                    iv,
-                    gap_start,
-                    client_id=cid,
-                )
-            )
+    def _format_wait_window(item: fill_pipeline.FillExecutionItem, waiting_s: float) -> str:
+        now_ts = pd.Timestamp.now(tz='UTC')
+        if item.gap_start is not None:
+            start_ts = pd.Timestamp(item.gap_start)
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.tz_localize('UTC')
+            else:
+                start_ts = start_ts.tz_convert('UTC')
+            wait_window = f'{start_ts:%Y-%m-%d %H:%M} -> {now_ts:%Y-%m-%d %H:%M} UTC'
+            return f'{item.pair_id} {item.interval} [{wait_window}] ({waiting_s:.0f}s)'
+
+        start_ts = now_ts - pd.Timedelta(days=max(1, int(item.item_days)))
+        if item.interval == '1d':
+            wait_window = f'~{start_ts:%Y-%m-%d} -> {now_ts:%Y-%m-%d} UTC'
         else:
-            rows = download_single_interval(
-                pair_id, pair_info, iv, item_days, client_id=cid, verbose=verbose,
-            )
-        item_elapsed = time.perf_counter() - item_start
-        if debug:
-            print(f'  [dbg] work item end: {pair_id} {iv} -> {item_elapsed:.2f}s')
-        return pair_id, pair_info, iv, cid, rows, item_elapsed
+            wait_window = f'~{start_ts:%Y-%m-%d %H:%M} -> {now_ts:%Y-%m-%d %H:%M} UTC'
+        return f'{item.pair_id} {item.interval} [{wait_window}] ({waiting_s:.0f}s)'
 
-    MAX_RETRIES = 3
-    t0 = time.time()
-    pending = list(work_items)
-    attempt = 0
+    result = fill_pipeline.execute_fill_work_items(
+        work_items,
+        base_fill_client_id=base_fill_client_id,
+        max_workers=MAX_WORKERS,
+        max_retries=3,
+        wait_timeout_s=15.0,
+        verbose=verbose,
+        debug=debug,
+        before_retry=lambda attempt, pending_count: print(
+            f'\n  Retry {attempt}/3 - {pending_count} items remaining, waiting 5s...'
+        ),
+        wait_formatter=_format_wait_window,
+        on_wait=lambda waiting_parts: print(
+            f"  Still working on {len(waiting_parts)} item(s): {', '.join(waiting_parts)}"
+        ),
+        on_item_done=lambda item, rows, item_elapsed, completed, total: print(
+            f'  [{completed}/{total}] {item.pair_id} {item.interval} done ({rows} rows, {item_elapsed:.2f}s)'
+        ),
+        on_item_failed=lambda item, exc, completed, total: print(
+            f'  [{completed}/{total}] {item.pair_id} {item.interval} FAILED: {exc}'
+        ),
+        on_attempt_complete=(
+            (lambda attempt, failed_count, attempt_elapsed:
+                print(f'  [dbg] attempt {attempt}/3 completed in {attempt_elapsed:.2f}s ({failed_count} failed)'))
+            if debug else None
+        ),
+    )
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        while pending and attempt < MAX_RETRIES:
-            attempt += 1
-            attempt_start = time.perf_counter()
-            if attempt > 1:
-                print(f'\n  Retry {attempt}/{MAX_RETRIES} - {len(pending)} items remaining, waiting 5s...')
-                time.sleep(5)
+    # Clean up all IBKR connections so TWS releases the client IDs immediately.
+    ibkr.disconnect_all()
 
-            completed = 0
-            total = len(pending)
-            failed = []
-
-            futures = {}
-            for pair_id, pair_info, iv, item_days, cid, gap_start in pending:
-                fut = executor.submit(_run_work_item, pair_id, pair_info, iv, item_days, cid, gap_start)
-                futures[fut] = (pair_id, pair_info, iv, item_days, cid, gap_start)
-            for fut in as_completed(futures):
-                pair_id, pair_info, iv, item_days, cid, gap_start = futures[fut]
-                completed += 1
-                try:
-                    _, _, _, _, rows, item_elapsed = fut.result()
-                    print(f'  [{completed}/{total}] {pair_id} {iv} done ({rows} rows, {item_elapsed:.2f}s)')
-                except Exception as e:
-                    print(f'  [{completed}/{total}] {pair_id} {iv} FAILED: {e}')
-                    failed.append((pair_id, pair_info, iv, item_days, cid, gap_start))
-
-            pending = failed
-            if debug:
-                attempt_elapsed = time.perf_counter() - attempt_start
-                print(f'  [dbg] attempt {attempt}/{MAX_RETRIES} completed in {attempt_elapsed:.2f}s ({len(failed)} failed)')
-
-    elapsed = time.time() - t0
+    elapsed = float(result['elapsed'])
     print(f'\n  Fill completed in {elapsed:.1f}s')
 
     # Re-check
+    print('  Rechecking gaps...')
     recheck_start = time.perf_counter()
-    remaining = _find_cache_gap_work_items(target_days, daily_extra_days=daily_extra_days)
+    remaining = _find_cache_gap_work_items(
+        target_days,
+        daily_extra_days=daily_extra_days,
+        only_pair=pair_filter,
+        verbose=True,
+    )
     recheck_elapsed = time.perf_counter() - recheck_start
     if debug:
         print(f'  [dbg] post-fill recheck took {recheck_elapsed:.2f}s')
@@ -1497,10 +1379,48 @@ def cmd_viz(args):
         server.shutdown()
 
 
+def cmd_run(args):
+    """Unified engine: backfill → walk-forward → backtest or live."""
+
+    mode = args.mode
+
+    # Resolve cache_only: explicit flag overrides, else default per mode
+    cache_only = getattr(args, 'cache_only', None)
+    if cache_only is None:
+        cache_only = (mode == 'backtest')
+
+    if mode == 'backtest':
+        # Fill in defaults for backtest-only args not on the 'run' parser
+        _backtest_defaults = {
+            'target_trades': None,
+            'target_profit_floor': 1.0,
+            'target_win_rate_floor': 1.0,
+            'no_l2': False,
+            'once': False,
+            'zones': False,
+        }
+        for attr, default in _backtest_defaults.items():
+            if not hasattr(args, attr):
+                setattr(args, attr, default)
+        cmd_backtest(args)
+    elif mode == 'live':
+        # Fill in defaults for live-only args not on the 'run' parser
+        _live_defaults = {
+            'once': False,
+            'zones': False,
+        }
+        for attr, default in _live_defaults.items():
+            if not hasattr(args, attr):
+                setattr(args, attr, default)
+        cmd_live(args)
+
+
 def cmd_live(args):
     """Run live monitoring mode."""
 
     client_id_provided = getattr(args, 'ibkr_client_id', None) is not None
+    if not client_id_provided:
+        args.ibkr_client_id = 99
     # Keep client-id fallback enabled so startup can recover if any configured ID is already active.
     active_client_id = _configure_ibkr(args, allow_client_id_fallback=True)
     params = _build_strategy_params(args)
@@ -1695,6 +1615,11 @@ def main():
 
     fl = subparsers.add_parser('fill', help='Detect cache gaps and fill from IBKR')
     fl.add_argument(
+        '--pair',
+        type=str,
+        help='Specific pair (e.g., EURUSD). Default: all configured pairs',
+    )
+    fl.add_argument(
         '--days',
         type=int,
         default=365,
@@ -1704,7 +1629,7 @@ def main():
         '--zone-history-days',
         type=int,
         default=0,
-        help='Additional daily history for backtest zone detection (default: 0)',
+        help='Additional daily history beyond --days (default: 0; zone lookback uses the same 365d window)',
     )
     fl.add_argument(
         '--ib-historical-fetch-concurrency',
@@ -1874,6 +1799,97 @@ def main():
         help='Signal timing mode (fixed: intrabar)',
     )
 
+    # ---- Unified 'run' subcommand ----
+    rn = subparsers.add_parser(
+        'run',
+        help='Unified engine: backfill data, walk-forward, then backtest (quit) or live (keep going)',
+    )
+    rn.add_argument(
+        '--mode',
+        choices=('backtest', 'live'),
+        required=True,
+        help='backtest: walk-forward over cache, record trades, exit. '
+             'live: walk-forward then keep processing incoming bars.',
+    )
+    rn.add_argument('--pair', type=str, help='Specific pair (e.g., EURUSD). Default: all configured pairs')
+    rn.add_argument(
+        '--days', type=int, default=365,
+        help='Days of hourly data for execution (default: 365)',
+    )
+    rn.add_argument(
+        '--zone-history', type=int, default=180,
+        help='Days of daily data for zone detection (default: 180)',
+    )
+    rn.add_argument(
+        '--cache-only', action='store_true', default=None,
+        help='Use PostgreSQL cache only, no IBKR fetch (default for backtest)',
+    )
+    _add_ibkr_args(rn)
+    _add_strategy_args(rn)
+    _add_risk_sizing_args(rn, include_balance=True, include_account_currency=True)
+    rn.add_argument(
+        '--execution-mode', choices=('intrabar',), default='intrabar',
+        help='Execution timing mode (fixed: intrabar)',
+    )
+    rn.add_argument(
+        '--allow-stale-cache', action='store_true',
+        help='Allow stale cached bars (skip recency checks)',
+    )
+    rn.add_argument('-v', '--verbose', action='store_true', help='Show individual trade details')
+    # Backtest-specific
+    rn.add_argument(
+        '--save-baseline', type=str, default=None,
+        help='[backtest] Write reproducible baseline artifact JSON',
+    )
+    rn.add_argument(
+        '--compare-baseline', type=str, default=None,
+        help='[backtest] Compare against saved baseline artifact',
+    )
+    rn.add_argument(
+        '--backtest-debug', action='store_true',
+        help='[backtest] Emit detailed execution tracing',
+    )
+    rn.add_argument(
+        '--backtest-workers', type=int, default=18,
+        help='[backtest] Parallel compute workers (default: 18)',
+    )
+    rn.add_argument(
+        '--fetch-workers', type=int, default=None,
+        help='[backtest] Limit Phase-1 fetch workers (default: auto)',
+    )
+    rn.add_argument('--no-cache', action='store_true', help='[compat] Ignored')
+    rn.add_argument('--no-margin', action='store_true', help='[backtest] Disable margin checks')
+    rn.add_argument('--no-l2', action='store_true', help='[backtest] Skip L2 data')
+    # Live-specific
+    rn.add_argument(
+        '--interval', type=int, default=60,
+        help='[live] Scan interval in seconds (default: 60)',
+    )
+    rn.add_argument(
+        '--port', type=int, default=7755,
+        help='[live] Dashboard server port (default: 7755)',
+    )
+    rn.add_argument(
+        '--paper-trade', action='store_true', default=True,
+        help='[live] Submit paper-market orders (default: on)',
+    )
+    rn.add_argument(
+        '--no-paper-trade', action='store_false', dest='paper_trade',
+        help='[live] Disable order submission (scan only)',
+    )
+    rn.add_argument(
+        '--no-positions', action='store_true',
+        help='[live] Disable IBKR position tracking',
+    )
+    rn.add_argument(
+        '--no-browser', action='store_true',
+        help='[live] Start dashboard without opening browser',
+    )
+    rn.add_argument(
+        '--ib-historical-fetch-concurrency', type=int, default=None,
+        help='Limit concurrent IB historical requests',
+    )
+
     l2p = subparsers.add_parser('l2', help='Capture and inspect IBKR L2 market depth')
     l2p.add_argument(
         '--pair',
@@ -1942,6 +1958,8 @@ def main():
         cmd_l2(args)
     elif args.command == 'live':
         cmd_live(args)
+    elif args.command == 'run':
+        cmd_run(args)
     elif args.command == 'viz':
         cmd_viz(args)
 

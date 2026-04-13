@@ -22,6 +22,7 @@ from aiohttp import web
 import pandas as pd
 
 from . import ibkr
+from . import fill_pipeline
 from .bar_accumulator import HourlyBarAccumulator
 from .live import (
     ExecutionResult,
@@ -46,7 +47,6 @@ from .live_history import (
     start_background_writer,
     stop_background_writer,
 )
-from .data import _remaining_days_to_fetch, download_single_interval, find_first_missing_cached_bar, refill_interval_from
 from .db import _connect, get_cached_range, get_db_path, get_setting, init_db, load_ohlc, set_setting
 from .portfolio import build_portfolio_state, closed_trade_summary_from_row, get_entry_block
 from .live_stream import StreamingScanner
@@ -1062,59 +1062,20 @@ class LiveDashboardHub:
             base_client_id += 1000
         return base_client_id + 4000
 
-    def _find_fill_gaps(self, target_days: int) -> list[tuple[str, dict, str, pd.Timestamp | None]]:
-        """Find cache gaps for supported intervals."""
-
-        if target_days <= 0:
-            return []
-
-        min_rows = {
-            '1d': int(target_days * 0.7),
-            '1h': int(target_days * 16),
-            '1m': int(target_days * 1000),
-        }
-        now = pd.Timestamp.now(tz='UTC')
-        gaps: list[tuple[str, dict, str, pd.Timestamp | None]] = []
-
-        for pair_id, pair_info in self.pairs.items():
-            ticker = pair_info['ticker']
-            for interval in ('1d', '1h', '1m'):
-                cached_range = get_cached_range(ticker, interval)
-                gap_start = find_first_missing_cached_bar(
-                    ticker,
-                    interval,
-                    now=now,
-                )
-                if cached_range is None:
-                    gaps.append((pair_id, pair_info, interval, gap_start))
-                    continue
-
-                first_ts, last_ts, rows = cached_range
-                if int(rows) < min_rows.get(interval, 0):
-                    gaps.append((pair_id, pair_info, interval, gap_start))
-                    continue
-
-                fetch_days = _remaining_days_to_fetch(
-                    interval=interval,
-                    requested_days=target_days,
-                    cached_range=(
-                        first_ts,
-                        last_ts,
-                        int(rows),
-                    ),
-                    now=now,
-                )
-                if fetch_days > 0 or gap_start is not None:
-                    gaps.append((pair_id, pair_info, interval, gap_start))
-
-        return gaps
-
     async def _run_fill_task(self, target_days: int) -> dict[str, object]:
         """Run cache fill work and return a compact status payload."""
 
         init_db()
-        gaps = self._find_fill_gaps(target_days)
-        if not gaps:
+        gap_items = (
+            []
+            if target_days <= 0
+            else fill_pipeline.find_cache_gap_work_items(
+                pairs=self.pairs,
+                target_days=target_days,
+                verbose=False,
+            )
+        )
+        if not gap_items:
             await self._publish_fill_progress(
                 status='complete',
                 items_requested=0,
@@ -1133,41 +1094,83 @@ class LiveDashboardHub:
                 'message': 'No cache gaps detected.',
             }
 
-        work_items = [(pair_id, pair_info, interval, gap_start) for pair_id, pair_info, interval, gap_start in gaps]
-        max_workers = min(3, len(work_items))
-        base_fill_client_id = self._fill_client_id_base()
-        max_retries = 3
-        slot_lock = threading.Lock()
-        client_slots = [0]
-
-        def _thread_client_id() -> int:
-            thread = threading.current_thread()
-            slot = getattr(thread, '_fill_client_id_slot', None)
-            if slot is None:
-                with slot_lock:
-                    slot = client_slots[0]
-                    client_slots[0] += 1
-                thread._fill_client_id_slot = slot
-            return base_fill_client_id + int(slot)
-
-        def _run_work_item(pair_id: str, pair_info: dict, interval: str, gap_start: pd.Timestamp | None) -> int:
-            client_id = _thread_client_id()
-            if gap_start is not None:
-                return len(
-                    refill_interval_from(
-                        pair_info['ticker'],
-                        interval,
-                        gap_start,
-                        client_id=client_id,
-                    )
-                )
-            return download_single_interval(pair_id, pair_info, interval, target_days, client_id=client_id)
-
-        pending = list(work_items)
-        total_errors = 0
-        attempt = 0
-        total_items_processed = 0
+        work_items = fill_pipeline.build_fill_execution_items(
+            gap_items,
+            pairs=self.pairs,
+            target_days=target_days,
+        )
         total_attempted = len(work_items)
+        progress_lock = threading.Lock()
+        progress = {'processed': 0, 'errors': 0}
+        loop = asyncio.get_running_loop()
+
+        def _publish_sync(**kwargs) -> None:
+            asyncio.run_coroutine_threadsafe(
+                self._publish_fill_progress(**kwargs),
+                loop,
+            ).result()
+
+        def _snapshot_progress() -> tuple[int, int]:
+            with progress_lock:
+                return progress['processed'], progress['errors']
+
+        def _handle_item_done(item, rows, item_elapsed, completed, total) -> None:
+            with progress_lock:
+                progress['processed'] += 1
+                processed = progress['processed']
+                errors = progress['errors']
+            _publish_sync(
+                status='running',
+                items_requested=total_attempted,
+                items_processed=processed,
+                attempts=0,
+                errors=errors,
+                remaining=max(total_attempted - processed, 0),
+                current_item=f'{item.pair_id}:{item.interval}',
+                message=f'Fill progress: {processed}/{total_attempted} complete.',
+            )
+
+        def _handle_item_failed(item, exc, completed, total) -> None:
+            with progress_lock:
+                progress['errors'] += 1
+                processed = progress['processed']
+                errors = progress['errors']
+            _publish_sync(
+                status='running',
+                items_requested=total_attempted,
+                items_processed=processed,
+                attempts=0,
+                errors=errors,
+                remaining=max(total_attempted - processed, 0),
+                current_item=f'{item.pair_id}:{item.interval}',
+                message=f'Fill error for {item.pair_id}:{item.interval}: {exc}',
+            )
+
+        def _handle_before_retry(attempt: int, pending_count: int) -> None:
+            processed, errors = _snapshot_progress()
+            _publish_sync(
+                status='running',
+                items_requested=total_attempted,
+                items_processed=processed,
+                attempts=attempt - 1,
+                errors=errors,
+                remaining=pending_count,
+                current_item=None,
+                message=f'Fill retry {attempt}/3 starting with {pending_count} remaining item(s).',
+            )
+
+        def _handle_attempt_complete(attempt: int, failed_count: int, attempt_elapsed: float) -> None:
+            processed, errors = _snapshot_progress()
+            _publish_sync(
+                status='running',
+                items_requested=total_attempted,
+                items_processed=processed,
+                attempts=attempt,
+                errors=errors,
+                remaining=failed_count,
+                current_item=None,
+                message=f'Fill attempt {attempt}/3 complete. Remaining: {failed_count}.',
+            )
 
         await self._publish_fill_progress(
             status='running',
@@ -1178,72 +1181,40 @@ class LiveDashboardHub:
             remaining=total_attempted,
             message=f'Fill started ({total_attempted} items).',
         )
+        result = await asyncio.to_thread(
+            fill_pipeline.execute_fill_work_items,
+            work_items,
+            base_fill_client_id=self._fill_client_id_base(),
+            max_workers=min(3, len(work_items)),
+            max_retries=3,
+            debug=False,
+            before_retry=_handle_before_retry,
+            on_item_done=_handle_item_done,
+            on_item_failed=_handle_item_failed,
+            on_attempt_complete=_handle_attempt_complete,
+        )
 
-        while pending and attempt < max_retries:
-            attempt += 1
-            if attempt > 1:
-                await asyncio.sleep(5)
-
-            failed: list[tuple[str, dict, str]] = []
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(_run_work_item, pair_id, pair_info, interval, gap_start): (pair_id, pair_info, interval, gap_start)
-                    for pair_id, pair_info, interval, gap_start in pending
-                }
-
-                for future in as_completed(futures):
-                    pair_id, pair_info, interval, gap_start = futures[future]
-                    try:
-                        _ = future.result()
-                        total_items_processed += 1
-                    except Exception:
-                        failed.append((pair_id, pair_info, interval, gap_start))
-                        total_errors += 1
-                    await self._publish_fill_progress(
-                        status='running',
-                        items_requested=total_attempted,
-                        items_processed=total_items_processed,
-                        attempts=attempt,
-                        errors=total_errors,
-                        remaining=max(total_attempted - total_items_processed, 0),
-                        current_item=f'{pair_id}:{interval}',
-                        message=f'Fill attempt {attempt}/{max_retries}: {total_items_processed}/{total_attempted} complete.',
-                    )
-
-            pending = failed
-            await self._publish_fill_progress(
-                status='running',
-                items_requested=total_attempted,
-                items_processed=total_items_processed,
-                attempts=attempt,
-                errors=total_errors,
-                remaining=len(pending),
-                current_item=None,
-                message=f'Fill attempt {attempt}/{max_retries} complete. Remaining: {len(pending)}.',
-            )
-
-        status = 'incomplete' if pending else 'complete'
         final_message = (
-            f'Fill {status} in {attempt} attempt(s). '
-            f'Processed {total_items_processed}/{total_attempted} item(s), '
-            f'errors: {total_errors}, remaining: {len(pending)}.'
+            f'Fill {result["status"]} in {result["attempts"]} attempt(s). '
+            f'Processed {result["items_processed"]}/{result["items_requested"]} item(s), '
+            f'errors: {result["errors"]}, remaining: {result["remaining"]}.'
         )
         await self._publish_fill_progress(
-            status=status,
-            items_requested=total_attempted,
-            items_processed=total_items_processed,
-            attempts=attempt,
-            errors=total_errors,
-            remaining=len(pending),
+            status=str(result['status']),
+            items_requested=int(result['items_requested']),
+            items_processed=int(result['items_processed']),
+            attempts=int(result['attempts']),
+            errors=int(result['errors']),
+            remaining=int(result['remaining']),
             message=final_message,
         )
         return {
-            'status': status,
-            'items_processed': total_items_processed,
-            'items_requested': total_attempted,
-            'attempts': attempt,
-            'errors': total_errors,
-            'remaining': len(pending),
+            'status': result['status'],
+            'items_processed': int(result['items_processed']),
+            'items_requested': int(result['items_requested']),
+            'attempts': int(result['attempts']),
+            'errors': int(result['errors']),
+            'remaining': int(result['remaining']),
             'message': final_message,
         }
 
@@ -2733,75 +2704,16 @@ class LiveDashboardHub:
         self._backfill_progress['current_detail'] = ''
 
         def _scan_pair_gaps(pair_id: str, pair_info: dict) -> dict:
-            ticker = pair_info.get('ticker')
-            if not ticker:
-                return {
-                    'pair_id': pair_id,
-                    'ticker': ticker,
-                    'error': 'no ticker',
-                }
-            if is_pair_fully_blocked(pair_id, self.params):
-                return {
-                    'pair_id': pair_id,
-                    'ticker': ticker,
-                    'refill_holes': [],
-                    'reported_only_holes': [],
-                    'skipped': 'fully blocked',
-                    'error': None,
-                }
-
             now_utc = pd.Timestamp.now(tz='UTC')
             recent_cutoff = now_utc - _HOLE_REFILL_MAX_AGE
-            refill_holes: list[tuple[str, pd.Timestamp]] = []
-            reported_only_holes: list[str] = []
-
-            for interval in ('1d', '1h', '1m'):
-                gap_start_recent = find_first_missing_cached_bar(
-                    ticker,
-                    interval,
-                    start=recent_cutoff,
-                    end=now_utc,
-                    now=now_utc,
-                    check_trailing=True,
-                )
-                if gap_start_recent is not None:
-                    gap_ts = pd.Timestamp(gap_start_recent)
-                    if gap_ts.tzinfo is None:
-                        gap_ts = gap_ts.tz_localize('UTC')
-                    else:
-                        gap_ts = gap_ts.tz_convert('UTC')
-                    refill_holes.append((interval, gap_ts))
-
-                # Old 1m holes are report-only and expensive to scan over long
-                # histories. Do not block live startup on that audit path.
-                if interval == '1m':
-                    continue
-
-                gap_start_old = find_first_missing_cached_bar(
-                    ticker,
-                    interval,
-                    end=recent_cutoff,
-                    now=recent_cutoff,
-                    check_trailing=False,
-                )
-                if gap_start_old is None:
-                    continue
-                gap_ts = pd.Timestamp(gap_start_old)
-                if gap_ts.tzinfo is None:
-                    gap_ts = gap_ts.tz_localize('UTC')
-                else:
-                    gap_ts = gap_ts.tz_convert('UTC')
-                gap_label = f'{interval}@{gap_ts}'
-                reported_only_holes.append(gap_label)
-
-            return {
-                'pair_id': pair_id,
-                'ticker': ticker,
-                'refill_holes': refill_holes,
-                'reported_only_holes': reported_only_holes,
-                'skipped': None,
-                'error': None,
-            }
+            return fill_pipeline.scan_recent_pair_gaps(
+                pair_id,
+                pair_info,
+                recent_cutoff=recent_cutoff,
+                now_utc=now_utc,
+                skip_refill=is_pair_fully_blocked(pair_id, self.params),
+                skip_reason='fully blocked',
+            )
 
         env_scan_workers = os.getenv('FX_SR_PHASE2_SCAN_WORKERS')
         if env_scan_workers is not None:
@@ -2861,30 +2773,46 @@ class LiveDashboardHub:
         self._backfill_progress.update(current_pair=None, completed=0)
         if refill_work:
             print(f'  [backfill] Phase 2b: refilling {len(refill_work)} recent gap(s) sequentially')
+            refill_items = [
+                fill_pipeline.FillExecutionItem(
+                    pair_id=pair_id,
+                    pair_info=self.pairs[pair_id],
+                    interval=interval,
+                    item_days=self.hourly_days,
+                    gap_start=gap_ts,
+                )
+                for pair_id, _ticker, interval, gap_ts in refill_work
+            ]
+
+            def _handle_refill_done(item, rows, item_elapsed, completed, total) -> None:
+                pair_status[item.pair_id] = 'holes refilled'
+                self._backfill_progress.update(current_pair=item.pair_id, completed=completed)
+                print(
+                    f'    [refill {completed}/{total}] {item.pair_id}: '
+                    f'{item.interval}@{item.gap_start} ({item_elapsed:.1f}s)'
+                )
+
+            def _handle_refill_failed(item, exc, completed, total) -> None:
+                pair_status[item.pair_id] = f'refill failed: {exc}'
+                self._backfill_progress.update(current_pair=item.pair_id, completed=completed)
+                print(
+                    f'    [refill {completed}/{total}] {item.pair_id}: '
+                    f'{item.interval}@{item.gap_start} FAILED: {exc}'
+                )
+
+            result = fill_pipeline.execute_fill_work_items(
+                refill_items,
+                base_fill_client_id=backfill_client_id,
+                max_workers=1,
+                max_retries=1,
+                wait_timeout_s=15.0,
+                on_item_done=_handle_refill_done,
+                on_item_failed=_handle_refill_failed,
+            )
+            if int(result['remaining']) > 0:
+                raise RuntimeError(f'Live startup refill incomplete: {int(result["remaining"])} item(s) remaining')
         else:
             print('  [backfill] Phase 2b: no recent gaps to refill')
-        for refill_idx, (pair_id, ticker, interval, gap_ts) in enumerate(refill_work, 1):
-            pair_status[pair_id] = 'refilling holes'
-            self._backfill_progress.update(current_pair=pair_id, completed=refill_idx)
-            t0 = _time.monotonic()
-            try:
-                refill_interval_from(
-                    ticker,
-                    interval,
-                    gap_ts,
-                    client_id=backfill_client_id,
-                )
-            except Exception as exc:
-                pair_status[pair_id] = f'refill failed: {exc}'
-                print(
-                    f'    [refill {refill_idx}/{len(refill_work)}] {pair_id}: '
-                    f'{interval}@{gap_ts} FAILED after {_time.monotonic() - t0:.1f}s: {exc}'
-                )
-                raise
-            print(
-                f'    [refill {refill_idx}/{len(refill_work)}] {pair_id}: '
-                f'{interval}@{gap_ts} ({_time.monotonic() - t0:.1f}s)'
-            )
 
         def _prepare_pair(pair_id: str, pair_info: dict) -> dict:
             ticker = pair_info.get('ticker')

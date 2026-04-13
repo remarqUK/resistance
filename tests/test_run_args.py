@@ -4,6 +4,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
+import pandas as pd
+
 from fx_sr.strategy import StrategyParams
 import run
 
@@ -221,6 +223,106 @@ class RunArgumentTests(unittest.TestCase):
             risk_pct=5.0,
             selection_label='baseline',
         )
+
+    def test_cmd_fill_uses_dedicated_fill_client_id_range(self):
+        args = SimpleNamespace(
+            days=30,
+            zone_history_days=0,
+            verbose=False,
+            fill_debug=False,
+            pair='EURUSD',
+            ib_historical_fetch_concurrency=1,
+            ibkr_client_id=None,
+        )
+        used_client_ids = []
+
+        def fake_download_single_interval(pair_id, pair_info, interval, item_days, client_id=None, verbose=False):
+            used_client_ids.append(client_id)
+            return 4
+
+        with patch('run._configure_ibkr', return_value=60), \
+                patch('run._find_cache_gap_work_items', side_effect=[
+                    [('EURUSD', 'EURUSD=X', '1m', None)],
+                    [],
+                ]), \
+                patch('fx_sr.db.init_db'), \
+                patch('fx_sr.db.get_db_path', return_value='test-db'), \
+                patch('fx_sr.fill_pipeline.download_single_interval', side_effect=fake_download_single_interval), \
+                patch('fx_sr.fill_pipeline.refill_interval_from', return_value=[]), \
+                patch('run.ibkr.set_historical_fetch_concurrency', return_value=1), \
+                patch('run.ibkr.disconnect_all'), \
+                patch('builtins.print'):
+            run.cmd_fill(args)
+
+        self.assertEqual(used_client_ids, [2060])
+
+    def test_cmd_fill_recheck_is_announced_and_verbose(self):
+        args = SimpleNamespace(
+            days=30,
+            zone_history_days=0,
+            verbose=False,
+            fill_debug=False,
+            pair='EURUSD',
+            ib_historical_fetch_concurrency=1,
+            ibkr_client_id=None,
+        )
+
+        with patch('run._configure_ibkr', return_value=60), \
+                patch('run._find_cache_gap_work_items', side_effect=[
+                    [('EURUSD', 'EURUSD=X', '1m', None)],
+                    [],
+                ]) as find_items_mock, \
+                patch('fx_sr.db.init_db'), \
+                patch('fx_sr.db.get_db_path', return_value='test-db'), \
+                patch('fx_sr.fill_pipeline.download_single_interval', return_value=4), \
+                patch('fx_sr.fill_pipeline.refill_interval_from', return_value=[]), \
+                patch('run.ibkr.set_historical_fetch_concurrency', return_value=1), \
+                patch('run.ibkr.disconnect_all'), \
+                patch('builtins.print') as print_mock:
+            run.cmd_fill(args)
+
+        self.assertEqual(find_items_mock.call_args_list[0].kwargs.get('verbose'), True)
+        self.assertEqual(find_items_mock.call_args_list[1].kwargs.get('verbose'), True)
+        print_mock.assert_any_call('  Rechecking gaps...')
+
+    def test_find_cache_gaps_counts_provider_confirmed_gaps_toward_coverage(self):
+        summary = pd.DataFrame([
+            {
+                'ticker': 'EURUSD=X',
+                'interval': '1d',
+                'first_ts': '2026-03-01T00:00:00+00:00',
+                'last_ts': '2026-04-13T00:00:00+00:00',
+                'bars': 30,
+            },
+            {
+                'ticker': 'EURUSD=X',
+                'interval': '1h',
+                'first_ts': '2026-03-15T00:00:00+00:00',
+                'last_ts': '2026-04-13T00:00:00+00:00',
+                'bars': 500,
+            },
+            {
+                'ticker': 'EURUSD=X',
+                'interval': '1m',
+                'first_ts': '2026-03-15T00:00:00+00:00',
+                'last_ts': '2026-04-13T00:00:00+00:00',
+                'bars': 20000,
+            },
+        ])
+
+        def fake_effective_cached_bar_count(ticker, interval, **kwargs):
+            if interval == '1m':
+                return 22000
+            return int(kwargs['cached_range'][2])
+
+        with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
+                patch('fx_sr.db.init_db'), \
+                patch('fx_sr.db.get_cache_summary', return_value=summary), \
+                patch('fx_sr.fill_pipeline.effective_cached_bar_count', side_effect=fake_effective_cached_bar_count), \
+                patch('fx_sr.fill_pipeline._remaining_days_to_fetch', return_value=0):
+            gaps = run._find_cache_gaps(target_days=30, now=pd.Timestamp('2026-04-13T12:00:00+00:00'))
+
+        self.assertEqual(gaps, [])
 
 
 if __name__ == '__main__':

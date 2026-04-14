@@ -170,6 +170,7 @@ class PairEngine:
             execution_mode=self.execution_mode,
             force_close_end=force_close_end,
             snapshot_source=self.snapshot_source,
+            daily_df=self._data.daily_df,
         )
         self._state = result.state
         self._last_result = result
@@ -242,6 +243,9 @@ class PairEngine:
                 self._data.l2_snapshots if self._data else pd.DataFrame(),
             )
 
+        _daily = self._data.daily_df if self._data else None
+        _minute = minute_df if minute_df is not None else (self._data.minute_df if self._data else None)
+
         try:
             result = resume_walk_forward(
                 self._state,
@@ -251,10 +255,11 @@ class PairEngine:
                 pip=self.pip,
                 zone_provider=self._zone_provider,
                 execution_quote_provider=quote_provider,
-                minute_df=minute_df if minute_df is not None else (self._data.minute_df if self._data else None),
+                minute_df=_minute,
                 execution_mode=self.execution_mode,
                 force_close_end=False,
                 snapshot_source=self.snapshot_source,
+                daily_df=_daily,
             )
         except ValueError:
             # State doesn't align with new df — full replay
@@ -265,10 +270,11 @@ class PairEngine:
                 pip=self.pip,
                 zone_provider=self._zone_provider,
                 execution_quote_provider=quote_provider,
-                minute_df=minute_df if minute_df is not None else (self._data.minute_df if self._data else None),
+                minute_df=_minute,
                 execution_mode=self.execution_mode,
                 force_close_end=False,
                 snapshot_source=self.snapshot_source,
+                daily_df=_daily,
             )
 
         self._state = result.state

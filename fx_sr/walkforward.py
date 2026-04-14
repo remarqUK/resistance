@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import time
@@ -11,9 +12,9 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from .execution import build_execution_plan, build_modeled_execution_quote
+from .execution import build_execution_plan, build_modeled_execution_quote, historical_execution_quote
 from .ibkr import ExecutionQuote
-from .levels import SRZone
+from .levels import SRZone, detect_zones
 from .strategy import (
     Signal,
     StrategyParams,
@@ -208,6 +209,59 @@ def slice_daily_window(
     return bounded.tail(zone_history_days)
 
 
+def make_zone_provider(daily_df, zone_history_days, *, cache=None):
+    """Shared zone_provider factory. Pass cache={} for per-date memoisation."""
+
+    if cache is None:
+        cache = {}
+
+    def zone_provider(current_time, current_date, _bar_index):
+        key = str(current_date)
+        if key in cache:
+            return cache[key]
+        bar_date = pd.Timestamp(current_date)
+        if hasattr(current_time, 'tzinfo') and current_time.tzinfo:
+            bar_date = bar_date.tz_localize(current_time.tzinfo)
+        daily_window = slice_daily_window(daily_df, bar_date, zone_history_days)
+        if len(daily_window) < 20:
+            zones = []
+        else:
+            zones = detect_zones(daily_window)
+        cache[key] = zones
+        return zones
+
+    return zone_provider
+
+
+def make_precomputed_zone_provider(zone_cache, pair):
+    """Zone provider that reads from a pre-computed zone_cache dict."""
+
+    def zone_provider(_current_time, current_date, _bar_index):
+        return zone_cache.get((pair, str(current_date)), [])
+
+    return zone_provider
+
+
+def make_execution_quote_provider(params, minute_df, l2_snapshots):
+    """Shared execution_quote_provider factory."""
+
+    def execution_quote_provider(signal, submit_time, _bar_index, row):
+        return historical_execution_quote(
+            signal.pair,
+            submit_time,
+            params,
+            minute_df=minute_df,
+            l2_snapshots=l2_snapshots,
+            allow_h1_fallback=(
+                not params.strict_backtest_execution
+                and params.allow_h1_execution_fallback
+            ),
+            fallback_mid_price=float(row['Open']),
+        )
+
+    return execution_quote_provider
+
+
 def finalize_trade(
     trade: Trade,
     exit_time,
@@ -259,6 +313,87 @@ class WalkForwardBar:
     bars_held: int
 
 
+def _compute_params_hash(params: StrategyParams, pair: str, execution_mode: str) -> str:
+    """Fingerprint every strategy field plus pair/execution_mode.
+
+    Uses dataclasses.asdict so new fields are automatically included.
+    """
+
+    d = asdict(params)
+    # Sort keys for determinism, stringify values.
+    raw = f'{pair}|{execution_mode}|' + '|'.join(
+        f'{k}={d[k]}' for k in sorted(d)
+    )
+    return hashlib.blake2b(raw.encode(), digest_size=8).hexdigest()
+
+
+def _compute_daily_hash(daily_df: pd.DataFrame | None) -> str:
+    """Fingerprint daily data used for zone generation."""
+
+    if daily_df is None or daily_df.empty:
+        return ''
+    h = hashlib.blake2b(digest_size=8)
+    h.update(f'{len(daily_df)}'.encode())
+    h.update(str(daily_df.index[0]).encode())
+    h.update(str(daily_df.index[-1]).encode())
+    # Hash last few closes — catches corrections without iterating all rows.
+    tail = daily_df.tail(min(10, len(daily_df)))
+    for v in tail['Close'].values:
+        h.update(f'{float(v):.6f}'.encode())
+    return h.hexdigest()
+
+
+def _compute_minute_hash(minute_df: pd.DataFrame | None) -> str:
+    """Fingerprint minute data used for intrabar exit/execution resolution."""
+
+    if minute_df is None or minute_df.empty:
+        return ''
+    h = hashlib.blake2b(digest_size=8)
+    h.update(f'{len(minute_df)}'.encode())
+    h.update(str(minute_df.index[0]).encode())
+    h.update(str(minute_df.index[-1]).encode())
+    tail = minute_df.tail(min(20, len(minute_df)))
+    for v in tail['Close'].values:
+        h.update(f'{float(v):.6f}'.encode())
+    return h.hexdigest()
+
+
+def _compute_prefix_hash(hourly_df: pd.DataFrame, n_bars: int) -> str:
+    """Compute a digest over the full index + OHLC of the first n_bars."""
+
+    if n_bars <= 0 or hourly_df.empty:
+        return ''
+    prefix = hourly_df.iloc[:n_bars]
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f'{len(prefix)}'.encode())
+    for ts in prefix.index:
+        h.update(str(ts).encode())
+    for col in ('Open', 'High', 'Low', 'Close'):
+        if col in prefix.columns:
+            for v in prefix[col].values:
+                h.update(f'{float(v):.6f}'.encode())
+    return h.hexdigest()
+
+
+@dataclass
+class WalkForwardState:
+    """Resumable checkpoint of the mutable walk-forward loop variables."""
+
+    trades: list[Trade]
+    current_trade: Optional[Trade]
+    pending_signal: Optional[Signal]
+    pending_signal_submit_time: Optional[pd.Timestamp]
+    current_zones: list[SRZone]
+    last_zone_date: object
+    trade_entry_bar: int
+    bars_processed: int
+    last_bar_time: pd.Timestamp
+    prefix_hash: str = ''
+    params_hash: str = ''
+    daily_hash: str = ''
+    minute_hash: str = ''
+
+
 @dataclass(frozen=True)
 class WalkForwardResult:
     """Outcome of a shared walk-forward execution run."""
@@ -266,6 +401,7 @@ class WalkForwardResult:
     trades: list[Trade]
     zones: list[SRZone]
     open_trade: Optional[Trade]
+    state: Optional[WalkForwardState] = None
 
 
 def _next_bar_submit_time(bar_time: pd.Timestamp) -> pd.Timestamp:
@@ -346,6 +482,8 @@ def run_walk_forward(
     is_entry_blocked: Callable[[pd.Timestamp], bool] | None = None,
     debug: bool = False,
     snapshot_source: str = '',
+    initial_state: WalkForwardState | None = None,
+    daily_df: pd.DataFrame | None = None,
 ) -> WalkForwardResult:
     """Run the shared per-bar execution loop for one pair.
 
@@ -396,20 +534,38 @@ def run_walk_forward(
         f'force_close_end={force_close_end}'
     )
 
-    trades: list[Trade] = []
-    current_trade: Optional[Trade] = None
-    pending_signal: Optional[Signal] = None
-    pending_signal_submit_time: Optional[pd.Timestamp] = None
-    current_zones: list[SRZone] = []
-    last_zone_date = None
-    trade_entry_bar = 0
+    start_bar = 0
+    if initial_state is not None:
+        trades = list(initial_state.trades)
+        current_trade = initial_state.current_trade
+        pending_signal = initial_state.pending_signal
+        pending_signal_submit_time = initial_state.pending_signal_submit_time
+        current_zones = list(initial_state.current_zones)
+        last_zone_date = initial_state.last_zone_date
+        trade_entry_bar = initial_state.trade_entry_bar
+        # Resolve start position from the checkpoint timestamp, not the bar
+        # count — this stays correct if bars are inserted before the checkpoint.
+        checkpoint_loc = hourly_df.index.get_loc(initial_state.last_bar_time)
+        if isinstance(checkpoint_loc, slice):
+            start_bar = checkpoint_loc.stop
+        else:
+            start_bar = int(checkpoint_loc) + 1
+    else:
+        trades = []
+        current_trade = None
+        pending_signal = None
+        pending_signal_submit_time = None
+        current_zones = []
+        last_zone_date = None
+        trade_entry_bar = 0
+
     minute_index = None
     if minute_df is not None and not minute_df.empty:
         if not minute_df.index.is_monotonic_increasing:
             minute_df = minute_df.sort_index()
         minute_index = minute_df.index
 
-    for i in range(len(hourly_df)):
+    for i in range(start_bar, len(hourly_df)):
         row = hourly_df.iloc[i]
         current_time = hourly_df.index[i]
         current_date = current_time.date() if hasattr(current_time, 'date') else current_time
@@ -947,4 +1103,84 @@ def run_walk_forward(
         f'pending_hits={pending_activations} blocked={blocked_signals}'
     )
 
-    return WalkForwardResult(trades=trades, zones=current_zones, open_trade=current_trade)
+    final_state = WalkForwardState(
+        trades=trades,
+        current_trade=current_trade,
+        pending_signal=pending_signal,
+        pending_signal_submit_time=pending_signal_submit_time,
+        current_zones=current_zones,
+        last_zone_date=last_zone_date,
+        trade_entry_bar=trade_entry_bar,
+        bars_processed=len(hourly_df),
+        last_bar_time=hourly_df.index[-1] if len(hourly_df) > 0 else pd.Timestamp.min,
+        prefix_hash=_compute_prefix_hash(hourly_df, len(hourly_df)),
+        params_hash=_compute_params_hash(params, pair, execution_mode),
+        daily_hash=_compute_daily_hash(daily_df),
+        minute_hash=_compute_minute_hash(minute_df),
+    )
+
+    return WalkForwardResult(trades=trades, zones=current_zones, open_trade=current_trade, state=final_state)
+
+
+def resume_walk_forward(
+    state: WalkForwardState,
+    hourly_df: pd.DataFrame,
+    **kwargs,
+) -> WalkForwardResult:
+    """Resume a walk-forward from a saved checkpoint.
+
+    ``hourly_df`` must overlap with the checkpoint — ``state.last_bar_time``
+    must be present in its index.  Only bars after the checkpoint are processed.
+
+    Raises ``ValueError`` if the prefix has changed since the checkpoint was
+    taken (e.g. bars backfilled before the checkpoint).  Callers should catch
+    this and fall back to a full replay.
+    """
+
+    if state.last_bar_time not in hourly_df.index:
+        raise ValueError(
+            f'Cannot resume: checkpoint bar {state.last_bar_time} not in hourly_df index'
+        )
+
+    # Validate that the bars before the checkpoint haven't changed.
+    if state.prefix_hash:
+        checkpoint_loc = hourly_df.index.get_loc(state.last_bar_time)
+        n_prefix = (checkpoint_loc.stop if isinstance(checkpoint_loc, slice) else int(checkpoint_loc)) + 1
+        current_hash = _compute_prefix_hash(hourly_df, n_prefix)
+        if current_hash != state.prefix_hash:
+            raise ValueError(
+                f'Cannot resume: prefix changed (saved={state.prefix_hash}, '
+                f'current={current_hash})'
+            )
+
+    # Validate that strategy params haven't changed.
+    if state.params_hash and 'pair' in kwargs and 'params' in kwargs:
+        current_params_hash = _compute_params_hash(
+            kwargs['params'], kwargs['pair'],
+            kwargs.get('execution_mode', 'intrabar'),
+        )
+        if current_params_hash != state.params_hash:
+            raise ValueError(
+                f'Cannot resume: params changed (saved={state.params_hash}, '
+                f'current={current_params_hash})'
+            )
+
+    # Validate that daily data (zone source) hasn't changed.
+    if state.daily_hash and 'daily_df' in kwargs:
+        current_daily_hash = _compute_daily_hash(kwargs['daily_df'])
+        if current_daily_hash != state.daily_hash:
+            raise ValueError(
+                f'Cannot resume: daily data changed (saved={state.daily_hash}, '
+                f'current={current_daily_hash})'
+            )
+
+    # Validate that minute data (exit timing / execution quotes) hasn't changed.
+    if state.minute_hash and 'minute_df' in kwargs:
+        current_minute_hash = _compute_minute_hash(kwargs['minute_df'])
+        if current_minute_hash != state.minute_hash:
+            raise ValueError(
+                f'Cannot resume: minute data changed (saved={state.minute_hash}, '
+                f'current={current_minute_hash})'
+            )
+
+    return run_walk_forward(hourly_df, initial_state=state, **kwargs)

@@ -162,6 +162,8 @@ class LiveDashboardHub:
         self._position_snapshots: dict[str, dict] = {}
         self._alerts: deque[dict] = deque(maxlen=ALERT_LIMIT)
         self._early_exit_active: dict[str, dict] = {}  # pair:direction -> alert dict, cleared when price recovers
+        self._inflight_close_orders: dict[str, tuple[int, str, str | None, float | None]] = {}  # key -> (order_id, exit_reason, signal_id, exit_price)
+        self._inflight_miss_counts: dict[str, int] = {}  # key -> consecutive housekeeping cycles where order was invisible
         self._execution_results = deque(maxlen=EXECUTION_LIMIT)
         self._last_quotes: dict[str, float] = {}
         self._currency_balances: dict[str, float] = {}
@@ -2099,28 +2101,24 @@ class LiveDashboardHub:
                 await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
             return
 
-        exit_signal_writes: list[tuple[str, str, float | None]] = []
+        _VIABLE_ORDER_STATUSES = {'Submitted', 'Filled', 'PreSubmitted'}
+
+        # Separate bracket-managed exits (TP/SL) from exits that need a
+        # market close order.  Only mark handled / persist after confirmation.
+        bracket_exits: list[tuple[str, str, str, float | None]] = []  # (key, signal_id, reason, price)
+        close_exits: list[tuple[str, str, str, str, int, str | None, float | None]] = []  # (key, pair, dir, reason, size, signal_id, price)
         async with self._lock:
-            # --- Tick exit checks (inline — pure float math, no I/O) ---
             tick_alerts = self._scanner.check_tick_exits(pair, price, self._tracked)
-            alerted_keys = {f"{a['pair']}:{a['direction']}" for a in tick_alerts}
 
             for alert in tick_alerts:
                 alert_key = f"{alert['pair']}:{alert['direction']}"
-                if alert['exit_reason'] == 'EARLY_EXIT':
-                    # Dynamic: show while price is at/past threshold, clear when it recovers
-                    if alert_key not in self._early_exit_active:
-                        self._early_exit_active[alert_key] = alert
-                        self._append_log(
-                            'warning',
-                            f"Tick exit: {alert['pair']} {alert['direction']} "
-                            f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
-                        )
-                        positions_changed = True
-                else:
-                    # TP/SL: historical, one-time
-                    if alert_key in self._tick_exit_alerted:
-                        continue
+                if alert_key in self._tick_exit_alerted:
+                    continue
+                info = self._tracked.get(alert_key)
+                signal_id = info.get('signal_id') if info else None
+
+                if alert['exit_reason'] in ('TP', 'SL'):
+                    # Bracket-managed: IBKR handles the fill, just record it.
                     self._tick_exit_alerted.add(alert_key)
                     self._alerts.append(alert)
                     self._append_log(
@@ -2128,24 +2126,35 @@ class LiveDashboardHub:
                         f"Tick exit: {alert['pair']} {alert['direction']} "
                         f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
                     )
-                    info = self._tracked.get(alert_key)
-                    if info and info.get('signal_id'):
-                        exit_signal_writes.append(
-                            (info['signal_id'], alert['exit_reason'], alert['exit_price'])
-                        )
+                    if signal_id:
+                        bracket_exits.append((alert_key, signal_id, alert['exit_reason'], alert['exit_price']))
                     positions_changed = True
-
-            # Clear early exit alerts for tracked positions on this pair that have recovered
-            for key in list(self._early_exit_active):
-                if key.startswith(f"{pair}:") and key not in alerted_keys:
-                    del self._early_exit_active[key]
-                    positions_changed = True
+                else:
+                    # Non-bracket: needs a market close order.
+                    # Set in-flight guard AND placeholder in _inflight_close_orders
+                    # before releasing the lock, so housekeeping preserves both.
+                    size = int(abs(float(info.get('ibkr_size') or 0.0))) if info else 0
+                    if size > 0:
+                        self._tick_exit_alerted.add(alert_key)
+                        self._inflight_close_orders[alert_key] = (
+                            0, alert['exit_reason'], signal_id, alert['exit_price'],
+                        )  # order_id=0 placeholder, updated after broker call
+                        close_exits.append((
+                            alert_key, alert['pair'], alert['direction'],
+                            alert['exit_reason'], size, signal_id, alert['exit_price'],
+                        ))
+                    self._append_log(
+                        'warning',
+                        f"Tick exit: {alert['pair']} {alert['direction']} "
+                        f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
+                    )
 
             summary = dict(self.summary)
             row_payload = self._serialize_pair_row(updated_row) if updated_row is not None else None
             position_payload = self._export_position_state() if positions_changed else None
 
-        for signal_id, exit_reason, exit_price in exit_signal_writes:
+        # Process bracket exits (TP/SL) — persist immediately.
+        for _key, signal_id, exit_reason, exit_price in bracket_exits:
             await self._loop.run_in_executor(
                 self._scan_executor,
                 lambda sid=signal_id: cancel_bracket_children(sid),
@@ -2155,6 +2164,67 @@ class LiveDashboardHub:
                     s, exit_reason=r, exit_price=p,
                 )
             )
+
+        # Process non-bracket exits — persist intent first (crash-safe), then
+        # cancel brackets and submit close.  On failure, clear the persisted intent.
+        for alert_key, close_pair, close_dir, exit_reason, close_size, signal_id, exit_price in close_exits:
+            # Persist exit intent BEFORE broker call so a crash mid-close
+            # seeds _tick_exit_alerted on restart and prevents duplicates.
+            if signal_id:
+                await enqueue_write_async(
+                    lambda s=signal_id, r=exit_reason, p=exit_price: record_exit_signal(
+                        s, exit_reason=r, exit_price=p,
+                    )
+                )
+                await self._loop.run_in_executor(
+                    self._scan_executor,
+                    lambda sid=signal_id: cancel_bracket_children(sid),
+                )
+            opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
+            ref = f'fxsr:{exit_reason.lower()}:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
+            order = await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda p=close_pair, d=opp, s=close_size, r=ref: ibkr.submit_fx_market_order(
+                    pair=p, direction=d, quantity=s, order_ref=r,
+                ),
+            )
+            order_status = order.get('status') if order else None
+            order_id = order.get('order_id') if order else None
+            if order is not None and order_status in _VIABLE_ORDER_STATUSES:
+                async with self._lock:
+                    # Replace placeholder with real order ID.
+                    self._inflight_close_orders[alert_key] = (
+                        order_id or 0, exit_reason, signal_id, exit_price,
+                    )
+                    self._alerts.append({
+                        'pair': close_pair, 'direction': close_dir,
+                        'exit_reason': exit_reason, 'exit_price': exit_price,
+                        'source': 'tick',
+                    })
+                    self._append_log(
+                        'info',
+                        f'{exit_reason} close submitted: {close_pair} {close_dir} size={close_size} order={order_id} status={order_status}',
+                    )
+                    positions_changed = True
+            else:
+                # Close failed — remove placeholder and guard so next tick retries.
+                async with self._lock:
+                    self._inflight_close_orders.pop(alert_key, None)
+                    self._tick_exit_alerted.discard(alert_key)
+                    # Clear pending_exit_reason so restart doesn't suppress retries.
+                    info = self._tracked.get(alert_key)
+                    if info:
+                        info.pop('pending_exit_reason', None)
+                        info.pop('pending_exit_price', None)
+                        info.pop('pending_exit_detected_at', None)
+                    self._append_log(
+                        'error',
+                        f'{exit_reason} close REJECTED: {close_pair} {close_dir} size={close_size} status={order_status} — will retry',
+                    )
+
+        # Nudge housekeeping to confirm fills and persist exit signals.
+        if close_exits:
+            self._housekeeping_nudge.set()
 
         if positions_changed and position_payload is not None:
             await self._broadcast({'type': 'positions_update', **position_payload})
@@ -2562,6 +2632,9 @@ class LiveDashboardHub:
         last_bar = hourly_df.iloc[-1]
         completed_close = float(last_bar['Close'])
 
+        bar_close_orders: list[tuple[str, str, str, str, int, str | None, float | None]] = []
+        bracket_exits_to_persist: list[tuple[str, str, float | None]] = []
+        _noop_exit_cb = lambda *a, **kw: None
         async with self._lock:
             self._append_log('info', f'Hourly bar complete: {pair} @ {completed_time}')
 
@@ -2572,37 +2645,112 @@ class LiveDashboardHub:
                         continue
                     if key in self._tick_exit_alerted:
                         continue
+                    # For non-bracket exits, suppress the DB write inside
+                    # process_hourly_exit_bars — we only persist after the
+                    # close order is confirmed.
+                    exit_reason_preview = None
                     alert = process_hourly_exit_bars(
                         info,
                         hourly_df.tail(1),
                         self.params,
                         count_initial_unseen_bar=True,
+                        record_exit_callback=_noop_exit_cb,
                     )
                     if alert:
-                        alert = {
-                            'pair': pair,
-                            'direction': alert['direction'],
-                            'exit_reason': alert['exit_reason'],
-                            'exit_price': alert['exit_price'],
-                            'entry_price': alert['entry_price'],
-                            'current_price': alert['current_price'],
-                            'pnl_pips': alert['pnl_pips'],
-                            'bars_monitored': alert['bars_monitored'],
-                            'source': 'hourly',
-                        }
-                        self._tick_exit_alerted.add(key)
-                        self._alerts.append(alert)
+                        exit_reason = alert['exit_reason']
+                        exit_price = alert['exit_price']
                         self._append_log(
                             'warning',
-                            f"Bar exit: {pair} {alert['direction']} {alert['exit_reason']} @ {alert['exit_price']:.5f}",
+                            f"Bar exit: {pair} {alert['direction']} {exit_reason} @ {exit_price:.5f}",
                         )
-                        # Nudge housekeeping — bracket likely filled or about to
-                        self._housekeeping_nudge.set()
+                        if exit_reason in ('TP', 'SL'):
+                            # Bracket-managed — mark handled, persist after lock.
+                            self._tick_exit_alerted.add(key)
+                            self._alerts.append({**alert, 'source': 'hourly'})
+                            sig_id = info.get('signal_id')
+                            if sig_id:
+                                bracket_exits_to_persist.append((sig_id, exit_reason, exit_price))
+                            self._housekeeping_nudge.set()
+                        else:
+                            # Needs market close — set in-flight guard, defer
+                            # persist until confirmed.  Do NOT nudge housekeeping
+                            # here — it would rebuild _tick_exit_alerted from DB
+                            # and clear the in-flight guard before the close order
+                            # is confirmed.
+                            signal_id = info.get('signal_id')
+                            size = int(abs(float(info.get('ibkr_size') or 0.0)))
+                            if size > 0:
+                                self._tick_exit_alerted.add(key)
+                                self._inflight_close_orders[key] = (
+                                    0, exit_reason, signal_id, exit_price,
+                                )  # placeholder, updated after broker call
+                                bar_close_orders.append((
+                                    key, pair, alert['direction'],
+                                    exit_reason, size, signal_id, exit_price,
+                                ))
 
             tracked_copy = dict(self._tracked)
             blocked = set(self._tick_pending_pairs)
             current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
             current_price = self._last_quotes.get(pair, completed_close)
+
+        # Persist bracket (TP/SL) exits outside the lock.
+        for sig_id, exit_reason, exit_price in bracket_exits_to_persist:
+            await enqueue_write_async(
+                lambda s=sig_id, r=exit_reason, p=exit_price: record_exit_signal(
+                    s, exit_reason=r, exit_price=p,
+                )
+            )
+
+        # Persist intent, cancel brackets, submit market close for non-TP/SL exits.
+        _VIABLE = {'Submitted', 'Filled', 'PreSubmitted'}
+        for alert_key, close_pair, close_dir, exit_reason, close_size, sig_id, exit_price in bar_close_orders:
+            if sig_id:
+                await enqueue_write_async(
+                    lambda s=sig_id, r=exit_reason, p=exit_price: record_exit_signal(
+                        s, exit_reason=r, exit_price=p,
+                    )
+                )
+                await self._loop.run_in_executor(
+                    self._scan_executor,
+                    lambda sid=sig_id: cancel_bracket_children(sid),
+                )
+            opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
+            ref = f'fxsr:{exit_reason.lower()}:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
+            order = await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda p=close_pair, d=opp, s=close_size, r=ref: ibkr.submit_fx_market_order(
+                    pair=p, direction=d, quantity=s, order_ref=r,
+                ),
+            )
+            order_status = order.get('status') if order else None
+            order_id = order.get('order_id') if order else None
+            if order is not None and order_status in _VIABLE:
+                async with self._lock:
+                    # Replace placeholder with real order ID.
+                    self._inflight_close_orders[alert_key] = (
+                        order_id or 0, exit_reason, sig_id, exit_price,
+                    )
+                    self._alerts.append({
+                        'pair': close_pair, 'direction': close_dir,
+                        'exit_reason': exit_reason, 'exit_price': exit_price,
+                        'source': 'hourly',
+                    })
+                    self._append_log('info', f'{exit_reason} close submitted: {close_pair} {close_dir} size={close_size} order={order_id} status={order_status}')
+            else:
+                async with self._lock:
+                    self._inflight_close_orders.pop(alert_key, None)
+                    self._tick_exit_alerted.discard(alert_key)
+                    # Clear pending_exit_reason so restart doesn't suppress retries.
+                    info = self._tracked.get(alert_key)
+                    if info:
+                        info.pop('pending_exit_reason', None)
+                        info.pop('pending_exit_price', None)
+                        info.pop('pending_exit_detected_at', None)
+                    self._append_log('error', f'{exit_reason} close REJECTED: {close_pair} {close_dir} status={order_status} — will retry')
+
+        if bar_close_orders:
+            self._housekeeping_nudge.set()
 
         updated_row, signal, wf_signals = await self._loop.run_in_executor(
             self._scan_executor,
@@ -3205,7 +3353,11 @@ class LiveDashboardHub:
                     self._append_or_merge_execution_result(closed_execution)
             self._portfolio_state.sync_balance(self.balance)
             self._tick_pending_pairs = set()
-            self._tick_exit_alerted = set()
+            self._tick_exit_alerted = (
+                (self._tick_exit_alerted & set(self._tracked))
+                | {k for k, info in self._tracked.items() if info.get('pending_exit_reason')}
+                | set(self._inflight_close_orders)
+            )
             self._early_exit_active = {}
             self._backfill_done = True
             self._append_log('success', f'Backfill complete: {len(pair_rows)} pairs, {len(signals)} signals')
@@ -3222,6 +3374,20 @@ class LiveDashboardHub:
                         f'  WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
                         f'@ {ws.time}{exit_label}',
                     )
+            # Identify positions with a persisted exit intent but no in-flight
+            # close order — these were interrupted mid-close before the last shutdown.
+            stale_exits: list[tuple[str, str, str, int, str | None, float | None]] = []
+            for key, info in self._tracked.items():
+                reason = info.get('pending_exit_reason')
+                if reason and reason not in ('TP', 'SL') and key not in self._inflight_close_orders:
+                    size = int(abs(float(info.get('ibkr_size') or 0.0)))
+                    if size > 0:
+                        stale_exits.append((
+                            key, info['pair'], info['trade'].direction,
+                            size, info.get('signal_id'),
+                            info.get('pending_exit_price'),
+                        ))
+
             self.summary = self._build_summary(status='live')
             state = self._export_state()
 
@@ -3230,6 +3396,49 @@ class LiveDashboardHub:
             'success',
             f'Startup backfill complete: {len(pair_rows)} pairs, {len(signals)} signals.',
         )
+
+        # Resubmit close orders for positions with stale exit intents.
+        _VIABLE_RECOVERY = {'Submitted', 'Filled', 'PreSubmitted'}
+        for alert_key, close_pair, close_dir, close_size, sig_id, exit_price in stale_exits:
+            opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
+            ref = f'fxsr:recovery:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
+            if sig_id:
+                await self._loop.run_in_executor(
+                    self._scan_executor,
+                    lambda sid=sig_id: cancel_bracket_children(sid),
+                )
+            order = await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda p=close_pair, d=opp, s=close_size, r=ref: ibkr.submit_fx_market_order(
+                    pair=p, direction=d, quantity=s, order_ref=r,
+                ),
+            )
+            order_status = order.get('status') if order else None
+            order_id = order.get('order_id') if order else None
+            if order is not None and order_status in _VIABLE_RECOVERY:
+                async with self._lock:
+                    self._inflight_close_orders[alert_key] = (
+                        order_id or 0, 'RECOVERY', sig_id, exit_price,
+                    )
+                    self._append_log(
+                        'info',
+                        f'Recovery close submitted: {close_pair} {close_dir} size={close_size} order={order_id}',
+                    )
+            else:
+                async with self._lock:
+                    # Failed to resubmit — clear the stale guard so live exit logic retries.
+                    self._tick_exit_alerted.discard(alert_key)
+                    info = self._tracked.get(alert_key)
+                    if info:
+                        info.pop('pending_exit_reason', None)
+                        info.pop('pending_exit_price', None)
+                        info.pop('pending_exit_detected_at', None)
+                    self._append_log(
+                        'warning',
+                        f'Recovery close REJECTED for {close_pair} {close_dir} — releasing for live retry',
+                    )
+        if stale_exits:
+            self._housekeeping_nudge.set()
 
     async def _housekeeping_loop(self) -> None:
         """Low-frequency periodic tasks: position sync, zone refresh, balance."""
@@ -3245,6 +3454,14 @@ class LiveDashboardHub:
             try:
                 async with self._lock:
                     price_hints = dict(self._last_quotes)
+                    # Build per-pair close order ID mapping for bracket resubmission.
+                    _exclude_by_pair: dict[str, set[int]] = {}
+                    _exclude_oids: set[int] = set()
+                    for key, (oid, _, _, _) in self._inflight_close_orders.items():
+                        if oid and oid != 0:
+                            _exclude_oids.add(oid)
+                            pair_part = key.split(':')[0] if ':' in key else key
+                            _exclude_by_pair.setdefault(pair_part, set()).add(oid)
 
                 def _housekeeping():
                     # Position sync
@@ -3256,6 +3473,8 @@ class LiveDashboardHub:
                             self.params,
                             self.zone_history_days,
                             on_signal_closed=closed_rows.append,
+                            exclude_order_ids=_exclude_oids,
+                            exclude_close_order_ids_by_pair=_exclude_by_pair,
                         )
 
                     # Daily zone refresh
@@ -3316,12 +3535,96 @@ class LiveDashboardHub:
                                 self._append_or_merge_execution_result(closed_execution)
                     self._portfolio_state.sync_balance(self.balance)
                     self._tick_pending_pairs = set()
-                    self._tick_exit_alerted = set()
+                    self._tick_exit_alerted = (
+                        (self._tick_exit_alerted & set(self._tracked))
+                        | {k for k, info in self._tracked.items() if info.get('pending_exit_reason')}
+                    )
+                    # Also preserve in-flight guard keys.
+                    self._tick_exit_alerted |= set(self._inflight_close_orders)
                     self._early_exit_active = {}
                     self._daily_closed_pnl = daily_closed_pnl
                     self._apply_live_quotes()
-                    self.summary = self._build_summary(status='live')
+
+                    # Monitor in-flight close orders.
+                    # Only position disappearance from _tracked is a confirmed fill.
+                    # Order disappearance alone is ambiguous (could be cancel/disconnect).
+                    confirmed_fills: list[tuple[str, str | None, float | None]] = []
+                    inflight_to_check = dict(self._inflight_close_orders)
+
+                # Check each in-flight close outside the lock (broker I/O).
+                for key, (oid, reason, sig_id, price) in inflight_to_check.items():
+                    async with self._lock:
+                        if key not in self._tracked:
+                            # Position gone from IBKR — this is the only
+                            # positive fill confirmation we trust.
+                            self._inflight_close_orders.pop(key, None)
+                            self._inflight_miss_counts.pop(key, None)
+                            if sig_id:
+                                confirmed_fills.append((reason, sig_id, price))
+                            self._append_log('info', f'Close fill confirmed (position flat): {key} reason={reason}')
+                            continue
+
+                    # Position still open — check order status.
+                    if oid is not None:
+                        statuses = await self._loop.run_in_executor(
+                            self._scan_executor,
+                            lambda o=oid: ibkr.fetch_order_statuses({o}),
+                        )
+                        if statuses is None:
+                            # Transport/connectivity error — keep in-flight,
+                            # don't count as a miss.  Will retry next cycle.
+                            continue
+                        order_status = statuses.get(oid)
+                        if order_status in ('Cancelled', 'ApiCancelled', 'Inactive'):
+                            # Order explicitly dead — release for retry.
+                            async with self._lock:
+                                self._inflight_close_orders.pop(key, None)
+                                self._inflight_miss_counts.pop(key, None)
+                                self._tick_exit_alerted.discard(key)
+                                tracked_info = self._tracked.get(key)
+                                if tracked_info:
+                                    tracked_info.pop('pending_exit_reason', None)
+                                    tracked_info.pop('pending_exit_price', None)
+                                    tracked_info.pop('pending_exit_detected_at', None)
+                                self._append_log(
+                                    'warning',
+                                    f'Close order {oid} {order_status} for {key} — releasing for retry',
+                                )
+                        elif order_status is None:
+                            # Order invisible, position still open.  Could be
+                            # connectivity blip or a silently failed order.
+                            # Release after 3 consecutive misses.
+                            misses = self._inflight_miss_counts.get(key, 0) + 1
+                            self._inflight_miss_counts[key] = misses
+                            if misses >= 3:
+                                async with self._lock:
+                                    self._inflight_close_orders.pop(key, None)
+                                    self._inflight_miss_counts.pop(key, None)
+                                    self._tick_exit_alerted.discard(key)
+                                    tracked_info = self._tracked.get(key)
+                                    if tracked_info:
+                                        tracked_info.pop('pending_exit_reason', None)
+                                        tracked_info.pop('pending_exit_price', None)
+                                        tracked_info.pop('pending_exit_detected_at', None)
+                                    self._append_log(
+                                        'warning',
+                                        f'Close order {oid} invisible for {misses} cycles, position {key} still open — releasing for retry',
+                                    )
+                        else:
+                            # Order still working (Submitted/PreSubmitted) — reset miss counter.
+                            self._inflight_miss_counts.pop(key, None)
+
+                async with self._lock:
+                    self.summary = self._build_summary(status=self.summary.get('status', 'live'))
                     state = self._export_state()
+
+                # Persist exit signals for confirmed fills outside the lock.
+                for reason, sig_id, price in confirmed_fills:
+                    await enqueue_write_async(
+                        lambda s=sig_id, r=reason, p=price: record_exit_signal(
+                            s, exit_reason=r, exit_price=p,
+                        )
+                    )
 
                 await self._broadcast({'type': 'snapshot', 'state': state})
 

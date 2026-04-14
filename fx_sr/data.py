@@ -663,6 +663,34 @@ def _provider_confirms_unfillable_gap(
     return not earlier.empty and not later.empty
 
 
+def effective_cached_bar_count(
+    ticker_symbol: str,
+    interval: str,
+    *,
+    cached_range: tuple[str, str, int] | None,
+    requested_days: int,
+    now: pd.Timestamp | None = None,
+) -> int:
+    """Return the number of cached bars within the requested trailing window.
+
+    Queries the DB with window bounds so old history outside the window
+    doesn't inflate the count.
+    """
+
+    if cached_range is None or requested_days <= 0:
+        return 0
+    now_ts = _as_utc(now or pd.Timestamp.now(tz='UTC'))
+    window_start = (now_ts - pd.Timedelta(days=requested_days)).to_pydatetime()
+    windowed = get_cached_range(
+        ticker_symbol, interval,
+        start=window_start,
+        end=now_ts.to_pydatetime(),
+    )
+    if windowed is None:
+        return 0
+    return int(windowed[2])
+
+
 def _remaining_days_to_fetch(
     *,
     interval: str,

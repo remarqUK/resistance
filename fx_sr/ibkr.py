@@ -1546,6 +1546,38 @@ def fetch_open_order_pairs() -> set[str]:
     return set(fetch_open_order_counts().keys())
 
 
+def fetch_order_statuses(order_ids: set[int]) -> dict[int, str] | None:
+    """Return {order_id: status_string} for the requested IDs.
+
+    Only returns entries for IDs that appear in the current open-orders list.
+    Missing IDs mean the order is no longer visible (filled and cleared, or
+    never existed).
+
+    Returns ``None`` on connectivity/transport failure (distinguishable from
+    an empty dict which means "query succeeded, no matching orders").
+    """
+
+    if not order_ids:
+        return {}
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return None
+
+        try:
+            trades = ib.reqAllOpenOrders()
+            result: dict[int, str] = {}
+            for trade in trades:
+                oid = getattr(getattr(trade, 'order', None), 'orderId', None)
+                if oid is not None and oid in order_ids:
+                    status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
+                    result[oid] = status
+            return result
+        except Exception:
+            return None
+
+
 def fetch_fx_fills(
     order_ids: Optional[set[int]] = None,
     *,

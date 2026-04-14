@@ -58,8 +58,16 @@ def cancel_bracket_children(signal_id: str | None) -> set[int]:
 
 
 
-def _cancel_orders_for_pairs(pairs: set[str]) -> None:
-    """Cancel all working orders for the given pairs at IBKR."""
+def _cancel_orders_for_pairs(pairs: set[str], *, exclude_order_ids: set[int] | None = None, exclude_order_ids_by_pair: dict[str, set[int]] | None = None) -> None:
+    """Cancel all working orders for the given pairs at IBKR.
+
+    ``exclude_order_ids``: order IDs to skip (e.g. in-flight close orders).
+    ``exclude_order_ids_by_pair``: pair→set of order IDs to skip (preferred).
+    """
+    exclude = set(exclude_order_ids or set())
+    if exclude_order_ids_by_pair:
+        for p in pairs:
+            exclude |= exclude_order_ids_by_pair.get(p, set())
     with ibkr._IBKR_LOCK:
         ib, connected = ibkr._get_connection()
         if not connected:
@@ -74,7 +82,7 @@ def _cancel_orders_for_pairs(pairs: set[str]) -> None:
                 pair_id = ibkr._contract_to_pair(getattr(trade, 'contract', None))
                 if pair_id in pairs:
                     oid = getattr(getattr(trade, 'order', None), 'orderId', None)
-                    if oid is not None:
+                    if oid is not None and oid not in exclude:
                         cancel_ids.add(int(oid))
             if cancel_ids:
                 ibkr.cancel_orders(cancel_ids)
@@ -777,6 +785,7 @@ def _resubmit_missing_brackets(
     pair: str | None = None,
     direction: str | None = None,
     open_order_counts: dict[str, int] | None = None,
+    exclude_order_ids: set[int] | None = None,
 ) -> None:
     """Resubmit TP/SL bracket orders if the originals were lost (e.g. gateway restart).
 
@@ -798,9 +807,16 @@ def _resubmit_missing_brackets(
     # A single surviving leg (e.g. SL only after TP was rejected) means
     # the position is only partially protected — cancel the orphan and
     # resubmit both legs as a fresh OCA pair.
+    #
+    # Subtract in-flight close orders from the count — they aren't bracket
+    # legs and shouldn't mask a missing TP or SL.
     if open_order_counts is None:
         open_order_counts = ibkr.fetch_open_order_counts()
     order_count = open_order_counts.get(pair, 0)
+    if exclude_order_ids:
+        # exclude_order_ids now contains only IDs for THIS pair (the caller
+        # resolves per-pair).  Subtract them from the count.
+        order_count = max(0, order_count - len(exclude_order_ids))
     if order_count >= 2:
         _BRACKET_RESUBMIT_FAILURES.pop(pair, None)  # reset on success
         return  # Both bracket legs present — nothing to do
@@ -817,7 +833,7 @@ def _resubmit_missing_brackets(
 
     if order_count == 1:
         print(f"    {pair}: only {order_count} bracket leg found, cancelling orphan and resubmitting both")
-        _cancel_orders_for_pairs({pair})
+        _cancel_orders_for_pairs({pair}, exclude_order_ids=exclude_order_ids)
 
     # Resolve TP/SL prices: signal row first, then trade fallback
     tp_price = None
@@ -884,6 +900,8 @@ def sync_positions(
     params: StrategyParams = None,
     zone_history_days: int = DEFAULT_ZONE_HISTORY_DAYS,
     on_signal_closed: Callable[[dict], None] | None = None,
+    exclude_order_ids: set[int] | None = None,
+    exclude_close_order_ids_by_pair: dict[str, set[int]] | None = None,
 ) -> Dict[str, dict]:
     """Synchronize DB-tracked trades with live IBKR positions.
 
@@ -1038,6 +1056,7 @@ def sync_positions(
         # --- Bracket resubmission for orphaned positions ---
         # Run for ALL positions (including newly detected ones after a crash/restart)
         # to ensure every live position has bracket protection.
+        pair_close_ids = (exclude_close_order_ids_by_pair or {}).get(pos['pair'], set())
         _resubmit_missing_brackets(
             signal_row,
             ibkr_size=pos['size'],
@@ -1045,6 +1064,7 @@ def sync_positions(
             pair=pos['pair'],
             direction=direction,
             open_order_counts=open_order_counts,
+            exclude_order_ids=pair_close_ids,
         )
 
         signal_status = signal_row.get('status') if signal_row is not None else (

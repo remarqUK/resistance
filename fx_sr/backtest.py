@@ -767,25 +767,10 @@ def run_backtest(
     pair_info = PAIRS.get(pair, {})
     pip = pair_info.get('pip', 0.0001)
 
-    def zone_provider(current_time, current_date, _bar_index):
-        bar_date = pd.Timestamp(current_date)
-        if hasattr(current_time, 'tzinfo') and current_time.tzinfo:
-            bar_date = bar_date.tz_localize(current_time.tzinfo)
-        daily_window = _slice_daily_window(daily_df, bar_date, zone_history_days)
-        if len(daily_window) < 20:
-            return []
-        return detect_zones(daily_window)
+    from .walkforward import make_zone_provider, make_execution_quote_provider
 
-    def execution_quote_provider(signal, submit_time, _bar_index, row):
-        return historical_execution_quote(
-            signal.pair,
-            submit_time,
-            params,
-            minute_df=minute_df,
-            l2_snapshots=l2_snapshots,
-            allow_h1_fallback=_allow_h1_fallback(params),
-            fallback_mid_price=float(row['Open']),
-        )
+    zone_provider = make_zone_provider(daily_df, zone_history_days)
+    execution_quote_provider = make_execution_quote_provider(params, minute_df, l2_snapshots)
 
     _dbg(f'step=walk_forward_start pair={pair} bars={len(hourly_df)} execution_mode={execution_mode}')
     t_walk = time.perf_counter()
@@ -1043,19 +1028,10 @@ def run_backtest_fast(
     Identical logic to run_backtest but looks up zones from zone_cache
     instead of calling detect_zones on each new day.
     """
-    def zone_provider(_current_time, current_date, _bar_index):
-        return zone_cache.get((pair, str(current_date)), [])
+    from .walkforward import make_precomputed_zone_provider, make_execution_quote_provider
 
-    def execution_quote_provider(signal, submit_time, _bar_index, row):
-        return historical_execution_quote(
-            signal.pair,
-            submit_time,
-            params,
-            minute_df=minute_df,
-            l2_snapshots=l2_snapshots,
-            allow_h1_fallback=_allow_h1_fallback(params),
-            fallback_mid_price=float(row['Open']),
-        )
+    zone_provider = make_precomputed_zone_provider(zone_cache, pair)
+    execution_quote_provider = make_execution_quote_provider(params, minute_df, l2_snapshots)
 
     def _dbg(message: str) -> None:
         if debug:

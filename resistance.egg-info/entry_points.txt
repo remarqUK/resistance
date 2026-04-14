@@ -1,0 +1,2 @@
+[console_scripts]
+trade = run:main

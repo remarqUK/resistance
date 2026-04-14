@@ -13,13 +13,12 @@ import pandas as pd
 from . import ibkr
 from .data import (
     _remaining_days_to_fetch,
+    _aligned_expected_bar_at_or_after,
+    _next_expected_bar_time,
     download_single_interval,
-    effective_cached_bar_count,
-    find_first_missing_bar,
-    find_first_missing_cached_bar,
     refill_interval_from,
 )
-from .db import get_cache_summary, init_db, load_ohlc
+from .db import get_cache_summary, init_db
 
 
 @dataclass(frozen=True)
@@ -56,8 +55,8 @@ def find_cache_gaps(
     cached = {}
     for _, row in summary.iterrows():
         cached[(row['ticker'], row['interval'])] = (
-            pd.Timestamp(row['first_ts']),
-            pd.Timestamp(row['last_ts']),
+            _coerce_utc(row['first_ts']),
+            _coerce_utc(row['last_ts']),
             int(row['bars']),
         )
 
@@ -78,14 +77,11 @@ def find_cache_gaps(
                 gaps.append((pair_id, ticker, iv))
                 continue
             first_ts, last_ts, bars = cached[(ticker, iv)]
-            effective_bars = effective_cached_bar_count(
-                ticker,
-                iv,
-                cached_range=(first_ts, last_ts, bars),
-                requested_days=effective_days[iv],
-                now=now_ts,
-            )
-            if effective_bars < min_bars[iv]:
+            requested_start = now_ts - pd.Timedelta(days=int(effective_days[iv]))
+            if first_ts > requested_start or last_ts < requested_start:
+                gaps.append((pair_id, ticker, iv))
+                continue
+            if bars < min_bars[iv]:
                 gaps.append((pair_id, ticker, iv))
                 continue
             if _remaining_days_to_fetch(
@@ -113,8 +109,24 @@ def find_cache_gap_work_items(
 
     now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
     max_days = target_days + max(0, daily_extra_days)
-    window_start = (now_ts - pd.Timedelta(days=max_days)).to_pydatetime()
-    window_end = now_ts.to_pydatetime()
+    summary = get_cache_summary()
+    cached = {
+        (row['ticker'], row['interval']): (
+            _coerce_utc(row['first_ts']),
+            _coerce_utc(row['last_ts']),
+            int(row['bars']),
+        )
+        for _, row in summary.iterrows()
+    }
+
+    start = now_ts - pd.Timedelta(days=int(max_days))
+    trading_days = len(pd.bdate_range(start.normalize(), now_ts.normalize(), freq='B'))
+    trading_day_ratio = 5 / 7
+    min_bars = {
+        '1d': max(1, int(trading_days * 0.9)),
+        '1h': int(target_days * 16),
+        '1m': int(target_days * 1000 * trading_day_ratio),
+    }
 
     coverage_gaps = set(
         (pair_id, interval)
@@ -138,18 +150,32 @@ def find_cache_gap_work_items(
         ticker = pair_info['ticker']
         pair_gaps = 0
         for interval in ('1d', '1h', '1m'):
-            cached = load_ohlc(ticker, interval, start=window_start, end=window_end)
-            if (pair_id, interval) in coverage_gaps:
-                gap_start = find_first_missing_bar(cached, interval, ticker_symbol=ticker, now=now_ts) if not cached.empty else None
-                work_items.append((pair_id, ticker, interval, gap_start))
-                pair_gaps += 1
+            if (pair_id, interval) not in coverage_gaps:
                 continue
-            if cached.empty:
-                continue
-            gap_start = find_first_missing_bar(cached, interval, ticker_symbol=ticker, now=now_ts)
-            if gap_start is not None:
-                work_items.append((pair_id, ticker, interval, gap_start))
-                pair_gaps += 1
+            cached_row = cached.get((ticker, interval))
+            if cached_row is None:
+                gap_start = None
+            else:
+                first_ts, last_ts, bars_in_summary = cached_row
+                is_stale_coverage = bars_in_summary < min_bars[interval]
+                requested_start = now_ts - pd.Timedelta(days=int(max_days if interval == '1d' else target_days))
+                if requested_start < first_ts or requested_start > last_ts:
+                    is_stale_coverage = True
+
+                remaining_days = _remaining_days_to_fetch(
+                    interval=interval,
+                    requested_days=max_days if interval == '1d' else target_days,
+                    cached_range=(first_ts, last_ts, bars_in_summary),
+                    now=now_ts,
+                )
+                if is_stale_coverage:
+                    gap_start = _aligned_expected_bar_at_or_after(start, interval)
+                elif remaining_days > 0:
+                    gap_start = _next_expected_bar_time(pd.Timestamp(last_ts), interval)
+                else:
+                    gap_start = _aligned_expected_bar_at_or_after(start, interval)
+            work_items.append((pair_id, ticker, interval, gap_start))
+            pair_gaps += 1
         if progress_cb is not None:
             progress_cb(idx, total_pairs, pair_id, pair_gaps)
         if verbose:
@@ -171,6 +197,15 @@ def _weekday_gap_days(from_ts, to_ts) -> int:
     if end <= start:
         return 0
     return len(pd.bdate_range(start, end, freq='B'))
+
+
+def _coerce_utc(ts: pd.Timestamp | str) -> pd.Timestamp:
+    """Normalize a timestamp to a UTC-aware Timestamp."""
+
+    value = pd.Timestamp(ts)
+    if value.tzinfo is None:
+        return value.tz_localize('UTC')
+    return value.tz_convert('UTC')
 
 
 def find_cache_gaps_verbose(
@@ -196,8 +231,8 @@ def find_cache_gaps_verbose(
     cached = {}
     for _, row in summary.iterrows():
         cached[(row['ticker'], row['interval'])] = (
-            pd.Timestamp(row['first_ts']),
-            pd.Timestamp(row['last_ts']),
+            _coerce_utc(row['first_ts']),
+            _coerce_utc(row['last_ts']),
             int(row['bars']),
         )
 
@@ -219,13 +254,14 @@ def find_cache_gaps_verbose(
                 gaps.append((pair_id, ticker, iv, 'no cached data'))
                 continue
             first_ts, last_ts, bars = cached[(ticker, iv)]
-            effective_bars = effective_cached_bar_count(
-                ticker,
-                iv,
-                cached_range=(first_ts, last_ts, bars),
-                requested_days=effective_days[iv],
-                now=now_ts,
-            )
+            requested_start = now_ts - pd.Timedelta(days=int(effective_days[iv]))
+            if first_ts > requested_start or last_ts < requested_start:
+                gaps.append((
+                    pair_id, ticker, iv,
+                    f'cached range={first_ts} -> {last_ts}, first < requested_start={requested_start}, bars={bars}',
+                ))
+                continue
+            effective_bars = bars
             remaining = _remaining_days_to_fetch(
                 interval=iv,
                 requested_days=effective_days[iv],

@@ -3,7 +3,6 @@ from unittest.mock import patch
 
 import pandas as pd
 
-import fx_sr.data as data_module
 import run
 
 
@@ -86,49 +85,133 @@ class FillGapDetectionTests(unittest.TestCase):
 
         self.assertEqual(gaps, [])
 
-    def test_record_closure_gaps_and_step_back_uses_latest_cached_bar_before_gap(self):
-        cached = pd.DataFrame(
-            {'Close': [1.0, 1.1, 1.2]},
-            index=pd.DatetimeIndex([
-                '2025-12-24T21:59:00Z',
-                '2025-12-29T22:15:00Z',
-                '2025-12-29T22:16:00Z',
-            ]),
+    def test_find_cache_gap_work_items_keeps_full_cache_quick_without_data_copy(self):
+        now = pd.Timestamp('2026-04-13T12:00:00Z')
+        start = now - pd.Timedelta(days=365)
+        summary = pd.DataFrame(
+            [
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1d',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 260,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1h',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 8760,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1m',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 525000,
+                },
+            ]
         )
 
-        with patch('fx_sr.data._record_closure_gaps', return_value=1815), \
-                patch('fx_sr.data.load_ohlc', return_value=cached):
-            recorded, next_end = data_module._record_closure_gaps_and_step_back(
-                'AUDNZD=X',
-                '1m',
-                seed_gap=pd.Timestamp('2025-12-29T22:14:00Z'),
+        with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
+                patch('fx_sr.fill_pipeline.init_db'), \
+                patch('fx_sr.fill_pipeline.get_cache_summary', return_value=summary):
+            gaps = run._find_cache_gap_work_items(
+                target_days=365,
+                now=now,
             )
 
-        self.assertEqual(recorded, 1815)
-        self.assertEqual(next_end, pd.Timestamp('2025-12-24T21:58:00Z'))
+        self.assertEqual(gaps, [])
 
-    def test_refill_interval_from_skips_ib_fetch_for_cache_confirmed_minute_closure(self):
-        refilled = pd.DataFrame(
-            {'Close': [1.0]},
-            index=pd.DatetimeIndex(['2025-12-30T00:00:00Z']),
+    def test_find_cache_gap_work_items_marks_missing_timestamps_for_coverage_gaps(self):
+        now = pd.Timestamp('2026-04-13T12:00:00Z')
+        start = now - pd.Timedelta(days=365)
+        summary = pd.DataFrame(
+            [
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1d',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 80,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1h',
+                    'first_ts': start,
+                    'last_ts': now - pd.Timedelta(hours=2),
+                    'bars': 200,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1m',
+                    'first_ts': start,
+                    'last_ts': now - pd.Timedelta(minutes=30),
+                    'bars': 40,
+                },
+            ]
         )
 
-        with patch(
-            'fx_sr.data._record_closure_gaps_and_step_back',
-            side_effect=[(1815, pd.Timestamp('2025-12-24T21:58:00Z')), (0, None)],
-        ), \
-                patch('fx_sr.data.load_ohlc', return_value=refilled), \
-                patch('fx_sr.data.find_first_missing_cached_bar', return_value=None), \
-                patch('fx_sr.data.ibkr.fetch_historical') as fetch_historical_mock, \
-                patch('builtins.print'):
-            result = data_module.refill_interval_from(
-                'AUDNZD=X',
-                '1m',
-                pd.Timestamp('2025-12-24T22:00:00Z'),
-            )
+        with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
+                patch('fx_sr.fill_pipeline.init_db'), \
+                patch('fx_sr.fill_pipeline.get_cache_summary', return_value=summary):
+            gaps = run._find_cache_gap_work_items(
+                    target_days=365,
+                    now=now,
+                )
+        expected_gap_start_1d = pd.Timestamp('2025-04-14T00:00:00Z')
+        expected_gap_start_1h = pd.Timestamp('2025-04-13T21:15:00Z')
+        expected_gap_start_1m = pd.Timestamp('2025-04-13T21:15:00Z')
 
-        fetch_historical_mock.assert_not_called()
-        self.assertFalse(result.empty)
+        self.assertEqual(
+            set(gaps),
+            {
+                ('EURUSD', 'EURUSD=X', '1d', expected_gap_start_1d),
+                ('EURUSD', 'EURUSD=X', '1h', expected_gap_start_1h),
+                ('EURUSD', 'EURUSD=X', '1m', expected_gap_start_1m),
+            },
+        )
+
+    def test_find_cache_gaps_verbose_tolerates_mixed_timezone_summary_timestamps(self):
+        now = pd.Timestamp('2026-04-13T12:00:00Z')
+        summary = pd.DataFrame(
+            [
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1d',
+                    'first_ts': now - pd.Timedelta(days=365),
+                    'last_ts': now - pd.Timedelta(hours=2),
+                    'bars': 80,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1h',
+                    'first_ts': pd.Timestamp('2026-03-14 00:00:00', tz='Europe/London'),
+                    'last_ts': pd.Timestamp('2026-04-12 23:59:00', tz='Europe/London'),
+                    'bars': 200,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1m',
+                    'first_ts': pd.Timestamp('2026-03-14 00:00:00', tz='Europe/London'),
+                    'last_ts': pd.Timestamp('2026-04-12 23:59:00', tz='Europe/London'),
+                    'bars': 40,
+                },
+            ]
+        )
+
+        with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
+                patch('fx_sr.fill_pipeline.init_db'), \
+                patch('fx_sr.fill_pipeline.get_cache_summary', return_value=summary), \
+                patch('fx_sr.fill_pipeline._remaining_days_to_fetch', return_value=1):
+            gaps_verbose = run._find_cache_gaps_verbose(target_days=365, now=now)
+
+        self.assertEqual(len(gaps_verbose), 3)
+        for pair_id, _ticker, interval, detail in gaps_verbose:
+            self.assertEqual(pair_id, 'EURUSD')
+            self.assertIn(interval, {'1d', '1h', '1m'})
+            self.assertIsInstance(detail, str)
 
 
 if __name__ == '__main__':

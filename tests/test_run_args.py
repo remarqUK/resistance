@@ -250,7 +250,7 @@ class RunArgumentTests(unittest.TestCase):
                 patch('fx_sr.fill_pipeline.download_single_interval', side_effect=fake_download_single_interval), \
                 patch('fx_sr.fill_pipeline.refill_interval_from', return_value=[]), \
                 patch('run.ibkr.set_historical_fetch_concurrency', return_value=1), \
-                patch('run.ibkr.disconnect_all'), \
+                patch('run.ibkr.disconnect'), \
                 patch('builtins.print'):
             run.cmd_fill(args)
 
@@ -277,7 +277,7 @@ class RunArgumentTests(unittest.TestCase):
                 patch('fx_sr.fill_pipeline.download_single_interval', return_value=4), \
                 patch('fx_sr.fill_pipeline.refill_interval_from', return_value=[]), \
                 patch('run.ibkr.set_historical_fetch_concurrency', return_value=1), \
-                patch('run.ibkr.disconnect_all'), \
+                patch('run.ibkr.disconnect'), \
                 patch('builtins.print') as print_mock:
             run.cmd_fill(args)
 
@@ -297,32 +297,57 @@ class RunArgumentTests(unittest.TestCase):
             {
                 'ticker': 'EURUSD=X',
                 'interval': '1h',
-                'first_ts': '2026-03-15T00:00:00+00:00',
+                'first_ts': '2026-03-14T00:00:00+00:00',
                 'last_ts': '2026-04-13T00:00:00+00:00',
                 'bars': 500,
             },
             {
                 'ticker': 'EURUSD=X',
                 'interval': '1m',
-                'first_ts': '2026-03-15T00:00:00+00:00',
+                'first_ts': '2026-03-14T00:00:00+00:00',
                 'last_ts': '2026-04-13T00:00:00+00:00',
-                'bars': 20000,
+                'bars': 22000,
             },
         ])
-
-        def fake_effective_cached_bar_count(ticker, interval, **kwargs):
-            if interval == '1m':
-                return 22000
-            return int(kwargs['cached_range'][2])
 
         with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
                 patch('fx_sr.fill_pipeline.init_db'), \
                 patch('fx_sr.fill_pipeline.get_cache_summary', return_value=summary), \
-                patch('fx_sr.fill_pipeline.effective_cached_bar_count', side_effect=fake_effective_cached_bar_count), \
                 patch('fx_sr.fill_pipeline._remaining_days_to_fetch', return_value=0):
             gaps = run._find_cache_gaps(target_days=30, now=pd.Timestamp('2026-04-13T12:00:00+00:00'))
 
         self.assertEqual(gaps, [])
+
+    def test_main_bootstraps_all_supported_cli_commands(self):
+        command_handlers = {
+            'status': 'run.cmd_status',
+            'fill': 'run.cmd_fill',
+            'download': 'run.cmd_download',
+            'sync': 'run.cmd_download',
+            'backtest': 'run.cmd_backtest',
+            'live': 'run.cmd_live',
+            'run': 'run.cmd_run',
+            'l2': 'run.cmd_l2',
+            'viz': 'run.cmd_viz',
+        }
+        command_argvs = {
+            'status': ['run.py', 'status'],
+            'fill': ['run.py', 'fill', '--pair', 'EURUSD'],
+            'download': ['run.py', 'download', '--days', '30'],
+            'sync': ['run.py', 'sync', '--days', '30'],
+            'backtest': ['run.py', 'backtest', '--days', '30'],
+            'live': ['run.py', 'live', '--once'],
+            'run': ['run.py', 'run', '--mode', 'backtest', '--days', '30'],
+            'l2': ['run.py', 'l2', '--pair', 'EURUSD', '--once'],
+            'viz': ['run.py', 'viz'],
+        }
+
+        for command, target in command_handlers.items():
+            with self.subTest(command=command):
+                with patch.object(sys, 'argv', command_argvs[command]), \
+                        patch(target) as command_handler:
+                    run.main()
+                    command_handler.assert_called_once()
 
 
 if __name__ == '__main__':

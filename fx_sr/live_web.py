@@ -38,6 +38,7 @@ from .live import (
     seed_seen_wf_trades,
 )
 from .live_history import (
+    clear_exit_signal,
     enqueue_write_async,
     load_detected_signal,
     load_execution_activity,
@@ -2207,6 +2208,10 @@ class LiveDashboardHub:
                     )
                     positions_changed = True
             else:
+                if signal_id:
+                    await enqueue_write_async(
+                        lambda s=signal_id: clear_exit_signal(s),
+                    )
                 # Close failed — remove placeholder and guard so next tick retries.
                 async with self._lock:
                     self._inflight_close_orders.pop(alert_key, None)
@@ -2738,6 +2743,10 @@ class LiveDashboardHub:
                     })
                     self._append_log('info', f'{exit_reason} close submitted: {close_pair} {close_dir} size={close_size} order={order_id} status={order_status}')
             else:
+                if sig_id:
+                    await enqueue_write_async(
+                        lambda s=sig_id: clear_exit_signal(s),
+                    )
                 async with self._lock:
                     self._inflight_close_orders.pop(alert_key, None)
                     self._tick_exit_alerted.discard(alert_key)
@@ -3376,7 +3385,7 @@ class LiveDashboardHub:
                     )
             # Identify positions with a persisted exit intent but no in-flight
             # close order — these were interrupted mid-close before the last shutdown.
-            stale_exits: list[tuple[str, str, str, int, str | None, float | None]] = []
+            stale_exits: list[tuple[str, str, str, str, int, str | None, float | None]] = []
             for key, info in self._tracked.items():
                 reason = info.get('pending_exit_reason')
                 if reason and reason not in ('TP', 'SL') and key not in self._inflight_close_orders:
@@ -3384,7 +3393,7 @@ class LiveDashboardHub:
                     if size > 0:
                         stale_exits.append((
                             key, info['pair'], info['trade'].direction,
-                            size, info.get('signal_id'),
+                            reason, size, info.get('signal_id'),
                             info.get('pending_exit_price'),
                         ))
 
@@ -3399,7 +3408,7 @@ class LiveDashboardHub:
 
         # Resubmit close orders for positions with stale exit intents.
         _VIABLE_RECOVERY = {'Submitted', 'Filled', 'PreSubmitted'}
-        for alert_key, close_pair, close_dir, close_size, sig_id, exit_price in stale_exits:
+        for alert_key, close_pair, close_dir, exit_reason, close_size, sig_id, exit_price in stale_exits:
             opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
             ref = f'fxsr:recovery:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
             if sig_id:
@@ -3418,13 +3427,17 @@ class LiveDashboardHub:
             if order is not None and order_status in _VIABLE_RECOVERY:
                 async with self._lock:
                     self._inflight_close_orders[alert_key] = (
-                        order_id or 0, 'RECOVERY', sig_id, exit_price,
+                        order_id or 0, exit_reason, sig_id, exit_price,
                     )
                     self._append_log(
                         'info',
-                        f'Recovery close submitted: {close_pair} {close_dir} size={close_size} order={order_id}',
+                        f'Recovery close submitted: {close_pair} {close_dir} {exit_reason} size={close_size} order={order_id}',
                     )
             else:
+                if sig_id:
+                    await enqueue_write_async(
+                        lambda s=sig_id: clear_exit_signal(s),
+                    )
                 async with self._lock:
                     # Failed to resubmit — clear the stale guard so live exit logic retries.
                     self._tick_exit_alerted.discard(alert_key)
@@ -3577,6 +3590,10 @@ class LiveDashboardHub:
                         order_status = statuses.get(oid)
                         if order_status in ('Cancelled', 'ApiCancelled', 'Inactive'):
                             # Order explicitly dead — release for retry.
+                            if sig_id:
+                                await enqueue_write_async(
+                                    lambda s=sig_id: clear_exit_signal(s),
+                                )
                             async with self._lock:
                                 self._inflight_close_orders.pop(key, None)
                                 self._inflight_miss_counts.pop(key, None)
@@ -3597,6 +3614,10 @@ class LiveDashboardHub:
                             misses = self._inflight_miss_counts.get(key, 0) + 1
                             self._inflight_miss_counts[key] = misses
                             if misses >= 3:
+                                if sig_id:
+                                    await enqueue_write_async(
+                                        lambda s=sig_id: clear_exit_signal(s),
+                                    )
                                 async with self._lock:
                                     self._inflight_close_orders.pop(key, None)
                                     self._inflight_miss_counts.pop(key, None)

@@ -1463,6 +1463,44 @@ def save_provider_gap_exception(
         conn.close()
 
 
+def save_provider_gap_exceptions_batch(
+    ticker: str,
+    interval: str,
+    gap_timestamps: list,
+    *,
+    source: str = 'ibkr',
+    note: str | None = None,
+    db_path: str | None = None,
+) -> int:
+    """Persist multiple provider-confirmed gap exceptions in one transaction."""
+
+    if not gap_timestamps:
+        return 0
+    if db_path is None:
+        db_path = get_db_path()
+    init_db(db_path, migrate_legacy=False)
+    conn = _connect(db_path)
+    try:
+        db_ticker = _ticker_to_db_value(conn, ticker)
+        db_interval = _interval_to_db_value(conn, interval)
+        rows = [
+            (db_ticker, db_interval, _normalize_ts(ts), source, note)
+            for ts in gap_timestamps
+        ]
+        conn.executemany(
+            """
+            INSERT INTO provider_gap_exception (ticker, interval, gap_ts, source, note, recorded_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (ticker, interval, gap_ts) DO NOTHING
+            """,
+            rows,
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+
 def get_cached_range(
     ticker: str,
     interval: str,
@@ -1515,10 +1553,10 @@ def find_ohlc_gap_candidates(
     if not _db_exists(db_path):
         return []
 
-    gap_interval = {
-        '1d': '2 days',
-        '1h': '2 hours',
-        '1m': '2 minutes',
+    gap_seconds = {
+        '1d': 2 * 86400,
+        '1h': 2 * 3600,
+        '1m': 2 * 60,
     }[interval]
 
     conn = _connect(db_path)
@@ -1534,34 +1572,33 @@ def find_ohlc_gap_candidates(
             where_parts.append("ts <= %s")
             params.append(_normalize_ts(end))
         where_sql = " AND ".join(where_parts)
-        safe_limit = max(1, int(limit))
+
+        # Fetch sorted timestamps and find gaps in Python.
+        # Much faster than LAG() window function for large 1m tables
+        # because it streams ordered rows via the index without
+        # materializing the full window partition.
         cursor = conn.execute(
-            f"""
-            WITH ordered AS (
-                SELECT
-                    ts,
-                    LAG(ts) OVER (ORDER BY ts) AS prev_ts
-                FROM ohlc
-                WHERE {where_sql}
-            )
-            SELECT prev_ts, ts
-            FROM ordered
-            WHERE prev_ts IS NOT NULL
-              AND ts > prev_ts + INTERVAL '{gap_interval}'
-            ORDER BY ts
-            LIMIT {safe_limit}
-            """,
+            f"SELECT ts FROM ohlc WHERE {where_sql} ORDER BY ts",
             params,
         )
-        rows = cursor.fetchall()
+        safe_limit = max(1, int(limit))
+        results: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        prev_ts = None
+        for (ts,) in cursor:
+            if prev_ts is not None:
+                if hasattr(ts, 'timestamp') and hasattr(prev_ts, 'timestamp'):
+                    diff = ts.timestamp() - prev_ts.timestamp()
+                else:
+                    diff = (pd.Timestamp(ts) - pd.Timestamp(prev_ts)).total_seconds()
+                if diff > gap_seconds:
+                    results.append((pd.Timestamp(prev_ts), pd.Timestamp(ts)))
+                    if len(results) >= safe_limit:
+                        break
+            prev_ts = ts
     finally:
         conn.close()
 
-    return [
-        (pd.Timestamp(row[0]), pd.Timestamp(row[1]))
-        for row in rows
-        if row[0] is not None and row[1] is not None
-    ]
+    return results
 
 
 def get_cache_summary(db_path: str | None = None) -> pd.DataFrame:

@@ -1633,8 +1633,6 @@ def run_all_backtests_parallel(
                     except Exception as exc:
                         fetch_completed += 1
                         done += 1
-                        if isinstance(exc, BacktestCacheMissingError):
-                            raise BacktestCacheMissingError(f'{pair}: {exc}') from exc
                         print(f"    [{done}/{total}] {pair}: fetch failed ({type(exc).__name__}: {exc})")
                         _debug(
                             f'phase1: fetch failed pair={pair} '
@@ -1672,11 +1670,24 @@ def run_all_backtests_parallel(
             cid = _pair_client_id(base_client_id, offset)
             t_fetch = time.perf_counter()
             _debug(f'phase1: sequential fetch pair={pair} client_id={cid}')
-            pair, daily_df, hourly_df, minute_df, l2_snapshots = _fetch_pair_data_only(
-                pair, info, hourly_days, zone_history_days, force_refresh, cid,
-                allow_stale_cache,
-                debug=debug,
-            )
+            try:
+                pair, daily_df, hourly_df, minute_df, l2_snapshots = _fetch_pair_data_only(
+                    pair, info, hourly_days, zone_history_days, force_refresh, cid,
+                    allow_stale_cache,
+                    debug=debug,
+                )
+            except Exception as exc:
+                fetch_completed += 1
+                done += 1
+                print(
+                    f"    [{done}/{total}] {pair}: fetch failed ({type(exc).__name__}: {exc})"
+                )
+                _debug(
+                    f'phase1: sequential fetch failed pair={pair} '
+                    f'elapsed={time.perf_counter() - t_fetch:.2f}s err={type(exc).__name__}: {exc}'
+                )
+                continue
+
             if (daily_df is not None and not daily_df.empty
                     and hourly_df is not None and not hourly_df.empty):
                 pair_data[pair] = (daily_df, hourly_df, minute_df, l2_snapshots)
@@ -1687,8 +1698,8 @@ def run_all_backtests_parallel(
                 )
             else:
                 fetch_completed += 1
-                print(f"    [{fetch_completed}/{total}] {pair}: fetched but no usable bars")
                 done += 1
+                print(f"    [{fetch_completed}/{total}] {pair}: fetched but no usable bars")
                 print(f"    [{done}/{total}] {pair}: no data")
                 _debug(f'phase1: sequential no data pair={pair}')
             _debug(f'phase1: sequential fetch complete pair={pair} in {time.perf_counter() - t_fetch:.2f}s')

@@ -25,6 +25,7 @@ from .db import (
     load_ohlc,
     save_ohlc,
     save_provider_gap_exception,
+    save_provider_gap_exceptions_batch,
 )
 from . import ibkr
 
@@ -324,6 +325,40 @@ def _provider_gap_setting_key(
     return f'{ticker_symbol}|{interval}|{gap.isoformat()}'
 
 
+_CONFIRMED_GAP_CACHE: dict[tuple[str, str, str], set[pd.Timestamp]] = {}
+
+
+def _load_confirmed_gaps(ticker_symbol: str, interval: str) -> set[pd.Timestamp]:
+    """Load all confirmed gap timestamps for a ticker/interval into memory."""
+
+    from .db import _connect, get_db_path, init_db, _ticker_to_db_value, _interval_to_db_value
+    db_path = get_db_path()
+    key = (db_path, ticker_symbol, interval)
+    if key in _CONFIRMED_GAP_CACHE:
+        return _CONFIRMED_GAP_CACHE[key]
+    init_db(db_path, migrate_legacy=False)
+    conn = _connect(db_path)
+    try:
+        db_ticker = _ticker_to_db_value(conn, ticker_symbol)
+        db_interval = _interval_to_db_value(conn, interval)
+        rows = conn.execute(
+            'SELECT gap_ts FROM provider_gap_exception WHERE ticker=%s AND interval=%s',
+            (db_ticker, db_interval),
+        ).fetchall()
+        gaps = set()
+        for row in rows:
+            ts = pd.Timestamp(row[0])
+            if ts.tzinfo is None:
+                ts = ts.tz_localize('UTC')
+            else:
+                ts = ts.tz_convert('UTC')
+            gaps.add(ts)
+        _CONFIRMED_GAP_CACHE[key] = gaps
+        return gaps
+    finally:
+        conn.close()
+
+
 def _is_provider_confirmed_gap(
     ticker_symbol: str,
     interval: str,
@@ -331,7 +366,8 @@ def _is_provider_confirmed_gap(
 ) -> bool:
     """Return True when a missing bar was previously confirmed absent at IBKR."""
 
-    return has_provider_gap_exception(ticker_symbol, interval, _as_utc(gap_ts))
+    gaps = _load_confirmed_gaps(ticker_symbol, interval)
+    return _as_utc(gap_ts) in gaps
 
 
 def _remember_provider_confirmed_gap(
@@ -342,6 +378,9 @@ def _remember_provider_confirmed_gap(
     """Persist one provider-confirmed missing bar so future scans can skip it."""
 
     gap = _as_utc(gap_ts)
+    # Invalidate cache — keyed by (db_path, ticker, interval)
+    from .db import get_db_path
+    _CONFIRMED_GAP_CACHE.pop((get_db_path(), ticker_symbol, interval), None)
     save_provider_gap_exception(
         ticker_symbol,
         interval,
@@ -349,6 +388,81 @@ def _remember_provider_confirmed_gap(
         source='ibkr',
         note=f'provider-confirmed gap {_provider_gap_setting_key(ticker_symbol, interval, gap)}',
     )
+
+
+def _record_closure_gaps(
+    ticker_symbol: str,
+    interval: str,
+    seed_gap: pd.Timestamp,
+) -> int:
+    """Detect an entire market closure from one known gap and record all missing bars.
+
+    Uses only the local cache — no IBKR calls.  Loads a window around the seed
+    gap, generates the expected bar schedule, and batch-records every bar that's
+    missing from the cache as a confirmed provider gap.
+
+    Must have cached bars on BOTH sides of the gap to confirm the closure.
+    """
+    import numpy as np
+
+    seed = _as_utc(seed_gap)
+    window_before = pd.Timedelta(days=1)
+    window_after = pd.Timedelta(days=5)
+    cache_start = seed - window_before
+    cache_end = seed + window_after
+    cached_df = load_ohlc(
+        ticker_symbol, interval,
+        start=cache_start.to_pydatetime(),
+        end=cache_end.to_pydatetime(),
+    )
+    if cached_df is None or cached_df.empty:
+        return 0
+
+    idx = pd.DatetimeIndex(cached_df.index)
+    if idx.tz is None:
+        idx = idx.tz_localize('UTC')
+    else:
+        idx = idx.tz_convert('UTC')
+
+    # Must have bars BEFORE and AFTER the seed gap to confirm a closure.
+    if not (idx.min() < seed and idx.max() > seed):
+        return 0
+
+    first_bar = idx.min()
+    last_bar = idx.max()
+
+    freq = {'1h': 'h', '1m': 'min', '1d': 'D'}[interval]
+    expected = pd.date_range(first_bar, last_bar, freq=freq, tz='UTC')
+
+    cached_set = set(idx)
+    missing = expected.difference(pd.DatetimeIndex(list(cached_set)))
+
+    if len(missing) == 0:
+        return 0
+    weekdays = missing.weekday
+    hours = missing.hour
+    # FX closed: Friday ≥22:00 UTC, all Saturday, Sunday <22:00 UTC
+    is_weekend = (
+        (weekdays == 5) |
+        ((weekdays == 6) & (hours < 22)) |
+        ((weekdays == 4) & (hours >= 22))
+    )
+    gaps_to_record = missing[~is_weekend].tolist()
+
+    if not gaps_to_record:
+        return 0
+
+    from .db import get_db_path
+    _CONFIRMED_GAP_CACHE.pop((get_db_path(), ticker_symbol, interval), None)
+
+    count = save_provider_gap_exceptions_batch(
+        ticker_symbol,
+        interval,
+        gaps_to_record,
+        source='ibkr',
+        note=f'closure detected from seed {seed.isoformat()}',
+    )
+    return count
 
 
 def find_first_missing_bar(
@@ -359,29 +473,62 @@ def find_first_missing_bar(
     now: pd.Timestamp | datetime | str | None = None,
     check_trailing: bool = True,
 ) -> pd.Timestamp | None:
-    """Return the first missing timestamp inside cached data, or at the trailing edge."""
+    """Return the first missing timestamp inside cached data, or at the trailing edge.
+
+    Uses vectorized numpy diff to find gaps in O(suspects) time instead of
+    O(n) per-bar Python calls.
+    """
+    import numpy as np
 
     if cached is None or cached.empty:
         return None
 
-    normalized = cached.index
-    previous = _as_utc(normalized[0])
-    for current_raw in normalized[1:]:
-        current = _as_utc(current_raw)
-        if interval in {'1h', '1m'} and _is_weekend_transition(previous, current, interval):
-            previous = current
-            continue
-        expected = _next_expected_bar_time(previous, interval)
-        if current > expected:
-            if (
-                ticker_symbol is not None
-                and _is_provider_confirmed_gap(ticker_symbol, interval, expected)
-            ):
-                previous = current
+    idx = cached.index
+    if idx.tz is None:
+        normalized = idx.tz_localize('UTC')
+    else:
+        normalized = idx.tz_convert('UTC')
+
+    if len(normalized) < 2:
+        if not check_trailing:
+            return None
+        # Fall through to trailing check below
+    else:
+        # Vectorized gap detection via numpy diff on int64 timestamps.
+        threshold_seconds = {'1d': 2 * 86400, '1h': 2 * 3600, '1m': 2 * 60}[interval]
+        threshold = np.timedelta64(threshold_seconds, 's')
+        ts_values = normalized.values
+        diffs = np.diff(ts_values)
+        suspect_indices = np.where(diffs > threshold)[0]
+
+        if len(suspect_indices) > 0 and interval in {'1h', '1m'}:
+            # Vectorized weekend filter: must be Friday near NY close → Sun/Mon.
+            # FX close is Friday 17:00 NY ≈ 21:00-22:00 UTC depending on DST.
+            # Only skip if the previous bar is within one interval of close,
+            # matching the scalar _is_weekend_transition logic.
+            prev_times = normalized[suspect_indices]
+            next_times = normalized[suspect_indices + 1]
+            prev_days = np.array([t.weekday() for t in prev_times])
+            next_days = np.array([t.weekday() for t in next_times])
+            prev_hours = np.array([t.hour for t in prev_times])
+            # Friday near close: hour >= 20 UTC covers both EST (22:00) and EDT (21:00)
+            is_weekend = (
+                (prev_days == 4) & (prev_hours >= 20)
+                & ((next_days == 6) | (next_days == 0))
+            )
+            suspect_indices = suspect_indices[~is_weekend]
+
+        # Load confirmed gaps once for this ticker/interval (cached).
+        confirmed = _load_confirmed_gaps(ticker_symbol, interval) if ticker_symbol else set()
+
+        for si in suspect_indices:
+            prev_ts = _as_utc(normalized[si])
+            expected = _next_expected_bar_time(prev_ts, interval)
+            if expected in confirmed:
                 continue
             return expected
-        previous = current
 
+    # Trailing edge check
     if not check_trailing:
         return None
 
@@ -398,10 +545,7 @@ def find_first_missing_bar(
     if now_ts - last_ts <= tolerance:
         return None
     expected = _next_expected_bar_time(last_ts, interval)
-    if (
-        ticker_symbol is not None
-        and _is_provider_confirmed_gap(ticker_symbol, interval, expected)
-    ):
+    if ticker_symbol and expected in _load_confirmed_gaps(ticker_symbol, interval):
         return None
     return expected
 
@@ -417,7 +561,13 @@ def find_first_missing_cached_bar(
 ) -> pd.Timestamp | None:
     """Find the first missing cached bar using SQL-side gap detection."""
 
-    window_range = get_cached_range(ticker_symbol, interval, start=start, end=end)
+    query_start = (
+        _aligned_expected_bar_at_or_after(start, interval)
+        if start is not None
+        else None
+    )
+
+    window_range = get_cached_range(ticker_symbol, interval, start=query_start, end=end)
     if window_range is None:
         return None
 
@@ -435,7 +585,7 @@ def find_first_missing_cached_bar(
     for prev_ts, current_ts in find_ohlc_gap_candidates(
         ticker_symbol,
         interval,
-        start=start,
+        start=query_start,
         end=end,
         limit=512,
     ):
@@ -546,35 +696,31 @@ def refill_interval_from(
             start=start.to_pydatetime(),
             end=now.to_pydatetime(),
         )
-        while True:
-            remaining_gap = find_first_missing_cached_bar(
-                ticker_symbol,
-                interval,
-                start=start,
-                end=now,
-                now=now,
-            )
-            if remaining_gap is None:
-                break
-            if not _provider_confirms_unfillable_gap(
-                ticker_symbol,
-                interval,
-                remaining_gap,
-                client_id=client_id,
+        remaining_gap = find_first_missing_cached_bar(
+            ticker_symbol, interval, start=start, end=now, now=now,
+        )
+        if remaining_gap is not None:
+            recorded = _record_closure_gaps(ticker_symbol, interval, remaining_gap)
+            if recorded > 0:
+                print(f'      {ticker_symbol} {interval}: recorded {recorded} closure gaps from {remaining_gap.date()}')
+            elif not _provider_confirms_unfillable_gap(
+                ticker_symbol, interval, remaining_gap, client_id=client_id,
             ):
                 raise RuntimeError(
                     f'{ticker_symbol} {interval} refill incomplete: first missing bar still at {remaining_gap}'
                 )
-            _remember_provider_confirmed_gap(ticker_symbol, interval, remaining_gap)
-            print(
-                f'      {ticker_symbol} {interval}: IBKR also has no bar at {remaining_gap}; '
-                'recorded provider-gap exception; continuing gap scan'
-            )
-            continue
+            else:
+                _remember_provider_confirmed_gap(ticker_symbol, interval, remaining_gap)
         return refilled
 
     df = _fetch_live(ticker_symbol, interval, fetch_days, client_id=client_id, timeout_s=30)
     if df is None or df.empty:
+        # Try to record closure from cache before raising.
+        recorded = _record_closure_gaps(ticker_symbol, interval, start)
+        if recorded > 0:
+            print(f'      {ticker_symbol} {interval}: recorded {recorded} closure gaps from {start.date()}')
+            cached = load_ohlc(ticker_symbol, interval, start=start.to_pydatetime(), end=now.to_pydatetime())
+            return cached if cached is not None else pd.DataFrame()
         raise RuntimeError(
             f'IBKR returned no {interval} bars for {ticker_symbol} while refilling from {start}'
         )
@@ -585,31 +731,21 @@ def refill_interval_from(
         start=start.to_pydatetime(),
         end=now.to_pydatetime(),
     )
-    while True:
-        remaining_gap = find_first_missing_cached_bar(
-            ticker_symbol,
-            interval,
-            start=start,
-            end=now,
-            now=now,
-        )
-        if remaining_gap is None:
-            break
-        if not _provider_confirms_unfillable_gap(
-            ticker_symbol,
-            interval,
-            remaining_gap,
-            client_id=client_id,
+    remaining_gap = find_first_missing_cached_bar(
+        ticker_symbol, interval, start=start, end=now, now=now,
+    )
+    if remaining_gap is not None:
+        recorded = _record_closure_gaps(ticker_symbol, interval, remaining_gap)
+        if recorded > 0:
+            print(f'      {ticker_symbol} {interval}: recorded {recorded} closure gaps from {remaining_gap.date()}')
+        elif not _provider_confirms_unfillable_gap(
+            ticker_symbol, interval, remaining_gap, client_id=client_id,
         ):
             raise RuntimeError(
                 f'{ticker_symbol} {interval} refill incomplete: first missing bar still at {remaining_gap}'
             )
-        _remember_provider_confirmed_gap(ticker_symbol, interval, remaining_gap)
-        print(
-            f'      {ticker_symbol} {interval}: IBKR also has no bar at {remaining_gap}; '
-            'recorded provider-gap exception; continuing gap scan'
-        )
-        continue
+        else:
+            _remember_provider_confirmed_gap(ticker_symbol, interval, remaining_gap)
     return refilled
 
 

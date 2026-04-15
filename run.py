@@ -1056,6 +1056,7 @@ def _find_cache_gap_work_items(
     daily_extra_days: int = 0,
     only_pair: str | None = None,
     verbose: bool = False,
+    debug: bool = False,
 ) -> list[tuple[str, str, str, object]]:
     """Deprecated compatibility wrapper around ``fx_sr.fill_pipeline.find_cache_gap_work_items``."""
 
@@ -1072,6 +1073,7 @@ def _find_cache_gap_work_items(
         daily_extra_days=daily_extra_days,
         only_pair=only_pair,
         verbose=verbose,
+        debug=debug,
     )
 
 
@@ -1138,8 +1140,13 @@ def cmd_fill(args):
         daily_extra_days=daily_extra_days,
         only_pair=pair_filter,
         verbose=True,
+        debug=debug,
     )
     gap_scan_elapsed = time.perf_counter() - gap_scan_start
+    # Prioritise: 1d first, then 1h, then 1m — so a restart doesn't redo
+    # the stable intervals, and 1m (always growing) is last.
+    _IV_ORDER = {'1d': 0, '1h': 1, '1m': 2}
+    gap_items.sort(key=lambda item: _IV_ORDER.get(item[2], 9))
     print(f'  Scan complete ({gap_scan_elapsed:.1f}s)')
     if debug:
         print(f'  [dbg] gap scan took {gap_scan_elapsed:.2f}s')
@@ -1235,8 +1242,8 @@ def cmd_fill(args):
         ),
     )
 
-    # Clean up all IBKR connections so TWS releases the client IDs immediately.
-    ibkr.disconnect_all()
+    # Clean up IBKR connections so TWS releases the client IDs immediately.
+    ibkr.disconnect()
 
     elapsed = float(result['elapsed'])
     print(f'\n  Fill completed in {elapsed:.1f}s')
@@ -1250,6 +1257,7 @@ def cmd_fill(args):
         daily_extra_days=daily_extra_days,
         only_pair=pair_filter,
         verbose=True,
+        debug=debug,
     )
     recheck_elapsed = time.perf_counter() - recheck_start
     if debug:

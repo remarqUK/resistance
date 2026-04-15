@@ -15,10 +15,12 @@ from .data import (
     _remaining_days_to_fetch,
     _aligned_expected_bar_at_or_after,
     _next_expected_bar_time,
+    find_first_missing_bar,
+    find_first_missing_cached_bar,
     download_single_interval,
     refill_interval_from,
 )
-from .db import get_cache_summary, init_db
+from .db import get_cache_summary, init_db, load_ohlc
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,17 @@ def find_cache_gaps(
             if bars < min_bars[iv]:
                 gaps.append((pair_id, ticker, iv))
                 continue
+            first_missing = find_first_missing_cached_bar(
+                ticker,
+                iv,
+                start=requested_start,
+                end=now_ts,
+                now=now_ts,
+                check_trailing=False,
+            )
+            if first_missing is not None:
+                gaps.append((pair_id, ticker, iv))
+                continue
             if _remaining_days_to_fetch(
                 interval=iv,
                 requested_days=effective_days[iv],
@@ -103,13 +116,20 @@ def find_cache_gap_work_items(
     daily_extra_days: int = 0,
     only_pair: str | None = None,
     verbose: bool = False,
+    debug: bool = False,
     progress_cb: Callable[[int, int, str, int], None] | None = None,
 ) -> list[tuple[str, str, str, object]]:
     """Return gap work items including the first missing timestamp when known."""
 
+    scan_started_at = time.perf_counter()
     now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
     max_days = target_days + max(0, daily_extra_days)
     summary = get_cache_summary()
+    if debug:
+        print(
+            f'  [dbg] cache summary loaded in {time.perf_counter() - scan_started_at:.2f}s '
+            f'({len(summary)} rows)'
+        )
     cached = {
         (row['ticker'], row['interval']): (
             _coerce_utc(row['first_ts']),
@@ -128,17 +148,6 @@ def find_cache_gap_work_items(
         '1m': int(target_days * 1000 * trading_day_ratio),
     }
 
-    coverage_gaps = set(
-        (pair_id, interval)
-        for pair_id, _ticker, interval in find_cache_gaps(
-            pairs=pairs,
-            target_days=target_days,
-            now=now_ts,
-            daily_extra_days=daily_extra_days,
-            only_pair=only_pair,
-        )
-    )
-
     work_items: list[tuple[str, str, str, object]] = []
     pairs_to_check = pairs if not only_pair else {only_pair: pairs[only_pair]} if only_pair in pairs else {}
     total_pairs = len(pairs_to_check)
@@ -146,36 +155,131 @@ def find_cache_gap_work_items(
         if progress_cb is not None:
             progress_cb(idx, total_pairs, pair_id, 0)
         if verbose:
-            print(f'    [{idx}/{total_pairs}] {pair_id}', end='', flush=True)
+            print(f'    [{idx}/{total_pairs}] {pair_id}', end=' ', flush=True)
         ticker = pair_info['ticker']
         pair_gaps = 0
         for interval in ('1d', '1h', '1m'):
-            if (pair_id, interval) not in coverage_gaps:
-                continue
+            interval_started_at = time.perf_counter()
             cached_row = cached.get((ticker, interval))
+            requested_days = max_days if interval == '1d' else target_days
+            requested_start = now_ts - pd.Timedelta(days=int(requested_days))
+            expected_start = _aligned_expected_bar_at_or_after(requested_start, interval)
+            gap_required = False
+            if debug:
+                print(
+                    f'\n      [dbg] {pair_id} {interval}: '
+                    f'start={requested_start} expected_start={expected_start}'
+                )
             if cached_row is None:
+                gap_required = True
                 gap_start = None
+                if debug:
+                    print(f'      [dbg] {pair_id} {interval}: no cached summary row')
             else:
                 first_ts, last_ts, bars_in_summary = cached_row
-                is_stale_coverage = bars_in_summary < min_bars[interval]
-                requested_start = now_ts - pd.Timedelta(days=int(max_days if interval == '1d' else target_days))
-                if requested_start < first_ts or requested_start > last_ts:
-                    is_stale_coverage = True
-
-                remaining_days = _remaining_days_to_fetch(
-                    interval=interval,
-                    requested_days=max_days if interval == '1d' else target_days,
-                    cached_range=(first_ts, last_ts, bars_in_summary),
-                    now=now_ts,
-                )
-                if is_stale_coverage:
-                    gap_start = _aligned_expected_bar_at_or_after(start, interval)
-                elif remaining_days > 0:
-                    gap_start = _next_expected_bar_time(pd.Timestamp(last_ts), interval)
+                if debug:
+                    print(
+                        f'      [dbg] {pair_id} {interval}: '
+                        f'cached {first_ts} -> {last_ts} bars={bars_in_summary} '
+                        f'min_required={min_bars[interval]}'
+                    )
+                # Allow 4 days of slack at the window edge for weekends/holidays
+                # at the start of the requested window.
+                edge_tolerance = pd.Timedelta(days=4)
+                if first_ts > requested_start + edge_tolerance or last_ts < requested_start:
+                    gap_required = True
+                    gap_start = expected_start
+                elif bars_in_summary < min_bars[interval]:
+                    # Bar count looks low, but data might just have holiday gaps.
+                    # Load and scan to find the actual first missing bar instead
+                    # of blindly refilling from the window edge.
+                    gap_required = True
+                    try:
+                        probe_df = load_ohlc(
+                            ticker, interval,
+                            start=requested_start.to_pydatetime(),
+                            end=now_ts.to_pydatetime(),
+                        )
+                        if probe_df is not None and not probe_df.empty:
+                            probe_gap = find_first_missing_bar(
+                                probe_df, interval, ticker_symbol=ticker,
+                            )
+                            gap_start = probe_gap if probe_gap is not None else expected_start
+                        else:
+                            gap_start = expected_start
+                    except Exception:
+                        gap_start = expected_start
+                    if debug:
+                        print(
+                            f'      [dbg] {pair_id} {interval}: coverage gap '
+                            f'(first_after_start={first_ts > requested_start}, '
+                            f'last_before_start={last_ts < requested_start}, '
+                            f'low_bars={bars_in_summary < min_bars[interval]})'
+                        )
                 else:
-                    gap_start = _aligned_expected_bar_at_or_after(start, interval)
+                    first_missing_started_at = time.perf_counter()
+                    if verbose:
+                        print(f'load..', end='', flush=True)
+                    cached_df = load_ohlc(
+                        ticker, interval,
+                        start=requested_start.to_pydatetime(),
+                        end=now_ts.to_pydatetime(),
+                    )
+                    if verbose:
+                        load_elapsed = time.perf_counter() - first_missing_started_at
+                        rows_loaded = len(cached_df) if cached_df is not None else 0
+                        print(f'{rows_loaded}rows {load_elapsed:.1f}s scan..', end='', flush=True)
+                    if cached_df is not None and not cached_df.empty:
+                        first_missing = find_first_missing_bar(
+                            cached_df, interval, ticker_symbol=ticker,
+                        )
+                    else:
+                        first_missing = expected_start
+                    if debug:
+                        print(
+                            f'      [dbg] {pair_id} {interval}: internal gap scan took '
+                            f'{time.perf_counter() - first_missing_started_at:.2f}s -> '
+                            f'{first_missing}'
+                        )
+                    if first_missing is not None:
+                        gap_required = True
+                        gap_start = first_missing
+                    else:
+                        remaining_started_at = time.perf_counter()
+                        remaining_days = _remaining_days_to_fetch(
+                            interval=interval,
+                            requested_days=requested_days,
+                            cached_range=(first_ts, last_ts, bars_in_summary),
+                            now=now_ts,
+                        )
+                        if debug:
+                            print(
+                                f'      [dbg] {pair_id} {interval}: remaining-days check took '
+                                f'{time.perf_counter() - remaining_started_at:.2f}s -> {remaining_days}'
+                            )
+                        if remaining_days > 0:
+                            gap_required = True
+                            gap_start = _next_expected_bar_time(pd.Timestamp(last_ts), interval)
+                        else:
+                            gap_start = None
+            elapsed_iv = time.perf_counter() - interval_started_at
+            if verbose and not debug:
+                label = f'{interval}!' if gap_required else interval
+                print(f'{label} {elapsed_iv:.1f}s', end='  ', flush=True)
+            if not gap_required:
+                if debug:
+                    print(
+                        f'      [dbg] {pair_id} {interval}: no gap '
+                        f'({time.perf_counter() - interval_started_at:.2f}s)'
+                    )
+                continue
             work_items.append((pair_id, ticker, interval, gap_start))
             pair_gaps += 1
+            if debug:
+                print(
+                    f'      [dbg] {pair_id} {interval}: gap_start={gap_start} '
+                    f'({time.perf_counter() - interval_started_at:.2f}s)'
+                )
         if progress_cb is not None:
             progress_cb(idx, total_pairs, pair_id, pair_gaps)
         if verbose:
@@ -275,6 +379,20 @@ def find_cache_gaps_verbose(
                     f'bars={bars}, effective_bars={effective_bars} < min {min_bars[iv]}, '
                     f'range={first_ts} -> {last_ts}, need={remaining}d, '
                     f'weekdays_since_last={weekday_gap}',
+                ))
+                continue
+            missing_start = find_first_missing_cached_bar(
+                ticker,
+                iv,
+                start=requested_start,
+                end=now_ts,
+                now=now_ts,
+                check_trailing=False,
+            )
+            if missing_start is not None:
+                gaps.append((
+                    pair_id, ticker, iv,
+                    f'bars={bars}, range={first_ts} -> {last_ts}, first_missing={missing_start}',
                 ))
                 continue
             if remaining > 0:

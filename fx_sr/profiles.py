@@ -64,20 +64,22 @@ PAIRS = {
 # Remove entries here to unblock them for all profiles, or override
 # per-profile with use_pair_direction_filter = False.
 
-BLOCKED_PAIR_DIRECTIONS = {
-    # 0% WR — never win
-    ('USDCAD', 'LONG'),    # 0% WR
-    ('NZDUSD', 'LONG'),    # 0% WR
-    ('NZDUSD', 'SHORT'),   # 0% WR
-    ('GBPJPY', 'LONG'),    # 0% WR
-    ('GBPJPY', 'SHORT'),   # 0% WR
-    ('AUDJPY', 'LONG'),    # 0% WR
-    ('AUDJPY', 'SHORT'),   # 0% WR
-    ('EURCHF', 'LONG'),    # 0% WR
-    ('EURCHF', 'SHORT'),   # 0% WR
-    # <15% WR
-    ('GBPUSD', 'LONG'),    # 13.3% WR
-}
+BLOCKED_PAIR_DIRECTIONS: set[tuple[str, str]] = set()
+# Historically blocked under pre-2023 regimes; re-evaluated 2026-04-17
+# with proper 2y minute data on high_volume_corr5_minor (see commit
+# message for the full table). Every prior entry now shows positive
+# expectancy in both directions:
+#   EURCHF 76t 67.8% +46.1R  (LONG 42W/+18.9R  SHORT 58W/+27.2R)
+#   USDCAD 77t 59.7% +38.9R  (LONG 55W/+23.9R  SHORT 36W/+15.0R)
+#   NZDUSD 53t 63.2% +28.6R  (LONG 39W/+18.1R  SHORT 26W/+10.5R)
+#   GBPJPY 89t 64.0% +49.9R  (LONG 63W/+30.0R  SHORT 48W/+19.9R)
+#   AUDJPY 27t 66.7% +14.7R  (LONG 25W/+12.5R  SHORT  7W/ +2.2R)
+#   GBPUSD 58t 72.4% +39.4R  (LONG 40W/+19.2R  SHORT 39W/+20.2R)
+#
+# The old rules came from a pre-SNB-floor / pre-COVID-rates world that
+# no longer exists. Keep the set empty; add a new entry only with
+# fresh minute-data evidence showing the pair/direction is actually a
+# drag on current-regime returns.
 
 
 # ============================================================================

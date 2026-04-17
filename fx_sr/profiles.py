@@ -40,6 +40,20 @@ PAIRS = {
     'AUDNZD': {'ticker': 'AUDNZD=X', 'pip': 0.0001, 'name': 'AUD/NZD', 'decimals': 5},
     'NZDJPY': {'ticker': 'NZDJPY=X', 'pip': 0.01,   'name': 'NZD/JPY', 'decimals': 3},
     'AUDCAD': {'ticker': 'AUDCAD=X', 'pip': 0.0001, 'name': 'AUD/CAD', 'decimals': 5},
+    # Range-based candidates added 2026-04-17 (see probe in git history).
+    # All trade via standard Forex() IBKR contract. HUF uses JPY-style
+    # pip/decimals because the quote magnitude is ~300 not ~1.
+    'USDSGD': {'ticker': 'USDSGD=X', 'pip': 0.0001, 'name': 'USD/SGD', 'decimals': 5},
+    'USDCNH': {'ticker': 'USDCNH=X', 'pip': 0.0001, 'name': 'USD/CNH', 'decimals': 5},
+    'EURDKK': {'ticker': 'EURDKK=X', 'pip': 0.0001, 'name': 'EUR/DKK', 'decimals': 5},
+    'USDNOK': {'ticker': 'USDNOK=X', 'pip': 0.0001, 'name': 'USD/NOK', 'decimals': 5},
+    'USDSEK': {'ticker': 'USDSEK=X', 'pip': 0.0001, 'name': 'USD/SEK', 'decimals': 5},
+    'EURNOK': {'ticker': 'EURNOK=X', 'pip': 0.0001, 'name': 'EUR/NOK', 'decimals': 5},
+    'EURSEK': {'ticker': 'EURSEK=X', 'pip': 0.0001, 'name': 'EUR/SEK', 'decimals': 5},
+    'USDMXN': {'ticker': 'USDMXN=X', 'pip': 0.0001, 'name': 'USD/MXN', 'decimals': 5},
+    'USDZAR': {'ticker': 'USDZAR=X', 'pip': 0.0001, 'name': 'USD/ZAR', 'decimals': 5},
+    'USDPLN': {'ticker': 'USDPLN=X', 'pip': 0.0001, 'name': 'USD/PLN', 'decimals': 5},
+    'USDHUF': {'ticker': 'USDHUF=X', 'pip': 0.01,   'name': 'USD/HUF', 'decimals': 4},
 }
 
 

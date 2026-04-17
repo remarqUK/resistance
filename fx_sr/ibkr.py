@@ -45,6 +45,17 @@ PAIR_TO_IB = {
     'AUDNZD': 'AUDNZD',
     'NZDJPY': 'NZDJPY',
     'AUDCAD': 'AUDCAD',
+    'USDSGD': 'USDSGD',
+    'USDCNH': 'USDCNH',
+    'EURDKK': 'EURDKK',
+    'USDNOK': 'USDNOK',
+    'USDSEK': 'USDSEK',
+    'EURNOK': 'EURNOK',
+    'EURSEK': 'EURSEK',
+    'USDMXN': 'USDMXN',
+    'USDZAR': 'USDZAR',
+    'USDPLN': 'USDPLN',
+    'USDHUF': 'USDHUF',
 }
 
 # Reverse: internal ticker/cache key -> our pair ID
@@ -71,6 +82,18 @@ TICKER_TO_PAIR = {
     'AUDNZD=X': 'AUDNZD',
     'NZDJPY=X': 'NZDJPY',
     'AUDCAD=X': 'AUDCAD',
+    # Range-based candidates (2026-04-17). Standard Forex contracts.
+    'USDSGD=X': 'USDSGD',
+    'USDCNH=X': 'USDCNH',
+    'EURDKK=X': 'EURDKK',
+    'USDNOK=X': 'USDNOK',
+    'USDSEK=X': 'USDSEK',
+    'EURNOK=X': 'EURNOK',
+    'EURSEK=X': 'EURSEK',
+    'USDMXN=X': 'USDMXN',
+    'USDZAR=X': 'USDZAR',
+    'USDPLN=X': 'USDPLN',
+    'USDHUF=X': 'USDHUF',
 }
 PAIR_TO_TICKER = {pair: ticker for ticker, pair in TICKER_TO_PAIR.items()}
 
@@ -104,6 +127,20 @@ def _get_env_int(name: str, default: int) -> int:
         return default
 
 
+def _get_env_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to default on empty/invalid values."""
+    raw = os.getenv(name)
+    if raw is None or raw == '':
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(default)
+    if value <= 0:
+        return float(default)
+    return value
+
+
 TWS_HOST = os.getenv('IBKR_HOST', DEFAULT_TWS_HOST)
 TWS_PORT = _get_env_int('IBKR_PORT', DEFAULT_TWS_PORT)
 TWS_CLIENT_ID = _get_env_int('IBKR_CLIENT_ID', DEFAULT_TWS_CLIENT_ID)
@@ -113,6 +150,8 @@ TWS_CLIENT_ID = _get_env_int('IBKR_CLIENT_ID', DEFAULT_TWS_CLIENT_ID)
 _THREAD_STATE = threading.local()
 _IBKR_LOCK = threading.RLock()
 _HISTORICAL_FETCH_CONCURRENCY = max(1, _get_env_int('IBKR_HISTORICAL_FETCH_CONCURRENCY', 2))
+_HISTORICAL_FETCH_TIMEOUT_SECONDS = max(1.0, _get_env_float('IBKR_HISTORICAL_FETCH_TIMEOUT_SECONDS', 20.0))
+_HISTORICAL_FETCH_RETRIES = max(1, _get_env_int('IBKR_HISTORICAL_FETCH_RETRIES', 2))
 _HISTORICAL_FETCH_SEMAPHORE = threading.BoundedSemaphore(_HISTORICAL_FETCH_CONCURRENCY)
 _HISTORICAL_REQUEST_GAP_SECONDS = max(0.0, _get_env_int('IBKR_HISTORICAL_REQUEST_GAP_MS', 200)) / 1000.0
 _HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS = max(5.0, _get_env_int('IBKR_HISTORICAL_FETCH_SLOT_TIMEOUT_MS', 15000) / 1000.0)
@@ -214,6 +253,7 @@ def _is_retriable_historical_error(error: Exception) -> bool:
         'timeout' in message
         or 'timed out' in message
         or '366' in message
+        or 'historical data query cancelled' in message
         or 'no historical data query found' in message
         or 'pacing violation' in message
     )
@@ -591,9 +631,11 @@ def fetch_historical(
 
     request_end = _format_historical_end_datetime(end_datetime)
 
-    request_timeout = 60.0 if timeout_s is None else max(1.0, float(timeout_s))
+    request_timeout = (
+        _HISTORICAL_FETCH_TIMEOUT_SECONDS if timeout_s is None else max(1.0, float(timeout_s))
+    )
     deadline = None if timeout_s is None else time.monotonic() + request_timeout
-    max_attempts = 3 if timeout_s is None else 1
+    max_attempts = _HISTORICAL_FETCH_RETRIES if timeout_s is None else 1
     for attempt in range(1, max_attempts + 1):
         try:
             slot_timeout = None
@@ -1981,10 +2023,12 @@ def neutralize_currency_balance(
             # Fall back to IDEALPRO + immediate close if FXCONV unavailable
             # (e.g. paper trading accounts).
             from ib_async import Forex
+            # Try both pair orderings — only one will be a valid IBKR symbol.
+            # e.g. for EUR balance with GBP account: EURGBP (sell EUR) or GBPEUR (buy GBP).
             attempts = [
+                (f'{currency.upper()}{account_currency.upper()}', action),
                 (f'{account_currency.upper()}{currency.upper()}',
                  'BUY' if amount > 0 else 'SELL'),
-                (f'{currency.upper()}{account_currency.upper()}', action),
             ]
 
             # Phase 1: try FXCONV
@@ -2025,7 +2069,7 @@ def neutralize_currency_balance(
             # Position" but the underlying cash balances DO convert.  We do
             # NOT close the virtual position — closing it would reverse the
             # cash conversion.  The virtual position is cosmetic.
-            order = MarketOrder(action, 0, orderRef=order_ref)
+            order = MarketOrder(action, 0, orderRef=order_ref, tif='IOC')
             order.cashQty = quantity
             trade = ib.placeOrder(contract, order)
             if hasattr(ib, 'sleep'):
@@ -2722,9 +2766,23 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
         cancel_error = None
         try:
             from ib_async import Order
+            skip_statuses = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE', 'PENDINGCANCEL'}
+            known_status_by_id: dict[int, str] = {}
+            try:
+                for trade in ib.reqAllOpenOrders():
+                    oid = getattr(getattr(trade, 'order', None), 'orderId', None)
+                    if oid is None:
+                        continue
+                    status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
+                    known_status_by_id[int(oid)] = status.upper()
+            except Exception:
+                known_status_by_id = {}
 
             for oid in order_ids:
                 try:
+                    status = known_status_by_id.get(int(oid), '')
+                    if status in skip_statuses:
+                        continue
                     order = Order(orderId=int(oid))
                     ib.cancelOrder(order)
                     cancelled.append(int(oid))

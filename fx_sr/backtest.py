@@ -50,7 +50,11 @@ from .serialization import (
     serialize_zone as shared_serialize_zone,
 )
 from .db import load_backtest_result, save_backtest_result, load_l2_snapshots, load_ohlc
-from .data import find_first_missing_cached_bar
+from .data import (
+    _provider_confirms_unfillable_gap,
+    _remember_provider_confirmed_gap,
+    find_first_missing_cached_bar,
+)
 from . import ibkr
 from .commission import compute_round_turn_commission
 from .sizing import build_position_size_plan_for_risk_amount, calculate_risk_amount
@@ -87,14 +91,21 @@ def _load_cached_data_window(
         )
 
     if validate_gaps:
-        first_missing = find_first_missing_cached_bar(
-            ticker,
-            interval,
-            start=start,
-            end=now,
-            now=now,
-            check_trailing=not allow_stale_cache,
-        )
+        while True:
+            first_missing = find_first_missing_cached_bar(
+                ticker,
+                interval,
+                start=start,
+                end=now,
+                now=now,
+                check_trailing=not allow_stale_cache,
+            )
+            if first_missing is None:
+                break
+            if _provider_confirms_unfillable_gap(ticker, interval, first_missing):
+                _remember_provider_confirmed_gap(ticker, interval, first_missing)
+                continue
+            break
         if first_missing is not None:
             raise BacktestCacheMissingError(
                 f'Cached {interval} data for {ticker} has a gap starting at {first_missing}; '
@@ -165,7 +176,7 @@ def _load_cached_backtest_data(
     ticker: str,
     hourly_days: int,
     zone_history_days: int,
-    allow_stale_cache: bool = False,
+    allow_stale_cache: bool = True,
     debug: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Load strictly cached inputs for one backtest pair."""
@@ -194,7 +205,7 @@ def _load_cached_backtest_data(
         int(hourly_days),
         enforce_coverage=False,
         allow_stale_cache=allow_stale_cache,
-        validate_gaps=not allow_stale_cache,
+        validate_gaps=True,
     )
     _dbg(f'stage=minute_data rows={len(minute_df)} elapsed={time.perf_counter() - t_stage:.2f}s')
     return daily_df, hourly_df, minute_df
@@ -1394,6 +1405,7 @@ def run_all_backtests_parallel(
             print(f'    [WAIT] {message}')
 
     results = {}
+    fetch_failures: list[tuple[str, str]] = []
     pair_items = [
         (pair, info)
         for pair, info in pairs.items()
@@ -1633,6 +1645,7 @@ def run_all_backtests_parallel(
                     except Exception as exc:
                         fetch_completed += 1
                         done += 1
+                        fetch_failures.append((pair, f'{type(exc).__name__}: {exc}'))
                         print(f"    [{done}/{total}] {pair}: fetch failed ({type(exc).__name__}: {exc})")
                         _debug(
                             f'phase1: fetch failed pair={pair} '
@@ -1679,6 +1692,7 @@ def run_all_backtests_parallel(
             except Exception as exc:
                 fetch_completed += 1
                 done += 1
+                fetch_failures.append((pair, f'{type(exc).__name__}: {exc}'))
                 print(
                     f"    [{done}/{total}] {pair}: fetch failed ({type(exc).__name__}: {exc})"
                 )
@@ -1704,8 +1718,25 @@ def run_all_backtests_parallel(
                 _debug(f'phase1: sequential no data pair={pair}')
             _debug(f'phase1: sequential fetch complete pair={pair} in {time.perf_counter() - t_fetch:.2f}s')
 
+    if fetch_failures:
+        print('\n  Phase 1 rejected pairs:')
+        for pair, reason in fetch_failures:
+            print(f'    {pair}: {reason}')
+        raise RuntimeError(
+            f'Backtest aborted: Phase 1 rejected {len(fetch_failures)} of {total} requested pairs'
+        )
+
     if not pair_data:
         return results
+
+    if len(pair_data) != total:
+        missing_pairs = sorted(pair for pair, _info in pair_items if pair not in pair_data)
+        print('\n  Phase 1 missing pairs after fetch:')
+        for pair in missing_pairs:
+            print(f'    {pair}')
+        raise RuntimeError(
+            f'Backtest aborted: only {len(pair_data)} of {total} requested pairs survived Phase 1'
+        )
 
     print(f"    Data fetched in {time.time() - t_phase_wall:.1f}s")
 
@@ -2250,6 +2281,7 @@ def calculate_execution_aware_compounding_pnl(
     risk_pct: float = 0.05,
     params: StrategyParams = None,
     account_currency: str = 'GBP',
+    compound: bool = True,
 ) -> ExecutionAwarePortfolioResult:
     """Run the live-style portfolio admission funnel over historical trades."""
 
@@ -2294,9 +2326,10 @@ def calculate_execution_aware_compounding_pnl(
 
         current_balance = (
             float(state.balance)
-            if state.balance is not None
+            if compound and state.balance is not None
             else float(starting_balance)
         )
+        peak_balance = float(state.peak_balance) if compound else float(starting_balance)
         slot_risk_amount = calculate_risk_amount(current_balance, risk_pct)
         active_reserved_risk = sum(exposure.risk_amount for exposure in active)
         correlation_cap = max(int(params.max_correlated_trades), 1)
@@ -2352,7 +2385,7 @@ def calculate_execution_aware_compounding_pnl(
                 risk_pct,
                 params=params,
                 balance=current_balance,
-                peak_balance=state.peak_balance,
+                peak_balance=peak_balance,
                 quality_score=trade.quality_score,
             )
             risk_amount = calculate_risk_amount(current_balance, effective_risk)
@@ -2548,6 +2581,7 @@ def calculate_compounding_pnl(
     starting_balance: float = 1000.0,
     risk_pct: float = 0.05,
     params: StrategyParams = None,
+    compound: bool = True,
 ) -> Tuple[List[Tuple[str, Trade, float, float, float]], float]:
     """Calculate compounding P&L from backtest results.
 
@@ -2585,15 +2619,17 @@ def calculate_compounding_pnl(
         if pause_until is not None and t.entry_time <= pause_until:
             continue
 
+        sizing_balance = balance if compound else starting_balance
+        sizing_peak = peak_balance if compound else starting_balance
         effective_risk = calculate_effective_risk_pct(
             risk_pct,
             params=params,
-            balance=balance,
-            peak_balance=peak_balance,
+            balance=sizing_balance,
+            peak_balance=sizing_peak,
             quality_score=t.quality_score,
         )
 
-        risk_amt = calculate_risk_amount(balance, effective_risk)
+        risk_amt = calculate_risk_amount(sizing_balance, effective_risk)
         fraction = float(getattr(t, 'position_fraction', 1.0))
         pnl = risk_amt * fraction * t.pnl_r
         balance += pnl
@@ -2622,70 +2658,149 @@ def format_compounding_results(
     filter_note: str = "filtered from {total_pre_filter} by correlation",
     skip_counts: Dict[str, int] | None = None,
 ) -> str:
-    """Format compounding P&L results as a readable report."""
+    """Format compounding P&L results as a readable report.
+
+    Partial-close trades produce two legs (PARTIAL_TP + remainder). The per-row
+    view shows both legs labeled ``PAIR(a)`` / ``PAIR(b)`` so the lineage is
+    visible. All totals (trade count, WR, avg win/loss, losing streak, monthly
+    trade counts) collapse legs back into their parent trade group and use
+    position-fraction-weighted R, so a split winner counts as one trade at
+    ~+1.1R, not two trades at +1.1R each.
+    """
+    from collections import defaultdict as _dd
+
+    # --- Group legs into real trades ---
+    # A partial-closed trade is recorded as two rows in trade_log sharing the
+    # same trade_group_id. Singleton trades don't have a group_id, so we fall
+    # back to (pair, entry_time) which is unique because only one trade per
+    # pair can be open at a time.
+    group_legs: dict[str, list[int]] = _dd(list)
+    for i, (pair, t, _, _, _) in enumerate(trade_log):
+        gid = getattr(t, 'trade_group_id', None) or f'{pair}|{t.entry_time}'
+        group_legs[gid].append(i)
+
+    leg_suffix: dict[int, str] = {}
+    first_leg_of_group: set[int] = set()
+    last_leg_of_group: dict[int, str] = {}
+    group_r: dict[str, float] = {}
+    for gid, idxs in group_legs.items():
+        idxs_sorted = sorted(
+            idxs,
+            key=lambda i: trade_log[i][1].exit_time or pd.Timestamp.min,
+        )
+        first_leg_of_group.add(idxs_sorted[0])
+        last_leg_of_group[idxs_sorted[-1]] = gid
+        if len(idxs_sorted) > 1:
+            for pos, i in enumerate(idxs_sorted):
+                leg_suffix[i] = chr(ord('a') + pos)
+        group_r[gid] = sum(
+            trade_log[i][1].pnl_r * float(getattr(trade_log[i][1], 'position_fraction', 1.0))
+            for i in idxs_sorted
+        )
+
+    # Per-row display only covers the last 7 days of exits so a 365-day run
+    # doesn't dump thousands of rows. Totals, monthly breakdown, drawdown,
+    # and streak still compute over every trade.
+    display_cutoff: pd.Timestamp | None = None
+    last_exit = None
+    for _, t, _, _, _ in trade_log:
+        if t.exit_time is None:
+            continue
+        if last_exit is None or t.exit_time > last_exit:
+            last_exit = t.exit_time
+    if last_exit is not None:
+        display_cutoff = last_exit - pd.Timedelta(days=7)
+
     lines = []
     lines.append("=" * 176)
     lines.append(f"  {title}")
     lines.append("=" * 176)
+    if display_cutoff is not None:
+        lines.append(
+            f"  Showing trades with exit on/after {display_cutoff.strftime('%Y-%m-%d %H:%M')} "
+            f"- totals below cover all {len(trade_log)} legs"
+        )
     lines.append(
-        f"  {'#':>3} {'Entry Time':<17} {'Exit Time':<17} {'Pair':<8} {'Dir':>5} "
+        f"  {'#':>3} {'Entry Time':<17} {'Exit Time':<17} {'Pair':<10} {'Dir':>5} "
         f"{'Entry':>10} {'Exit':>10} {'Reason':>10} "
         f"{'Bars':>5} {'R-Mult':>7} {'Risk':>10} {'P&L':>11} {'Balance':>12}"
     )
     lines.append("-" * 176)
 
-    monthly = {}
+    monthly: dict[str, dict] = {}
     peak = starting_balance
     max_dd = 0.0
     streak = 0
     max_losing_streak = 0
 
     for idx, (pair, t, risk_amt, pnl, balance) in enumerate(trade_log, 1):
+        leg_idx = idx - 1
         pair_info = PAIRS.get(pair, {})
         dec = pair_info.get('decimals', 5)
         entry_ts = str(t.entry_time)[:16] if t.entry_time else ''
         exit_ts = str(t.exit_time)[:16] if t.exit_time else ''
         entry_px = f"{t.entry_price:.{dec}f}" if t.entry_price else ''
         exit_px = f"{t.exit_price:.{dec}f}" if t.exit_price else ''
-        lines.append(
-            f"  {idx:>3} {entry_ts:<17} {exit_ts:<17} {pair:<8} {t.direction:>5} "
-            f"{entry_px:>10} {exit_px:>10} {t.exit_reason:>10} "
-            f"{t.bars_held:>5} {t.pnl_r:>+7.2f}R "
-            f"  GBP {risk_amt:>8.2f}  GBP {pnl:>+9.2f}  GBP {balance:>11.2f}"
+        pair_display = (
+            f"{pair}({leg_suffix[leg_idx]})" if leg_idx in leg_suffix else pair
         )
 
-        # Monthly tracking
+        within_window = (
+            display_cutoff is None
+            or (t.exit_time is not None and t.exit_time >= display_cutoff)
+        )
+        if within_window:
+            lines.append(
+                f"  {idx:>3} {entry_ts:<17} {exit_ts:<17} {pair_display:<10} {t.direction:>5} "
+                f"{entry_px:>10} {exit_px:>10} {t.exit_reason:>10} "
+                f"{t.bars_held:>5} {t.pnl_r:>+7.2f}R "
+                f"  GBP {risk_amt:>8.2f}  GBP {pnl:>+9.2f}  GBP {balance:>11.2f}"
+            )
+
+        # Monthly tracking — count each trade group once (at its first leg),
+        # but sum dollar P&L across every leg (legs carry their own share).
         month_key = str(t.entry_time)[:7]
         if month_key not in monthly:
             monthly[month_key] = {'trades': 0, 'pnl': 0.0, 'start_bal': balance - pnl}
-        monthly[month_key]['trades'] += 1
         monthly[month_key]['pnl'] += pnl
+        if leg_idx in first_leg_of_group:
+            monthly[month_key]['trades'] += 1
 
-        # Drawdown tracking
+        # Drawdown tracking — uses balance, correct at the leg level.
         if balance > peak:
             peak = balance
         dd = (peak - balance) / peak * 100 if peak > 0 else 0
         if dd > max_dd:
             max_dd = dd
 
-        # Losing streak tracking
-        if t.pnl_r <= 0:
-            streak += 1
-            if streak > max_losing_streak:
-                max_losing_streak = streak
-        else:
-            streak = 0
+        # Losing streak — update once per trade group at its final leg using
+        # the group's net R so a split winner (partial+TP) breaks the streak.
+        if leg_idx in last_leg_of_group:
+            final_r = group_r[last_leg_of_group[leg_idx]]
+            if final_r < 0:
+                streak += 1
+                if streak > max_losing_streak:
+                    max_losing_streak = streak
+            else:
+                streak = 0
 
-    # Exit type counts
-    exit_counts = {}
+    # Exit type counts — per-leg, useful diagnostic (shows partials firing).
+    exit_counts: dict[str, int] = {}
     for _, t, _, _, _ in trade_log:
         r = t.exit_reason or 'UNKNOWN'
         exit_counts[r] = exit_counts.get(r, 0) + 1
 
-    wins = [e for e in trade_log if e[1].pnl_r > 0]
-    losses = [e for e in trade_log if e[1].pnl_r <= 0]
-    avg_win = np.mean([e[1].pnl_r for e in wins]) if wins else 0
-    avg_loss = np.mean([e[1].pnl_r for e in losses]) if losses else 0
+    # Headline stats — collapsed to real trade groups, fraction-weighted R.
+    group_r_values = list(group_r.values())
+    wins_r = [r for r in group_r_values if r > 0]
+    losses_r = [r for r in group_r_values if r < 0]
+    flats_r = [r for r in group_r_values if r == 0]
+    avg_win = float(np.mean(wins_r)) if wins_r else 0.0
+    avg_loss = float(np.mean(losses_r)) if losses_r else 0.0
+    n_trades = len(group_r_values)
+    n_legs = len(trade_log)
+    n_split = sum(1 for idxs in group_legs.values() if len(idxs) > 1)
+    wr = (len(wins_r) / n_trades * 100) if n_trades else 0.0
 
     lines.append("=" * 176)
 
@@ -2714,12 +2829,18 @@ def format_compounding_results(
     lines.append(f"  Net P&L:              GBP {final_balance - starting_balance:+,.2f} "
                  f"({(final_balance - starting_balance) / starting_balance * 100:+.1f}%)")
     lines.append(
-        f"  Total trades:         {len(trade_log)} "
+        f"  Total trades:         {n_trades} real "
+        f"({n_legs} legs incl. {n_split} split-exit) "
         f"({filter_note.format(total_pre_filter=total_pre_filter)})"
     )
-    lines.append(f"  Wins: {len(wins)}  Losses: {len(losses)}  "
-                 f"Win rate: {len(wins)/len(trade_log)*100:.1f}%" if trade_log else "")
-    lines.append(f"  Avg win: {avg_win:+.2f}R  Avg loss: {avg_loss:+.2f}R")
+    if n_trades:
+        flats_note = f"  Flats: {len(flats_r)}" if flats_r else ''
+        lines.append(
+            f"  Wins: {len(wins_r)}  Losses: {len(losses_r)}{flats_note}  "
+            f"Win rate: {wr:.1f}%"
+        )
+    lines.append(f"  Avg win: {avg_win:+.2f}R  Avg loss: {avg_loss:+.2f}R  "
+                 f"(fraction-weighted, per real trade)")
     lines.append(f"  Peak balance:         GBP {peak:,.2f}")
     lines.append(f"  Max drawdown:         {max_dd:.1f}%")
     lines.append(f"  Max losing streak:    {max_losing_streak} trades")

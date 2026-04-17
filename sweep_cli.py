@@ -25,11 +25,9 @@ from fx_sr.sweep import (
 )
 
 def build_variants() -> list[tuple[str, dict]]:
-    """Minor-zone unlock sweep. The previous two sweeps showed that entry
-    and zone-detection tuning can't break the ~2,500-trade ceiling because
-    `get_tradeable_zones` hardcodes major-only. `allow_minor_zones=True`
-    uses the new `get_tradeable_zones_permissive` path so minor zones also
-    produce signals. All variants keep `max_correlated_trades=5`."""
+    """Variants confirmed in the minor-zone sweep. max_concurrent_per_pair
+    variants are omitted until walkforward_concurrent.py parity bug is
+    fixed — see tmp_wfc_parity.py for the failing test."""
 
     CORR5 = {'max_correlated_trades': 5}
     MINOR = {'allow_minor_zones': True}
@@ -38,28 +36,13 @@ def build_variants() -> list[tuple[str, dict]]:
         ('baseline', {}),
         ('corr5_only', CORR5),
         ('corr5_minor', {**CORR5, **MINOR}),
-        # Minor zones + entry-filter loosening
         ('corr5_minor_pen_25', {**CORR5, **MINOR, 'zone_penetration_pct': 0.25}),
         ('corr5_minor_mom_60', {**CORR5, **MINOR, 'momentum_threshold': 0.60}),
-        # Minor zones + zone-detection tweaks
         ('corr5_minor_touches_2', {**CORR5, **MINOR, 'major_touches': 2}),
-        # Full-throttle — minor on, aggressive entries
         ('combo_minor_aggressive', {
             **CORR5, **MINOR,
             'zone_penetration_pct': 0.25,
             'momentum_threshold': 0.55,
-        }),
-        # Minor + tighter SL cap to control risk on lower-conviction setups
-        ('corr5_minor_sl_tight', {**CORR5, **MINOR, 'max_sl_pct': 0.18}),
-        # Minor + reduced quality risk range (sizing cushion)
-        ('corr5_minor_quality_cap', {
-            **CORR5, **MINOR,
-            'quality_risk_max': 1.2,
-        }),
-        ('corr5_minor_combo_safe', {
-            **CORR5, **MINOR,
-            'max_sl_pct': 0.18,
-            'quality_risk_max': 1.2,
         }),
     ]
 

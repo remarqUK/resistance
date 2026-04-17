@@ -201,6 +201,12 @@ class StrategyParams:
     # legacy `major_only=True` behaviour. Enables a parameter-sweep path that
     # tests whether lower-conviction setups add net expectancy.
     allow_minor_zones: bool = False
+    # Opt-in: maximum concurrent open trades per pair. Default 1 preserves
+    # legacy singleton-trade-per-pair behaviour. When > 1, the walk-forward
+    # may open additional trades on different zones while earlier trades
+    # remain open. A zone that already has an open trade never fires a
+    # second entry while the first is live.
+    max_concurrent_per_pair: int = 1
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -284,6 +290,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         trailing_activate_r=merged.get('trailing_activate_r', 1.0),
         trailing_requires_partial=merged.get('trailing_requires_partial', True),
         allow_minor_zones=merged.get('allow_minor_zones', False),
+        max_concurrent_per_pair=merged.get('max_concurrent_per_pair', 1),
     )
 
 

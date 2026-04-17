@@ -584,7 +584,7 @@ PROFILES = {
     },
 }
 
-DEFAULT_PROFILE = 'high_volume'
+DEFAULT_PROFILE = 'high_volume_corr5_minor'
 
 
 # ============================================================================

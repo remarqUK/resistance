@@ -12,7 +12,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fx_sr.profiles import PROFILES, PAIRS
+from fx_sr.profiles import DEFAULT_PROFILE, PROFILES, PAIRS
 from fx_sr.strategy import params_from_profile
 from fx_sr.backtest import (
     _load_cached_backtest_data,
@@ -21,7 +21,7 @@ from fx_sr.backtest import (
     calculate_execution_aware_compounding_pnl,
 )
 
-PROFILE_NAME = 'high_volume'
+PROFILE_NAME = DEFAULT_PROFILE
 HOURLY_DAYS = 178           # backtest window: ~6 months (180 hits cache boundary)
 SWEEP_VALUES = [60, 90, 120, 150, 180]  # 30-day increments
 

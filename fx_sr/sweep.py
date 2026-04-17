@@ -33,7 +33,7 @@ from .backtest import (
 from .config import PAIRS
 from .db import load_l2_snapshots
 from .levels import SRZone, detect_zones
-from .profiles import get_profile
+from .profiles import DEFAULT_PROFILE, get_profile
 from .strategy import StrategyParams, params_from_profile
 
 # Keys in a profile/overrides dict that, if changed, invalidate the zone
@@ -141,7 +141,7 @@ def preload_sweep_dataset(
     pairs: list[str],
     hourly_days: int,
     zone_history_days: int,
-    profile_name: str = 'high_volume',
+    profile_name: str = DEFAULT_PROFILE,
 ) -> SweepDataset:
     """Load OHLC, L2 snapshots, and the zone cache once for reuse across variants."""
 

@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import sys
 
-from fx_sr.profiles import PAIRS, PROFILES, get_profile
+from fx_sr.profiles import DEFAULT_PROFILE, PAIRS, PROFILES, get_profile
 from fx_sr.backtest import (
     _load_cached_backtest_data,
     calculate_execution_aware_compounding_pnl,
@@ -406,7 +406,7 @@ def _parse_args():
     )
     parser.add_argument(
         '--profile',
-        default='high_volume',
+        default=DEFAULT_PROFILE,
         choices=sorted(PROFILES.keys()),
         help='Strategy profile to use as search baseline',
     )

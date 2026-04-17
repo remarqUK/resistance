@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from fx_sr.profiles import PROFILES, PAIRS, BLOCKED_PAIR_DIRECTIONS
+from fx_sr.profiles import DEFAULT_PROFILE, PROFILES, PAIRS, BLOCKED_PAIR_DIRECTIONS
 from fx_sr.strategy import params_from_profile
 from fx_sr.backtest import (
     precompute_zone_cache_parallel, run_backtest_fast,
@@ -174,7 +174,7 @@ ABBREV = {
 
 def main():
     t0 = time.time()
-    base = PROFILES['high_volume']
+    base = PROFILES[DEFAULT_PROFILE]
 
     print("Loading data...")
     data = fetch_all_data(base)

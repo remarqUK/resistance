@@ -6,7 +6,7 @@ This preserves upside compounding while capping drawdown.
 import sys, os, time
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fx_sr.profiles import PROFILES, PAIRS
+from fx_sr.profiles import DEFAULT_PROFILE, PROFILES, PAIRS
 from fx_sr.strategy import params_from_profile, StrategyParams
 from fx_sr.backtest import (
     precompute_zone_cache_parallel, run_backtest_fast,
@@ -88,7 +88,7 @@ def score_dynamic(filtered_trades, base_risk, dd_start, dd_full, floor_risk, sta
 
 def main():
     t0 = time.time()
-    base = PROFILES['high_volume']
+    base = PROFILES[DEFAULT_PROFILE]
 
     print("Loading data...")
     data = fetch_all_data(base)

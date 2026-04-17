@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fx_sr.profiles import PAIRS
+from fx_sr.profiles import DEFAULT_PROFILE, PAIRS
 from fx_sr.multi_zone.mz_h1_zones import build_h1_zone_cache
 from fx_sr.multi_zone.mz_runner import (
     MultiZoneSweepResult,
@@ -71,7 +71,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument('--days', type=int, default=365)
     parser.add_argument('--zone-days', type=int, default=180)
     parser.add_argument('--pairs', type=str, default=','.join(sorted(PAIRS)))
-    parser.add_argument('--profile', type=str, default='high_volume')
+    parser.add_argument('--profile', type=str, default=DEFAULT_PROFILE)
     parser.add_argument('--out-dir', type=str, default='sweep_reports')
     args = parser.parse_args(argv)
 

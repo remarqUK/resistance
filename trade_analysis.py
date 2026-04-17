@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 import pandas as pd
-from fx_sr.profiles import PROFILES, PAIRS, BLOCKED_PAIR_DIRECTIONS
+from fx_sr.profiles import DEFAULT_PROFILE, PROFILES, PAIRS, BLOCKED_PAIR_DIRECTIONS
 from fx_sr.strategy import params_from_profile, StrategyParams
 from fx_sr.backtest import (
     precompute_zone_cache_parallel, run_backtest_fast,
@@ -48,7 +48,7 @@ def monthly_breakdown(trade_log):
 
 def run_config(data, zone_cache, profile_overrides, extra_blocks=None):
     """Run backtest with profile overrides and optional extra pair+direction blocks."""
-    base = {**PROFILES['high_volume'], **profile_overrides}
+    base = {**PROFILES[DEFAULT_PROFILE], **profile_overrides}
     params = params_from_profile(base)
 
     results = {}
@@ -94,7 +94,7 @@ def run_config(data, zone_cache, profile_overrides, extra_blocks=None):
 
 
 def main():
-    base = PROFILES['high_volume']
+    base = PROFILES[DEFAULT_PROFILE]
     print("Fetching data...")
     data = fetch_all_data(base)
     print("Pre-computing zones...")

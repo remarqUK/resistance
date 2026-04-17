@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fx_sr.backtest import format_compounding_results
-from fx_sr.profiles import PAIRS
+from fx_sr.profiles import DEFAULT_PROFILE, PAIRS
 from fx_sr.sweep import (
     SweepResult,
     format_sweep_table,
@@ -68,7 +68,7 @@ def main(argv: list[str]) -> int:
         default=','.join(sorted(PAIRS)),
         help='Comma-separated pair list. Defaults to all configured pairs.',
     )
-    parser.add_argument('--profile', type=str, default='high_volume')
+    parser.add_argument('--profile', type=str, default=DEFAULT_PROFILE)
     parser.add_argument(
         '--out-dir',
         type=str,

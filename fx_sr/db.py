@@ -51,19 +51,103 @@ try:
 except Exception:  # pragma: no cover - tests may patch import paths
     PAIRS = {}
 
-_KNOWN_TICKERS = sorted(
-    {
-        info['ticker']
-        for info in PAIRS.values()
-        if isinstance(info, dict) and info.get('ticker')
-    }
-)
-_KNOWN_PAIRS = sorted(PAIRS.keys())
+# ---------------------------------------------------------------------------
+# Ticker registry — stable enum-like mapping from ticker/pair to SMALLINT code.
+# ---------------------------------------------------------------------------
+# The ohlc table stores `ticker` as a SMALLINT code for space efficiency.
+# Codes MUST be stable across versions: inserting a new pair must not shift
+# any existing code, or historical rows get relabeled as different tickers.
+#
+# This is why we can't derive codes from sorted(ticker_name) + enumerate:
+# any alphabetic insertion shifts every later code, invalidating years of
+# stored OHLC data.
+#
+# Rule for adding a new pair:
+#   1. Add the PAIRS entry in fx_sr/profiles.py.
+#   2. Append the ticker here with the next unused integer.
+#   3. Append the pair name to _PAIR_REGISTRY similarly.
+# The validator at module load enforces that these two registries stay in
+# sync with PAIRS and that no code is duplicated or skipped-as-gap-inside-
+# allocated-range.
 
-TICKER_TO_CODE = {ticker: idx + 1 for idx, ticker in enumerate(_KNOWN_TICKERS)}
-CODE_TO_TICKER = {code: ticker for ticker, code in TICKER_TO_CODE.items()}
-PAIR_TO_CODE = {pair: idx + 1 for idx, pair in enumerate(_KNOWN_PAIRS)}
-CODE_TO_PAIR = {code: pair for pair, code in PAIR_TO_CODE.items()}
+_TICKER_REGISTRY: dict[str, int] = {
+    # Original 22 FX pairs — codes allocated on 2026-04-17 when this table
+    # replaced the unstable sort-based mapping. Preserve these forever.
+    'AUDCAD=X': 1,  'AUDJPY=X': 2,  'AUDNZD=X': 3,  'AUDUSD=X': 4,
+    'CAD=X':    5,  'CADJPY=X': 6,  'CHF=X':    7,  'CHFJPY=X': 8,
+    'EURAUD=X': 9,  'EURCAD=X': 10, 'EURCHF=X': 11, 'EURGBP=X': 12,
+    'EURJPY=X': 13, 'EURUSD=X': 14, 'GBPAUD=X': 15, 'GBPCAD=X': 16,
+    'GBPCHF=X': 17, 'GBPJPY=X': 18, 'GBPUSD=X': 19, 'JPY=X':    20,
+    'NZDJPY=X': 21, 'NZDUSD=X': 22,
+    # Range-based additions (2026-04-17). Next unused slots.
+    'EURDKK=X': 23, 'EURNOK=X': 24, 'EURSEK=X': 25,
+    'USDCNH=X': 26, 'USDHUF=X': 27, 'USDMXN=X': 28,
+    'USDNOK=X': 29, 'USDPLN=X': 30, 'USDSEK=X': 31,
+    'USDSGD=X': 32, 'USDZAR=X': 33,
+}
+
+_PAIR_REGISTRY: dict[str, int] = {
+    'AUDCAD': 1,  'AUDJPY': 2,  'AUDNZD': 3,  'AUDUSD': 4,
+    'USDCAD': 5,  'CADJPY': 6,  'USDCHF': 7,  'CHFJPY': 8,
+    'EURAUD': 9,  'EURCAD': 10, 'EURCHF': 11, 'EURGBP': 12,
+    'EURJPY': 13, 'EURUSD': 14, 'GBPAUD': 15, 'GBPCAD': 16,
+    'GBPCHF': 17, 'GBPJPY': 18, 'GBPUSD': 19, 'USDJPY': 20,
+    'NZDJPY': 21, 'NZDUSD': 22,
+    'EURDKK': 23, 'EURNOK': 24, 'EURSEK': 25,
+    'USDCNH': 26, 'USDHUF': 27, 'USDMXN': 28,
+    'USDNOK': 29, 'USDPLN': 30, 'USDSEK': 31,
+    'USDSGD': 32, 'USDZAR': 33,
+}
+
+
+def _validate_registries() -> None:
+    """Assert both registries are well-formed + consistent with PAIRS.
+
+    Fails fast at import time if anyone adds a ticker/pair without also
+    assigning it a stable code. That's intentional — silently letting an
+    unknown ticker through would corrupt ohlc rows the first time anyone
+    persists data for it.
+    """
+    # Registry internal consistency
+    for label, registry in (('ticker', _TICKER_REGISTRY), ('pair', _PAIR_REGISTRY)):
+        codes = list(registry.values())
+        if len(set(codes)) != len(codes):
+            dups = [c for c in codes if codes.count(c) > 1]
+            raise RuntimeError(
+                f'Duplicate code(s) {sorted(set(dups))} in {label} registry'
+            )
+        if codes and (min(codes) < 1):
+            raise RuntimeError(
+                f'Non-positive code in {label} registry: min={min(codes)}'
+            )
+
+    # Cross-check with PAIRS (if it's been imported)
+    if PAIRS:
+        known_tickers = {
+            info['ticker'] for info in PAIRS.values()
+            if isinstance(info, dict) and info.get('ticker')
+        }
+        missing_tickers = known_tickers - set(_TICKER_REGISTRY)
+        if missing_tickers:
+            raise RuntimeError(
+                'fx_sr.profiles.PAIRS contains tickers not registered in '
+                'fx_sr.db._TICKER_REGISTRY (add them with the next unused '
+                f'integer code): {sorted(missing_tickers)}'
+            )
+        missing_pairs = set(PAIRS.keys()) - set(_PAIR_REGISTRY)
+        if missing_pairs:
+            raise RuntimeError(
+                'fx_sr.profiles.PAIRS contains pairs not registered in '
+                f'fx_sr.db._PAIR_REGISTRY: {sorted(missing_pairs)}'
+            )
+
+
+_validate_registries()
+
+TICKER_TO_CODE: dict[str, int] = dict(_TICKER_REGISTRY)
+CODE_TO_TICKER: dict[int, str] = {code: ticker for ticker, code in TICKER_TO_CODE.items()}
+PAIR_TO_CODE: dict[str, int] = dict(_PAIR_REGISTRY)
+CODE_TO_PAIR: dict[int, str] = {code: pair for pair, code in PAIR_TO_CODE.items()}
 
 INTERVAL_TO_CODE = {
     '1m': 1,

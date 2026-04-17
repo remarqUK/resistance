@@ -1,17 +1,20 @@
 """Walk-forward variant that supports multiple concurrent trades per pair.
 
-STATUS: WORK-IN-PROGRESS — DO NOT WIRE INTO PRODUCTION.
+STATUS:
+- cap=1: delegates to legacy ``run_walk_forward``, so parity is
+  guaranteed (verified via ``tmp_wfc_parity.py``).
+- cap>=2: inline multi-slot path produces incorrect results (WR collapse
+  64% -> 33% in smoke tests). Guarded with NotImplementedError until the
+  state-divergence bug between this port and the legacy exit flow is
+  diagnosed. Candidate next design: run legacy first to get a correct
+  primary trade set, then do a second pass that opens secondary trades
+  on zones the primary wasn't occupying at each bar. That preserves
+  legacy behaviour for the primary slot by construction.
 
-A cap=1 parity check on EURUSD/120d (tmp_wfc_parity.py) showed 120 vs
-123 trades with differing exit reasons on the same entry bars. The port
-reuses the legacy helpers but there is a subtle order-of-operations or
-state-mutation bug between here and run_walk_forward. Until diagnosed,
-this function is gated off — run_backtest_fast always uses legacy.
-
-Sibling to ``run_walk_forward`` in ``walkforward.py``. Intended to reuse
-the exact same exit mechanics (``check_exit``, ``check_partial_close``,
-minute-resolution exit scanning), execution plan builder, and trade
-finalizer, so per-trade P&L and partial-close behaviour is identical.
+Sibling to ``run_walk_forward`` in ``walkforward.py``. Reuses the exact
+same exit mechanics (``check_exit``, ``check_partial_close``, minute-
+resolution exit scanning), execution plan builder, and trade finalizer,
+so per-trade P&L and partial-close behaviour are identical at cap=1.
 
 Differences from ``run_walk_forward``:
 - Maintains a list of open trades instead of a singleton. Up to
@@ -72,6 +75,7 @@ from .walkforward import (
     _next_bar_submit_time,
     finalize_trade,
     resolve_entry_signal_for_bar,
+    run_walk_forward,
 )
 
 
@@ -105,6 +109,37 @@ def run_walk_forward_concurrent(
     """
 
     cap = max(1, int(params.max_concurrent_per_pair))
+
+    # When cap=1 there's no multi-trade logic to exercise — delegate to the
+    # battle-tested legacy walk-forward. This guarantees bit-for-bit parity
+    # at cap=1 (verified via tmp_wfc_parity.py).
+    if cap == 1:
+        return run_walk_forward(
+            hourly_df,
+            pair=pair,
+            params=params,
+            pip=pip,
+            zone_provider=zone_provider,
+            execution_quote_provider=execution_quote_provider,
+            minute_df=minute_df,
+            execution_mode=execution_mode,
+            force_close_end=force_close_end,
+            debug=debug,
+            daily_df=daily_df,
+        )
+
+    # cap >= 2: inline multi-slot loop below diverges from legacy behaviour
+    # even on the primary trade (smoke showed WR collapse 64% -> 33% in
+    # sweep_reports/20260417-091254). Guard it until a correct design is
+    # implemented. The intended design is a two-pass approach: run legacy
+    # run_walk_forward as pass 1 to produce correct primary trades, then
+    # walk bars again (pass 2) opening secondary trades only on zones the
+    # primary wasn't occupying at that bar. That keeps the legacy code
+    # exactly unchanged for the primary slot by construction.
+    raise NotImplementedError(
+        f'max_concurrent_per_pair={cap} is not yet correctly supported. '
+        'See status comment at top of fx_sr/walkforward_concurrent.py.'
+    )
 
     atr_series = (
         compute_atr(hourly_df, period=params.atr_period)

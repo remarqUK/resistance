@@ -40,20 +40,6 @@ PAIRS = {
     'AUDNZD': {'ticker': 'AUDNZD=X', 'pip': 0.0001, 'name': 'AUD/NZD', 'decimals': 5},
     'NZDJPY': {'ticker': 'NZDJPY=X', 'pip': 0.01,   'name': 'NZD/JPY', 'decimals': 3},
     'AUDCAD': {'ticker': 'AUDCAD=X', 'pip': 0.0001, 'name': 'AUD/CAD', 'decimals': 5},
-    # Range-based candidates added 2026-04-17 (see probe in git history).
-    # All trade via standard Forex() IBKR contract. HUF uses JPY-style
-    # pip/decimals because the quote magnitude is ~300 not ~1.
-    'USDSGD': {'ticker': 'USDSGD=X', 'pip': 0.0001, 'name': 'USD/SGD', 'decimals': 5},
-    'USDCNH': {'ticker': 'USDCNH=X', 'pip': 0.0001, 'name': 'USD/CNH', 'decimals': 5},
-    'EURDKK': {'ticker': 'EURDKK=X', 'pip': 0.0001, 'name': 'EUR/DKK', 'decimals': 5},
-    'USDNOK': {'ticker': 'USDNOK=X', 'pip': 0.0001, 'name': 'USD/NOK', 'decimals': 5},
-    'USDSEK': {'ticker': 'USDSEK=X', 'pip': 0.0001, 'name': 'USD/SEK', 'decimals': 5},
-    'EURNOK': {'ticker': 'EURNOK=X', 'pip': 0.0001, 'name': 'EUR/NOK', 'decimals': 5},
-    'EURSEK': {'ticker': 'EURSEK=X', 'pip': 0.0001, 'name': 'EUR/SEK', 'decimals': 5},
-    'USDMXN': {'ticker': 'USDMXN=X', 'pip': 0.0001, 'name': 'USD/MXN', 'decimals': 5},
-    'USDZAR': {'ticker': 'USDZAR=X', 'pip': 0.0001, 'name': 'USD/ZAR', 'decimals': 5},
-    'USDPLN': {'ticker': 'USDPLN=X', 'pip': 0.0001, 'name': 'USD/PLN', 'decimals': 5},
-    'USDHUF': {'ticker': 'USDHUF=X', 'pip': 0.01,   'name': 'USD/HUF', 'decimals': 4},
 }
 
 
@@ -66,20 +52,9 @@ PAIRS = {
 
 BLOCKED_PAIR_DIRECTIONS: set[tuple[str, str]] = set()
 # Historically blocked under pre-2023 regimes; re-evaluated 2026-04-17
-# with proper 2y minute data on high_volume_corr5_minor (see commit
-# message for the full table). Every prior entry now shows positive
-# expectancy in both directions:
-#   EURCHF 76t 67.8% +46.1R  (LONG 42W/+18.9R  SHORT 58W/+27.2R)
-#   USDCAD 77t 59.7% +38.9R  (LONG 55W/+23.9R  SHORT 36W/+15.0R)
-#   NZDUSD 53t 63.2% +28.6R  (LONG 39W/+18.1R  SHORT 26W/+10.5R)
-#   GBPJPY 89t 64.0% +49.9R  (LONG 63W/+30.0R  SHORT 48W/+19.9R)
-#   AUDJPY 27t 66.7% +14.7R  (LONG 25W/+12.5R  SHORT  7W/ +2.2R)
-#   GBPUSD 58t 72.4% +39.4R  (LONG 40W/+19.2R  SHORT 39W/+20.2R)
-#
-# The old rules came from a pre-SNB-floor / pre-COVID-rates world that
-# no longer exists. Keep the set empty; add a new entry only with
-# fresh minute-data evidence showing the pair/direction is actually a
-# drag on current-regime returns.
+# with proper 2y minute data on high_volume_corr5_minor. Every prior
+# entry now shows positive expectancy in both directions, so the set
+# is kept empty. See commit ae8a6af for the full evidence table.
 
 
 # ============================================================================

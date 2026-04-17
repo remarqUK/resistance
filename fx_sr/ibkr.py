@@ -45,17 +45,6 @@ PAIR_TO_IB = {
     'AUDNZD': 'AUDNZD',
     'NZDJPY': 'NZDJPY',
     'AUDCAD': 'AUDCAD',
-    'USDSGD': 'USDSGD',
-    'USDCNH': 'USDCNH',
-    'EURDKK': 'EURDKK',
-    'USDNOK': 'USDNOK',
-    'USDSEK': 'USDSEK',
-    'EURNOK': 'EURNOK',
-    'EURSEK': 'EURSEK',
-    'USDMXN': 'USDMXN',
-    'USDZAR': 'USDZAR',
-    'USDPLN': 'USDPLN',
-    'USDHUF': 'USDHUF',
 }
 
 # Reverse: internal ticker/cache key -> our pair ID
@@ -82,18 +71,6 @@ TICKER_TO_PAIR = {
     'AUDNZD=X': 'AUDNZD',
     'NZDJPY=X': 'NZDJPY',
     'AUDCAD=X': 'AUDCAD',
-    # Range-based candidates (2026-04-17). Standard Forex contracts.
-    'USDSGD=X': 'USDSGD',
-    'USDCNH=X': 'USDCNH',
-    'EURDKK=X': 'EURDKK',
-    'USDNOK=X': 'USDNOK',
-    'USDSEK=X': 'USDSEK',
-    'EURNOK=X': 'EURNOK',
-    'EURSEK=X': 'EURSEK',
-    'USDMXN=X': 'USDMXN',
-    'USDZAR=X': 'USDZAR',
-    'USDPLN=X': 'USDPLN',
-    'USDHUF=X': 'USDHUF',
 }
 PAIR_TO_TICKER = {pair: ticker for ticker, pair in TICKER_TO_PAIR.items()}
 

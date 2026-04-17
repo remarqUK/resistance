@@ -79,11 +79,11 @@ _TICKER_REGISTRY: dict[str, int] = {
     'EURJPY=X': 13, 'EURUSD=X': 14, 'GBPAUD=X': 15, 'GBPCAD=X': 16,
     'GBPCHF=X': 17, 'GBPJPY=X': 18, 'GBPUSD=X': 19, 'JPY=X':    20,
     'NZDJPY=X': 21, 'NZDUSD=X': 22,
-    # Range-based additions (2026-04-17). Next unused slots.
-    'EURDKK=X': 23, 'EURNOK=X': 24, 'EURSEK=X': 25,
-    'USDCNH=X': 26, 'USDHUF=X': 27, 'USDMXN=X': 28,
-    'USDNOK=X': 29, 'USDPLN=X': 30, 'USDSEK=X': 31,
-    'USDSGD=X': 32, 'USDZAR=X': 33,
+    # Codes 23-33 were provisionally allocated to range-based FX pairs
+    # (EURDKK/EURNOK/EURSEK/USDCNH/USDHUF/USDMXN/USDNOK/USDPLN/USDSEK/
+    # USDSGD/USDZAR) on 2026-04-17 and then reverted. Leave the codes
+    # unused so future additions don't collide with any orphaned rows
+    # still sitting in ohlc under those codes.
 }
 
 _PAIR_REGISTRY: dict[str, int] = {
@@ -93,10 +93,7 @@ _PAIR_REGISTRY: dict[str, int] = {
     'EURJPY': 13, 'EURUSD': 14, 'GBPAUD': 15, 'GBPCAD': 16,
     'GBPCHF': 17, 'GBPJPY': 18, 'GBPUSD': 19, 'USDJPY': 20,
     'NZDJPY': 21, 'NZDUSD': 22,
-    'EURDKK': 23, 'EURNOK': 24, 'EURSEK': 25,
-    'USDCNH': 26, 'USDHUF': 27, 'USDMXN': 28,
-    'USDNOK': 29, 'USDPLN': 30, 'USDSEK': 31,
-    'USDSGD': 32, 'USDZAR': 33,
+    # Codes 23-33 reserved — see _TICKER_REGISTRY note.
 }
 
 

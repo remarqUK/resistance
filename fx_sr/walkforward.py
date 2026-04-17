@@ -25,6 +25,7 @@ from .strategy import (
     check_price_exit,
     get_market_exit_price,
     get_tradeable_zones,
+    get_tradeable_zones_permissive,
     select_entry_signal,
 )
 from .atr import compute_atr
@@ -583,7 +584,11 @@ def run_walk_forward(
                 )
 
         current_price = float(row['Close'])
-        nearest_support, nearest_resistance = get_tradeable_zones(current_zones, current_price)
+        nearest_support, nearest_resistance = get_tradeable_zones_permissive(
+            current_zones,
+            current_price,
+            allow_minor=params.allow_minor_zones,
+        )
 
         signal: Optional[Signal] = None
         opened_trade: Optional[Trade] = None

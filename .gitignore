@@ -20,6 +20,12 @@ env/
 # Trade diagnostic snapshots
 logs/
 
+# Parameter-sweep outputs (regenerated per run)
+sweep_reports/
+
+# Scratch / tmp
+tmp_pycache/
+
 # Frontend tooling
 node_modules/
 fx_sr/web_live/react/

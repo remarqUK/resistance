@@ -565,6 +565,32 @@ PROFILES = {
         'trailing_activate_r': 1.0,
         'trailing_requires_partial': True,
     },
+
+    'high_volume_corr5': {
+        'description': (
+            'high_volume with max_correlated_trades raised 4->5. Sweep on '
+            '2026-04-17 showed +35 real trades (+1.5%) but final compounded '
+            'balance ~1.96x baseline (same WR, same expectancy). The extra '
+            'trades skew daytime (17% night vs 30% baseline).'
+        ),
+        '_base': 'high_volume',
+        'max_correlated_trades': 5,
+    },
+
+    'high_volume_corr5_minor': {
+        'description': (
+            'Best variant from the 2026-04-17 minor-zone sweep. Allows '
+            'entries on minor zones via get_tradeable_zones_permissive '
+            '(opt-in path, legacy get_tradeable_zones untouched). Trade '
+            'count same as baseline (~2400), WR +0.8pt (63.8%), final '
+            'compounded balance ~2.3x baseline, 17 fewer night entries. '
+            'Quality-preserving improvement, but does NOT double trade '
+            'count — that would require returning multiple zones per bar.'
+        ),
+        '_base': 'high_volume',
+        'max_correlated_trades': 5,
+        'allow_minor_zones': True,
+    },
 }
 
 DEFAULT_PROFILE = 'high_volume'

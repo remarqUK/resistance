@@ -197,6 +197,10 @@ class StrategyParams:
     trailing_atr_multiplier: float = 1.5
     trailing_activate_r: float = 1.0
     trailing_requires_partial: bool = True
+    # Opt-in: allow entries on minor (non-major) zones. Default False preserves
+    # legacy `major_only=True` behaviour. Enables a parameter-sweep path that
+    # tests whether lower-conviction setups add net expectancy.
+    allow_minor_zones: bool = False
 
 
 def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
@@ -279,6 +283,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         trailing_atr_multiplier=merged.get('trailing_atr_multiplier', 1.5),
         trailing_activate_r=merged.get('trailing_activate_r', 1.0),
         trailing_requires_partial=merged.get('trailing_requires_partial', True),
+        allow_minor_zones=merged.get('allow_minor_zones', False),
     )
 
 
@@ -611,6 +616,30 @@ def get_tradeable_zones(
     major_zones = [zone for zone in zones if zone.strength == 'major']
     support = _select_nearest_zone_by_type(major_zones, 'support', current_price)
     resistance = _select_nearest_zone_by_type(major_zones, 'resistance', current_price)
+    return support, resistance
+
+
+def get_tradeable_zones_permissive(
+    zones: List[SRZone],
+    current_price: float,
+    *,
+    allow_minor: bool = False,
+) -> tuple[Optional[SRZone], Optional[SRZone]]:
+    """Optional-minor variant of `get_tradeable_zones`.
+
+    Returns the nearest support/resistance zones for the current price.
+    When `allow_minor` is False the behaviour is identical to
+    `get_tradeable_zones` (majors only). When True, minor zones are
+    included in the candidate pool — useful for sweeps that test whether
+    lower-conviction entries add net expectancy. Picks nearest by midpoint
+    regardless of strength.
+    """
+
+    if not allow_minor:
+        return get_tradeable_zones(zones, current_price)
+
+    support = _select_nearest_zone_by_type(list(zones), 'support', current_price)
+    resistance = _select_nearest_zone_by_type(list(zones), 'resistance', current_price)
     return support, resistance
 
 

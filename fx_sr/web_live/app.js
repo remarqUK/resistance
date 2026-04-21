@@ -16,6 +16,19 @@ let selectedExecutionKey = null;
 let selectedExecutionChart = null;
 let selectedExecutionSeries = null;
 let selectedExecutionLines = [];
+let dashboardRenderTimer = null;
+let dashboardRenderState = {
+  all: false,
+  summary: false,
+  watchlist: false,
+  signals: false,
+  positions: false,
+  alerts: false,
+  executions: false,
+  log: false,
+  rerunButton: false,
+};
+const DASHBOARD_RENDER_THROTTLE_MS = 250;
 let transactionBeepState = {
   nextHourBucket: null,
   milestones: {
@@ -635,8 +648,7 @@ function applyState(nextState) {
   state.alerts = nextState.alerts || [];
   state.executions = nextState.executions || [];
   state.log = nextState.log || [];
-  renderAll();
-  updateRerunBacktestButton();
+  scheduleDashboardRender({ all: true, rerunButton: true });
 }
 
 function upsertPair(row, summary) {
@@ -653,14 +665,12 @@ function upsertPair(row, summary) {
       ...pair.signal,
       size_plan: sizePlanBySignal.get(`${pair.signal.pair}:${pair.signal.direction}`) ?? pair.signal.size_plan ?? null,
     }));
-  renderSummary();
-  renderWatchlist();
-  renderSignals();
+  scheduleDashboardRender({ summary: true, watchlist: true, signals: true, rerunButton: true });
 }
 
 function pushLog(entry) {
   state.log = [...state.log, entry].slice(-80);
-  renderLog();
+  scheduleDashboardRender({ log: true });
 }
 
 function backfillPhaseLabel(phase) {
@@ -1032,6 +1042,59 @@ function renderAll() {
   renderLog();
 }
 
+function scheduleDashboardRender(patches) {
+  const options = patches || {};
+  dashboardRenderState = {
+    all: Boolean(dashboardRenderState.all || options.all),
+    summary: Boolean(dashboardRenderState.summary || options.summary),
+    watchlist: Boolean(dashboardRenderState.watchlist || options.watchlist),
+    signals: Boolean(dashboardRenderState.signals || options.signals),
+    positions: Boolean(dashboardRenderState.positions || options.positions),
+    alerts: Boolean(dashboardRenderState.alerts || options.alerts),
+    executions: Boolean(dashboardRenderState.executions || options.executions),
+    log: Boolean(dashboardRenderState.log || options.log),
+    rerunButton: Boolean(dashboardRenderState.rerunButton || options.rerunButton),
+  };
+
+  if (dashboardRenderTimer) {
+    return;
+  }
+
+  dashboardRenderTimer = window.setTimeout(() => {
+    dashboardRenderTimer = null;
+    if (dashboardRenderState.all) {
+      renderAll();
+    } else {
+      if (dashboardRenderState.summary || dashboardRenderState.watchlist) {
+        renderSummary();
+        renderWatchlist();
+      } else {
+        if (dashboardRenderState.summary) renderSummary();
+        if (dashboardRenderState.watchlist) renderWatchlist();
+      }
+      if (dashboardRenderState.signals) renderSignals();
+      if (dashboardRenderState.positions) renderPositions();
+      if (dashboardRenderState.alerts) renderAlerts();
+      if (dashboardRenderState.executions) renderExecutions();
+      if (dashboardRenderState.log) renderLog();
+    }
+    if (dashboardRenderState.rerunButton) {
+      updateRerunBacktestButton();
+    }
+    dashboardRenderState = {
+      all: false,
+      summary: false,
+      watchlist: false,
+      signals: false,
+      positions: false,
+      alerts: false,
+      executions: false,
+      log: false,
+      rerunButton: false,
+    };
+  }, DASHBOARD_RENDER_THROTTLE_MS);
+}
+
 function setConnection(stateName, text) {
   els.connectionPill.className = badgeClass(stateName);
   els.connectionPill.textContent = stateName;
@@ -1112,21 +1175,16 @@ function connect() {
     }
     if (message.type === "bootstrap") {
       applyState(message.state || {});
-      updateRerunBacktestButton();
       return;
     }
     if (message.type === "scan_status" || message.type === "backfill_progress") {
       state.summary = message.summary || {};
-      renderSummary();
-      renderWatchlist();
-      updateRerunBacktestButton();
+      scheduleDashboardRender({ summary: true, watchlist: true, rerunButton: true });
       return;
     }
     if (message.type === "fill_progress" || message.type === "backtest_progress") {
       state.summary = message.summary || {};
-      renderSummary();
-      renderWatchlist();
-      updateRerunBacktestButton();
+      scheduleDashboardRender({ summary: true, watchlist: true, rerunButton: true });
       return;
     }
     if (message.type === "pair_update") {
@@ -1137,10 +1195,13 @@ function connect() {
       state.positions = message.positions || [];
       state.alerts = message.alerts || [];
       state.summary = message.summary || state.summary;
-      renderSummary();
-      renderWatchlist();
-      renderPositions();
-      renderAlerts();
+      scheduleDashboardRender({
+        summary: true,
+        watchlist: true,
+        positions: true,
+        alerts: true,
+        rerunButton: true,
+      });
       return;
     }
     if (message.type === "snapshot") {
@@ -1153,7 +1214,7 @@ function connect() {
     }
     if (message.type === "error") {
       state.summary = message.summary || state.summary;
-      renderSummary();
+      scheduleDashboardRender({ summary: true, log: true, rerunButton: true });
       pushLog({
         ts: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }),
         level: "error",

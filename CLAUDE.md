@@ -45,15 +45,26 @@ These are real-time constraints that cannot be eliminated:
 3. **Thread new parameters** through the full chain: `run.py` → `live_web.py` → `live_dashboard.py` → `live.py:run_monitor_cycle()` → `collect_scan_rows()` → `_scan_pair()`.
 4. **Test signal parity** by running a backtest and comparing its trades with live signals on the same data window.
 
-### Trade snapshot logging
+### Trade storage
 
-`StrategyParams.trade_snapshot_logging` (default `True`) writes a JSON file to `logs/` for every trade entry and exit in the walk-forward — both backtest and live. Files are named `{source}-{event}-{pair}-{timestamp}.json`.
+Backtest trades are persisted to **PostgreSQL** via the backtest-result cache. They are never written to `logs/` as JSON. For backtest vs live comparisons, read the backtest trades from the database.
 
-Each file contains the full state at the moment of the trade: signal, trade, execution quote, execution plan, bar OHLC, zones, exit reason. This enables direct comparison between backtest and live to verify signal parity.
+Live trades are optionally dumped to `logs/YYYY-MM/DD/` as `live-{event}-{pair}-{timestamp}.json` when `StrategyParams.trade_snapshot_logging` is `True` (default). Each file contains the full state at the moment of the trade: signal, trade, execution quote, execution plan, bar OHLC, zones, exit reason. These are real-time-observability artifacts, not the system of record. The `logs/` directory is gitignored. Set `trade_snapshot_logging: false` to disable.
 
-To compare: run a backtest, then start live on the same profile/days. Diff the JSON files for the same pair and timestamp. Fields should match exactly (except for acceptable live-only differences listed above).
+### Bar-close contract: 1m, not 1h
 
-Set `trade_snapshot_logging: false` in the profile or params to disable once parity is confirmed. The `logs/` directory is gitignored.
+The walk-forward's decision unit is the **closed 1m bar**, not the closed 1h bar. Zones come from daily (and 1h context); entry triggers come from 1m bar closes. Live can therefore evaluate the currently-forming 1h bar using only the 1m bars inside it that have already closed.
+
+Concretely:
+
+- `_scan_pair` passes the raw `hourly_df` (including the forming bar) to the walk-forward — it does **not** strip the forming hour.
+- `run_walk_forward` detects `_last_bar_is_forming` by checking whether the final hourly bar's close time is in the future. For backtest inputs this is always False; for live inputs during the current hour it is True.
+- For a forming last bar, the walk-forward runs **only** the intrabar entry path (`find_intrabar_signal` against closed 1m bars) and skips the `select_entry_signal` hourly fallback — the fallback would read the bar's partial OHLC as if finalized and could fire a phantom signal that mutates as more minutes arrive.
+- All exit logic in intrabar mode already uses minute-derived values; the hourly-OHLC exit fallback is only reached when minute data is unavailable, which never happens in a healthy live setup.
+
+### Future refactor — 1m-native walk-forward
+
+Today the walk-forward's outer loop iterates 1h bars and its inner intrabar pass walks 1m bars inside each. That structure is a performance optimisation (one outer call per ~60 inner evaluations) rather than a strategy requirement. A fuller refactor would collapse the nested loop and iterate 1m bars natively, resolving hourly/daily context lazily per minute — making backtest and live structurally identical and eliminating forming-bar handling entirely. The current shape is correct and sufficient; the 1m-native form is a cleanup worth doing if the intrabar logic ever needs to diverge further from the 1h cadence (e.g., finer exit granularity, per-minute zone checks, event-driven scanners).
 
 ## Zone Detection
 

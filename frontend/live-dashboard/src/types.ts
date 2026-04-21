@@ -21,6 +21,8 @@ export interface Signal {
   zone_lower?: number;
   zone_strength?: string;
   zone_type?: string;
+  /** Score in [0, 1] from score_signal_quality. Render as percentage. */
+  quality_score?: number | null;
   decimals?: number;
   arrived_at?: string | null;
   last_valid_at?: string | null;

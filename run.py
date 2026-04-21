@@ -80,6 +80,14 @@ def _configure_ibkr(args, *, allow_client_id_fallback: bool = True) -> int:
     return ibkr.TWS_CLIENT_ID
 
 
+# CLI fills are a backtest-prep step (live ingestion uses its own path). Treat
+# the cache as current when its newest bar is this close to real time — skips
+# pointless IBKR round-trips when another fill just ran. Must stay opt-in:
+# live callers (LiveDashboardHub.fill_cache, fx_sr.data internals) leave the
+# equivalent kwarg at its default of 0 so they still pull every missing bar.
+_CLI_FILL_TRAILING_FRESHNESS_SECONDS = 15 * 60
+
+
 def _fill_client_id_base(active_client_id: int) -> int:
     """Return a dedicated client-id base for CLI cache fills."""
 
@@ -212,6 +220,7 @@ def _portfolio_summary(
     *,
     starting_balance: float | None = None,
     risk_pct: float | None = None,
+    compound: bool = True,
 ) -> dict[str, float | int]:
     """Return aggregate stats using the execution-aware portfolio benchmark."""
     raw_total_trades = 0
@@ -242,6 +251,7 @@ def _portfolio_summary(
             starting_balance=float(starting_balance),
             risk_pct=float(risk_pct),
             params=params,
+            compound=compound,
         )
         total_trades = simulation.total_trades
         total_wins = simulation.total_wins
@@ -418,6 +428,7 @@ def _run_backtests_until_target(
             attempt_params,
             starting_balance=starting_balance,
             risk_pct=risk_pct / 100.0 if risk_pct is not None else None,
+            compound=not bool(getattr(args, 'no_compound', False)),
         )
         summary_line = (
             f"execution_portfolio_trades={summary['total_trades']} "
@@ -811,7 +822,7 @@ def cmd_backtest(args):
             run_id=run_id,
             fetch_workers=getattr(args, 'fetch_workers', None),
             backtest_workers=getattr(args, 'backtest_workers', None),
-            allow_stale_cache=getattr(args, 'allow_stale_cache', False),
+            allow_stale_cache=True,
         )
     else:
         run_config_json = _build_backtest_run_config(
@@ -837,7 +848,7 @@ def cmd_backtest(args):
             debug=bool(getattr(args, 'backtest_debug', False)),
             fetch_workers=getattr(args, 'fetch_workers', None),
             backtest_workers=getattr(args, 'backtest_workers', None),
-            allow_stale_cache=getattr(args, 'allow_stale_cache', False),
+            allow_stale_cache=True,
         )
         attempt_logs: list[dict[str, float | int | str]] = []
         summary = _portfolio_summary(
@@ -845,6 +856,7 @@ def cmd_backtest(args):
             params,
             starting_balance=args.balance,
             risk_pct=args.risk_pct / 100.0 if args.risk_pct is not None else None,
+            compound=not bool(getattr(args, 'no_compound', False)),
         ) if results else {
             'total_trades': 0,
             'total_wins': 0,
@@ -893,6 +905,7 @@ def cmd_backtest(args):
             starting_balance=args.balance,
             risk_pct=risk_pct,
             params=params,
+            compound=not bool(getattr(args, 'no_compound', False)),
         )
         total_pre = execution_sim.raw_total_trades
         trade_log, final_bal = calculate_compounding_pnl(
@@ -900,13 +913,15 @@ def cmd_backtest(args):
             starting_balance=args.balance,
             risk_pct=risk_pct,
             params=params,
+            compound=not bool(getattr(args, 'no_compound', False)),
         )
+        report_mode = 'FIXED-BALANCE' if bool(getattr(args, 'no_compound', False)) else 'COMPOUNDING'
         execution_report = format_compounding_results(
             execution_sim.trade_log,
             args.balance,
             execution_sim.final_balance,
             total_pre,
-            title='EXECUTION-AWARE COMPOUNDING REPORT',
+            title=f'EXECUTION-AWARE {report_mode} REPORT',
             filter_note='accepted from {total_pre_filter} raw candidates after execution-aware portfolio filtering',
             skip_counts=execution_sim.skip_counts,
         )
@@ -915,7 +930,7 @@ def cmd_backtest(args):
             args.balance,
             final_bal,
             total_pre,
-            title='RAW COMPOUNDING REPORT',
+            title=f'RAW {report_mode} REPORT',
             filter_note='filtered from {total_pre_filter} by correlation only',
         )
         print(f'\n{execution_report}')
@@ -1108,7 +1123,12 @@ def cmd_fill(args):
     from fx_sr.db import get_db_path, init_db
 
     active_client_id = _configure_ibkr(args)
-    target_days = args.days
+    if getattr(args, 'full', False):
+        target_days = 365
+    elif getattr(args, 'back', None) is not None:
+        target_days = max(1, int(args.back))
+    else:
+        target_days = 14
     daily_extra_days = max(0, int(getattr(args, 'zone_history_days', 0)))
     verbose = getattr(args, 'verbose', False)
     debug = getattr(args, 'fill_debug', False)
@@ -1141,6 +1161,7 @@ def cmd_fill(args):
         only_pair=pair_filter,
         verbose=True,
         debug=debug,
+        trailing_freshness_seconds=_CLI_FILL_TRAILING_FRESHNESS_SECONDS,
     )
     gap_scan_elapsed = time.perf_counter() - gap_scan_start
     # Prioritise: 1d first, then 1h, then 1m — so a restart doesn't redo
@@ -1226,8 +1247,10 @@ def cmd_fill(args):
             f'\n  Retry {attempt}/3 - {pending_count} items remaining, waiting 5s...'
         ),
         wait_formatter=_format_wait_window,
-        on_wait=lambda waiting_parts: print(
-            f"  Still working on {len(waiting_parts)} item(s): {', '.join(waiting_parts)}"
+        on_wait=lambda waiting_parts, queued_count: print(
+            f"  Still working on {len(waiting_parts)} item(s)"
+            + (f" ({queued_count} queued)" if queued_count else '')
+            + (f": {', '.join(waiting_parts)}" if waiting_parts else '')
         ),
         on_item_done=lambda item, rows, item_elapsed, completed, total: print(
             f'  [{completed}/{total}] {item.pair_id} {item.interval} done ({rows} rows, {item_elapsed:.2f}s)'
@@ -1258,6 +1281,7 @@ def cmd_fill(args):
         only_pair=pair_filter,
         verbose=True,
         debug=debug,
+        trailing_freshness_seconds=_CLI_FILL_TRAILING_FRESHNESS_SECONDS,
     )
     recheck_elapsed = time.perf_counter() - recheck_start
     if debug:
@@ -1656,17 +1680,24 @@ def main():
         type=str,
         help='Specific pair (e.g., EURUSD). Default: all configured pairs',
     )
-    fl.add_argument(
-        '--days',
+    fl_window = fl.add_mutually_exclusive_group()
+    fl_window.add_argument(
+        '--full',
+        action='store_true',
+        help='Fill the full 365-day window (IBKR 1m max)',
+    )
+    fl_window.add_argument(
+        '--back', '--days',
         type=int,
-        default=365,
-        help='Target days of coverage per interval (default: 365)',
+        metavar='DAYS',
+        dest='back',
+        help='Fill the last N days of coverage (default: 14). --days is a synonym.',
     )
     fl.add_argument(
         '--zone-history-days',
         type=int,
         default=0,
-        help='Additional daily history beyond --days (default: 0; zone lookback uses the same 365d window)',
+        help='Additional daily history beyond the fill window (default: 0)',
     )
     fl.add_argument(
         '--ib-historical-fetch-concurrency',
@@ -1710,6 +1741,11 @@ def main():
         '--allow-stale-cache',
         action='store_true',
         help='Allow stale cached bars in backtests (skip recency checks) while keeping shape checks active',
+    )
+    bt.add_argument(
+        '--no-compound',
+        action='store_true',
+        help='Size every backtest trade from the starting balance instead of compounding the running balance',
     )
     bt.add_argument(
         '--execution-mode',

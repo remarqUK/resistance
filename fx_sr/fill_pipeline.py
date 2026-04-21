@@ -41,8 +41,15 @@ def find_cache_gaps(
     now=None,
     daily_extra_days: int = 0,
     only_pair: str | None = None,
+    trailing_freshness_seconds: int = 0,
 ) -> list[tuple[str, str, str]]:
-    """Return list of (pair, ticker, interval) tuples that are missing or stale."""
+    """Return list of (pair, ticker, interval) tuples that are missing or stale.
+
+    Pass ``trailing_freshness_seconds > 0`` to suppress trailing-only gaps
+    when the cache is already within that many seconds of real time. This is
+    an opt-in relaxation for backtest-prep paths — live paths must leave it
+    at 0 to guarantee complete data.
+    """
 
     init_db()
     summary = get_cache_summary()
@@ -102,6 +109,7 @@ def find_cache_gaps(
                 requested_days=effective_days[iv],
                 cached_range=(first_ts, last_ts, bars),
                 now=now_ts,
+                trailing_freshness_seconds=trailing_freshness_seconds,
             ) > 0:
                 gaps.append((pair_id, ticker, iv))
 
@@ -118,8 +126,15 @@ def find_cache_gap_work_items(
     verbose: bool = False,
     debug: bool = False,
     progress_cb: Callable[[int, int, str, int], None] | None = None,
+    trailing_freshness_seconds: int = 0,
 ) -> list[tuple[str, str, str, object]]:
-    """Return gap work items including the first missing timestamp when known."""
+    """Return gap work items including the first missing timestamp when known.
+
+    Pass ``trailing_freshness_seconds > 0`` to suppress trailing-only gaps
+    when the cache is already within that many seconds of real time. This is
+    an opt-in relaxation for backtest-prep paths — live paths must leave it
+    at 0 to guarantee complete data.
+    """
 
     scan_started_at = time.perf_counter()
     now_ts = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
@@ -163,6 +178,14 @@ def find_cache_gap_work_items(
             cached_row = cached.get((ticker, interval))
             requested_days = max_days if interval == '1d' else target_days
             requested_start = now_ts - pd.Timedelta(days=int(requested_days))
+            if interval == '1m':
+                # IBKR's 1m history horizon is 365 days. If the user asks for
+                # 365 days, the oldest minutes slip out of reach by the time
+                # the walk-back arrives. Keep the requested start an hour
+                # inside the horizon so we never ask for bars at the cliff.
+                horizon_floor = now_ts - pd.Timedelta(days=365) + pd.Timedelta(hours=1)
+                if requested_start < horizon_floor:
+                    requested_start = horizon_floor
             expected_start = _aligned_expected_bar_at_or_after(requested_start, interval)
             gap_required = False
             if debug:
@@ -251,6 +274,7 @@ def find_cache_gap_work_items(
                             requested_days=requested_days,
                             cached_range=(first_ts, last_ts, bars_in_summary),
                             now=now_ts,
+                            trailing_freshness_seconds=trailing_freshness_seconds,
                         )
                         if debug:
                             print(
@@ -413,7 +437,11 @@ def scan_recent_pair_gaps(
     skip_refill: bool = False,
     skip_reason: str = 'skipped',
 ) -> dict:
-    """Scan one pair for recent refill holes and older report-only holes."""
+    """Scan one pair for recent refill holes and older report-only holes.
+
+    This reuses ``find_cache_gap_work_items`` for the recent scan path so gap
+    detection is aligned with CLI fill.
+    """
 
     ticker = pair_info.get('ticker')
     if not ticker:
@@ -433,29 +461,32 @@ def scan_recent_pair_gaps(
         }
 
     current_now = pd.Timestamp.now(tz='UTC') if now_utc is None else pd.Timestamp(now_utc)
+    recent_days = max(1, int((current_now - recent_cutoff).total_seconds() // 86400) + 1)
+    recent_gaps = find_cache_gap_work_items(
+        pairs={pair_id: pair_info},
+        target_days=recent_days,
+        now=current_now,
+        verbose=False,
+    )
     refill_holes: list[tuple[str, pd.Timestamp]] = []
     reported_only_holes: list[str] = []
 
-    for interval in ('1d', '1h', '1m'):
-        gap_start_recent = find_first_missing_cached_bar(
-            ticker,
-            interval,
-            start=recent_cutoff,
-            end=current_now,
-            now=current_now,
-            check_trailing=True,
-        )
-        if gap_start_recent is not None:
-            gap_ts = pd.Timestamp(gap_start_recent)
-            if gap_ts.tzinfo is None:
-                gap_ts = gap_ts.tz_localize('UTC')
-            else:
-                gap_ts = gap_ts.tz_convert('UTC')
-            refill_holes.append((interval, gap_ts))
-
-        if interval == '1m':
+    for _gap_pair_id, _gap_ticker, interval, gap_start_recent in recent_gaps:
+        if gap_start_recent is None:
+            refill_holes.append((interval, recent_cutoff))
             continue
 
+        gap_ts = pd.Timestamp(gap_start_recent)
+        if gap_ts.tzinfo is None:
+            gap_ts = gap_ts.tz_localize('UTC')
+        else:
+            gap_ts = gap_ts.tz_convert('UTC')
+        if gap_ts >= recent_cutoff:
+            refill_holes.append((interval, gap_ts))
+        elif interval in {'1d', '1h'}:
+            reported_only_holes.append(f'{interval}@{gap_ts}')
+
+    for interval in ('1d', '1h'):
         gap_start_old = find_first_missing_cached_bar(
             ticker,
             interval,
@@ -470,7 +501,9 @@ def scan_recent_pair_gaps(
             gap_ts = gap_ts.tz_localize('UTC')
         else:
             gap_ts = gap_ts.tz_convert('UTC')
-        reported_only_holes.append(f'{interval}@{gap_ts}')
+        token = f'{interval}@{gap_ts}'
+        if token not in reported_only_holes:
+            reported_only_holes.append(token)
 
     return {
         'pair_id': pair_id,
@@ -511,12 +544,13 @@ def execute_fill_work_items(
     max_workers: int = 3,
     max_retries: int = 3,
     wait_timeout_s: float = 15.0,
+    item_timeout_s: float = 300.0,
     verbose: bool = False,
     debug: bool = False,
     retry_delay_s: float = 5.0,
     before_retry: Callable[[int, int], None] | None = None,
     wait_formatter: Callable[[FillExecutionItem, float], str] | None = None,
-    on_wait: Callable[[list[str]], None] | None = None,
+    on_wait: Callable[[list[str], int], None] | None = None,
     on_item_done: Callable[[FillExecutionItem, int, float, int, int], None] | None = None,
     on_item_failed: Callable[[FillExecutionItem, Exception, int, int], None] | None = None,
     on_attempt_complete: Callable[[int, int, float], None] | None = None,
@@ -550,9 +584,15 @@ def execute_fill_work_items(
             thread._fill_client_id_slot = slot
         return base_fill_client_id + int(slot)
 
-    def _run_work_item(item: FillExecutionItem) -> tuple[FillExecutionItem, int, float]:
+    def _run_work_item(
+        item: FillExecutionItem,
+        meta: dict,
+    ) -> tuple[FillExecutionItem, int, float]:
         cid = _thread_client_id()
         item_start = time.perf_counter()
+        meta['started_at'] = item_start
+        if debug:
+            print(f'      [dbg] start {item.pair_id} {item.interval} cid={cid} gap_start={item.gap_start}')
         if item.gap_start is not None:
             rows = len(
                 refill_interval_from(
@@ -591,13 +631,15 @@ def execute_fill_work_items(
             completed = 0
             total = len(pending)
             failed: list[FillExecutionItem] = []
-            futures = {
-                executor.submit(_run_work_item, item): {
+            futures = {}
+            for item in pending:
+                meta = {
                     'item': item,
                     'submitted_at': time.perf_counter(),
+                    'started_at': None,
                 }
-                for item in pending
-            }
+                fut = executor.submit(_run_work_item, item, meta)
+                futures[fut] = meta
             pending_futures = set(futures)
             while pending_futures:
                 done, pending_futures = wait(
@@ -606,27 +648,73 @@ def execute_fill_work_items(
                     return_when=FIRST_COMPLETED,
                 )
                 if not done:
+                    now_wait = time.perf_counter()
+                    timed_out_futures = []
+                    for fut in pending_futures:
+                        started_at = futures[fut]['started_at']
+                        if started_at is None:
+                            # Queued, not yet running — don't time out.
+                            continue
+                        waited = now_wait - started_at
+                        if waited > item_timeout_s:
+                            timed_out_futures.append((fut, waited))
+                    if timed_out_futures:
+                        for fut, waited in timed_out_futures:
+                            item = futures[fut]['item']
+                            if fut.cancel():
+                                reason = 'queued/cancelled'
+                            else:
+                                reason = 'running'
+                            if debug:
+                                print(
+                                    f'      [dbg] timeout {item.pair_id} {item.interval} '
+                                    f'after {waited:.1f}s [{reason}]'
+                                )
+                            failed.append(item)
+                            total_errors += 1
+                            if on_item_failed is not None:
+                                on_item_failed(
+                                    item,
+                                    TimeoutError(f'fill timed out after {waited:.1f}s ({reason})'),
+                                    completed,
+                                    total,
+                                )
+                            if fut in pending_futures:
+                                pending_futures.discard(fut)
+                            del futures[fut]
                     if on_wait is not None:
-                        now_wait = time.perf_counter()
                         waiting_parts = []
+                        queued_count = 0
                         for fut in sorted(
                             pending_futures,
                             key=lambda current_fut: futures[current_fut]['submitted_at'],
                         ):
-                            item = futures[fut]['item']
-                            waiting_s = now_wait - futures[fut]['submitted_at']
+                            meta = futures[fut]
+                            started_at = meta['started_at']
+                            if started_at is None:
+                                queued_count += 1
+                                continue
+                            item = meta['item']
+                            waiting_s = now_wait - started_at
                             if wait_formatter is None:
                                 waiting_parts.append(f'{item.pair_id} {item.interval} ({waiting_s:.0f}s)')
                             else:
                                 waiting_parts.append(wait_formatter(item, waiting_s))
-                        on_wait(waiting_parts)
+                        on_wait(waiting_parts, queued_count)
                     continue
+
+                if debug:
+                    print(f'      [dbg] got {len(done)} completed futures')
 
                 for fut in done:
                     item = futures[fut]['item']
                     completed += 1
                     try:
                         _, rows, item_elapsed = fut.result()
+                        if debug:
+                            print(
+                                f'      [dbg] complete {item.pair_id} {item.interval} in {item_elapsed:.1f}s'
+                            )
                         total_items_processed += 1
                         if on_item_done is not None:
                             on_item_done(item, rows, item_elapsed, completed, total)

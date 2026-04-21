@@ -140,9 +140,22 @@
 
     // WebSocket for live price updates
     function connectWs() {
+      if (wsPriceTicker) {
+        clearInterval(wsPriceTicker);
+      }
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
       const pill = document.getElementById('connection-pill');
+      wsPricePending = null;
+
+      wsPriceTicker = window.setInterval(() => {
+        if (wsPricePending == null) {
+          return;
+        }
+        const price = wsPricePending;
+        wsPricePending = null;
+        updateLivePrice(price);
+      }, chartPriceUpdateIntervalMs);
 
       ws.addEventListener('open', () => {
         pill.className = 'pill pill-live';
@@ -154,28 +167,39 @@
 
         // Handle pair_update for our pair
         if (msg.type === 'pair_update' && msg.row && msg.row.pair === pair) {
-          updateLivePrice(msg.row.price);
+          if (msg.row.price != null) {
+            wsPricePending = msg.row.price;
+          }
         }
 
         // Handle full snapshot — find our pair
         if ((msg.type === 'bootstrap' || msg.type === 'snapshot') && msg.state && msg.state.pairs) {
           const row = msg.state.pairs[pair];
-          if (row) updateLivePrice(row.price);
+          if (row && row.price != null) {
+            wsPricePending = row.price;
+          }
         }
       });
 
       ws.addEventListener('close', () => {
         pill.className = 'pill pill-muted';
         pill.textContent = 'Disconnected';
+        if (wsPriceTicker) {
+          clearInterval(wsPriceTicker);
+          wsPriceTicker = null;
+        }
         setTimeout(connectWs, 1500);
       });
 
       ws.addEventListener('error', () => ws.close());
     }
 
+    let wsPricePending = null;
+    let wsPriceTicker = null;
     let lastBarTime = null;
     let currentBar = null;
     let loadedBars = [];
+    const chartPriceUpdateIntervalMs = 30000;
 
     // Scroll-streaming state
     let streamedBars = [];

@@ -173,6 +173,46 @@ class FillGapDetectionTests(unittest.TestCase):
             },
         )
 
+    def test_find_cache_gap_work_items_does_not_run_hidden_pre_scan(self):
+        now = pd.Timestamp('2026-04-13T12:00:00Z')
+        start = now - pd.Timedelta(days=365)
+        summary = pd.DataFrame(
+            [
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1d',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 260,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1h',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 8760,
+                },
+                {
+                    'ticker': 'EURUSD=X',
+                    'interval': '1m',
+                    'first_ts': start,
+                    'last_ts': now,
+                    'bars': 525000,
+                },
+            ]
+        )
+
+        with patch.object(run, 'PAIRS', {'EURUSD': {'ticker': 'EURUSD=X'}}), \
+                patch('fx_sr.fill_pipeline.init_db'), \
+                patch('fx_sr.fill_pipeline.get_cache_summary', return_value=summary), \
+                patch('fx_sr.fill_pipeline.find_cache_gaps', side_effect=AssertionError('hidden pre-scan should not run')):
+            gaps = run._find_cache_gap_work_items(
+                target_days=365,
+                now=now,
+            )
+
+        self.assertEqual(gaps, [])
+
     def test_find_cache_gaps_verbose_tolerates_mixed_timezone_summary_timestamps(self):
         now = pd.Timestamp('2026-04-13T12:00:00Z')
         summary = pd.DataFrame(

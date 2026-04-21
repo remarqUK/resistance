@@ -894,10 +894,12 @@ def _scan_pair(
         days=max(hourly_days, 1),
         hourly_data_cache=hourly_data_cache,
     )
-    # Live scans must never generate entries from the still-forming hourly bar.
-    # Intrabar mode changes how the completed bar is evaluated (using minute
-    # data inside that hour), not which hourly bars are eligible for entry.
-    scan_df = _completed_live_hourly_data(hourly_df)
+    # The forming 1h bar is intentionally kept in scan_df. The walk-forward's
+    # intrabar entry path evaluates closed 1m bars inside it (the correct
+    # decision granularity); the hourly-OHLC fallback is suppressed for a
+    # forming bar via run_walk_forward's _last_bar_is_forming detection, so
+    # a partial hourly candle can never generate a phantom signal.
+    scan_df = hourly_df
     if scan_df.empty:
         return (
             PairScanRow(
@@ -2233,7 +2235,7 @@ def run_monitor_cycle(
 
     messages = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()] if capture_output else []
     scan_completed_at = datetime.now(timezone.utc)
-    return MonitorSnapshot(
+    snapshot = MonitorSnapshot(
         scan_started_at=scan_started_at,
         scan_completed_at=scan_completed_at,
         scan_duration=(scan_completed_at - scan_started_at).total_seconds(),
@@ -2252,6 +2254,9 @@ def run_monitor_cycle(
         execute_orders=execute_orders,
         messages=messages,
     )
+    from .minute_scan_log import write_cycle_snapshot
+    write_cycle_snapshot(snapshot, profile=getattr(params, 'profile_name', None))
+    return snapshot
 
 
 def format_sizing_summary(snapshot: Optional[MonitorSnapshot]) -> str:

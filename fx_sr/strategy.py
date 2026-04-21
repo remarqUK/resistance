@@ -175,8 +175,8 @@ class StrategyParams:
     # Live scan lookback — must cover max_hold_bars so any trade the backtest
     # would still be holding is also found by the live walk-forward.
     scan_lookback_bars: int = 72              # walk last N hourly bars (matches max_hold_bars = 3 days)
-    # Diagnostic: dump JSON trade snapshots to logs/ for backtest/live parity debugging.
-    # Toggle off once parity is confirmed.
+    # Diagnostic: dump JSON trade snapshots for LIVE trades to logs/. Backtest
+    # trades are stored in PostgreSQL and are never written to disk.
     trade_snapshot_logging: bool = True
     # --- Alternative TP/SL modes (backtestable) ---
     # SL mode: 'fixed' uses sl_buffer_pct; 'atr' uses ATR * multiplier from zone edge

@@ -51,7 +51,7 @@ from .serialization import (
 )
 from .db import load_backtest_result, save_backtest_result, load_l2_snapshots, load_ohlc
 from .data import (
-    _provider_confirms_unfillable_gap,
+    _gap_past_ibkr_horizon,
     _remember_provider_confirmed_gap,
     find_first_missing_cached_bar,
 )
@@ -79,6 +79,14 @@ def _load_cached_data_window(
 
     now = pd.Timestamp.now(tz='UTC')
     start = now - pd.Timedelta(days=int(days))
+    if interval == '1m':
+        # IBKR's 1m historical horizon is 365 days and slides forward with
+        # real time. Keep the backtest window an hour inside the horizon so
+        # cache built by `run.py fill` (which uses the same buffer) covers
+        # the full requested range.
+        horizon_floor = now - pd.Timedelta(days=365) + pd.Timedelta(hours=1)
+        if start < horizon_floor:
+            start = horizon_floor
     df = load_ohlc(
         ticker,
         interval,
@@ -91,6 +99,9 @@ def _load_cached_data_window(
         )
 
     if validate_gaps:
+        # Backtest paths never probe IBKR. We auto-confirm only gaps that are
+        # provably past the provider's history horizon (local check, no RPC);
+        # anything else must be filled via `python run.py fill` first.
         while True:
             first_missing = find_first_missing_cached_bar(
                 ticker,
@@ -102,7 +113,7 @@ def _load_cached_data_window(
             )
             if first_missing is None:
                 break
-            if _provider_confirms_unfillable_gap(ticker, interval, first_missing):
+            if _gap_past_ibkr_horizon(interval, first_missing, now=now):
                 _remember_provider_confirmed_gap(ticker, interval, first_missing)
                 continue
             break
@@ -1592,7 +1603,13 @@ def run_all_backtests_parallel(
         else:
             fetch_workers = None
     if fetch_workers is None:
-        fetch_workers = min(total, 4)
+        # Phase 1 is 100% DB-bound (COPY large 1m windows from Postgres); no
+        # IBKR calls happen here any more. Multiple parallel COPY streams
+        # against one Postgres instance just contend for disk/connection
+        # bandwidth and stretch each pair's wall-clock time. One worker is
+        # the right default — override via --fetch-workers or
+        # FX_SR_FETCH_WORKERS only if the DB layer genuinely scales.
+        fetch_workers = 1
     _debug(f'phase1: fetch_workers={fetch_workers} total_pairs={total}')
     print(f"  Phase 1 fetch workers: {fetch_workers}")
     try:

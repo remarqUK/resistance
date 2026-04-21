@@ -8,7 +8,14 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 from aiohttp import web
 
-from fx_sr.live import PairScanRow
+from fx_sr.live import ExecutionResult, PairScanRow
+from fx_sr.live_history import (
+    claim_signal_for_position,
+    load_detected_signal,
+    record_detected_signals,
+    record_execution_results,
+    stop_background_writer,
+)
 from fx_sr.live_web import (
     ALERT_LIMIT,
     EXECUTION_LIMIT,
@@ -18,7 +25,10 @@ from fx_sr.live_web import (
     _set_execution_mode,
     _validate_websocket_request,
 )
+from fx_sr.sizing import PositionSizePlan
+from fx_sr.strategy import Signal
 from fx_sr.strategy import StrategyParams, Trade
+from tests._test_db_helpers import temporary_test_database
 
 
 def _bar(time, open_, high, low, close, volume=0):
@@ -38,6 +48,36 @@ def _trade() -> Trade:
         zone_lower=1.0990,
         zone_strength='major',
         risk=0.0050,
+    )
+
+
+def _signal(pair: str, direction: str = 'LONG') -> Signal:
+    return Signal(
+        time=pd.Timestamp('2026-03-10 13:00:00', tz='UTC'),
+        pair=pair,
+        direction=direction,
+        entry_price=1.1000,
+        sl_price=1.0950,
+        tp_price=1.1100,
+        zone_upper=1.1010,
+        zone_lower=1.0990,
+        zone_strength='major',
+        zone_type='support' if direction == 'LONG' else 'resistance',
+        quality_score=0.75,
+    )
+
+
+def _plan(pair: str, direction: str = 'LONG') -> PositionSizePlan:
+    return PositionSizePlan(
+        pair=pair,
+        direction=direction,
+        units=10000,
+        risk_amount=100.0,
+        risk_pct=0.01,
+        balance=10000.0,
+        account_currency='USD',
+        risk_per_unit_account=0.01,
+        notional_account=11000.0,
     )
 
 
@@ -157,6 +197,98 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             'sig-1',
             exit_reason='SL',
             exit_price=1.0949,
+        )
+
+    async def test_tick_exit_rejection_clears_persisted_exit_intent(self):
+        db_ctx = temporary_test_database()
+        db_path = db_ctx.__enter__()
+        stop_background_writer()
+        try:
+            signal = _signal('EURUSD')
+            plan = _plan('EURUSD')
+            signal_id = record_detected_signals(
+                [signal],
+                [plan],
+                execute_orders=True,
+                db_path=db_path,
+            )[0]
+            record_execution_results(
+                [signal],
+                [plan],
+                [ExecutionResult(
+                    pair='EURUSD',
+                    direction='LONG',
+                    units=10000,
+                    status='Submitted',
+                    order_id=101,
+                    avg_fill_price=1.1002,
+                    filled_units=10000,
+                    remaining_units=0,
+                )],
+                db_path=db_path,
+            )
+            claim_signal_for_position(
+                'EURUSD',
+                'LONG',
+                opened_price=1.1002,
+                open_units=10000,
+                db_path=db_path,
+            )
+            self.hub._tracked['EURUSD:LONG']['signal_id'] = signal_id
+            self.hub._tracked['EURUSD:LONG']['ibkr_size'] = 10000
+            self.hub._backfill_done = True
+            alert = {
+                'pair': 'EURUSD',
+                'direction': 'LONG',
+                'exit_reason': 'TIME',
+                'exit_price': 1.1015,
+            }
+
+            with patch('fx_sr.live_history.get_db_path', return_value=db_path), \
+                    patch.object(self.hub._scanner, 'check_tick_exits', return_value=[alert]), \
+                    patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
+                    patch('fx_sr.live_web.ibkr.submit_fx_market_order', return_value={'status': 'Inactive', 'order_id': 555}):
+                await self.hub._handle_quote_update('EURUSD', 1.1016)
+
+            row = load_detected_signal(signal_id, db_path=db_path)
+            self.assertEqual(row['status'], 'OPEN')
+            self.assertIsNone(row['exit_signal_reason'])
+            self.assertIsNone(row['exit_signal_at'])
+            self.assertIsNone(row['exit_signal_price'])
+            self.assertNotIn('EURUSD:LONG', self.hub._tick_exit_alerted)
+            self.assertNotIn('EURUSD:LONG', self.hub._inflight_close_orders)
+        finally:
+            stop_background_writer()
+            db_ctx.__exit__(None, None, None)
+
+    async def test_startup_recovery_preserves_original_exit_reason(self):
+        self.hub._accumulator.seeded_pairs.add('EURUSD')
+        tracked = {
+            'EURUSD:LONG': {
+                'pair': 'EURUSD',
+                'trade': _trade(),
+                'bars_monitored': 3,
+                'signal_id': 'sig-1',
+                'ibkr_size': 10000,
+                'pending_exit_reason': 'TIME',
+                'pending_exit_price': 1.1015,
+            },
+        }
+
+        with patch.object(
+            self.hub,
+            '_backfill_data',
+            return_value=([], list(self.hub._pair_rows.values()), [], [], 0.0),
+        ), \
+                patch('fx_sr.positions.sync_positions', return_value=tracked), \
+                patch('fx_sr.live_web.ibkr.fetch_account_net_liquidation', return_value=(10000.0, 'USD')), \
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
+                patch('fx_sr.live_web.ibkr.submit_fx_market_order', return_value={'status': 'Submitted', 'order_id': 123}):
+            await self.hub._run_backfill()
+
+        self.assertEqual(
+            self.hub._inflight_close_orders['EURUSD:LONG'],
+            (123, 'TIME', 'sig-1', 1.1015),
         )
 
     async def test_alert_and_execution_buffers_are_bounded(self):

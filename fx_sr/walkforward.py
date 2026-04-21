@@ -146,11 +146,24 @@ def _write_trade_snapshot(
     exit_reason: str | None = None,
     exit_price: float | None = None,
 ) -> None:
-    """Write a JSON trade snapshot to logs/. Fire-and-forget — never raises."""
+    """Write a JSON trade snapshot for live trades to logs/YYYY-MM/DD/. Fire-and-forget — never raises.
+
+    Backtest trades are persisted to PostgreSQL and must never be written here.
+    """
     try:
-        os.makedirs(_LOGS_DIR, exist_ok=True)
-        ts_str = str(timestamp).replace(':', '').replace(' ', '-')[:13]
-        filename = f"{source}-{event}-{pair}-{ts_str}.json"
+        ts_utc = pd.Timestamp(timestamp)
+        if ts_utc.tzinfo is None:
+            ts_utc = ts_utc.tz_localize('UTC')
+        else:
+            ts_utc = ts_utc.tz_convert('UTC')
+        subdir = os.path.join(
+            _LOGS_DIR,
+            f'{ts_utc.year:04d}-{ts_utc.month:02d}',
+            f'{ts_utc.day:02d}',
+        )
+        os.makedirs(subdir, exist_ok=True)
+        time_part = f'{ts_utc.hour:02d}-{ts_utc.minute:02d}'
+        filename = f"{source}-{event}-{pair}-{time_part}.json"
         snapshot = {
             'source': source,
             'event': event,
@@ -180,7 +193,7 @@ def _write_trade_snapshot(
             'exit_reason': exit_reason,
             'exit_price': exit_price,
         }
-        filepath = os.path.join(_LOGS_DIR, filename)
+        filepath = os.path.join(subdir, filename)
         with open(filepath, 'w') as f:
             json.dump(snapshot, f, indent=2, default=str)
     except Exception:
@@ -429,8 +442,17 @@ def resolve_entry_signal_for_bar(
     minute_df: pd.DataFrame | None = None,
     align_signal_time: bool = False,
     current_atr: float = 0.0,
+    bar_is_forming: bool = False,
 ) -> tuple[Optional[Signal], Optional[pd.Timestamp]]:
-    """Resolve a candidate signal and its preferred submit timestamp for a bar."""
+    """Resolve a candidate signal and its preferred submit timestamp for a bar.
+
+    When ``bar_is_forming`` is True, the hourly bar has not yet closed and its
+    aggregated OHLC is only a partial snapshot of the minutes that have already
+    closed. In that state we must rely on closed 1m bars alone and skip the
+    ``select_entry_signal`` fallback, which would otherwise read the partial
+    hourly OHLC as if it were final (and could fire a phantom signal whose
+    shape changes as later minutes arrive).
+    """
 
     if execution_mode not in {'next_bar', 'intrabar'}:
         execution_mode = 'next_bar'
@@ -450,7 +472,7 @@ def resolve_entry_signal_for_bar(
         if intrabar_signal is not None:
             signal, intrabar_submit_time = intrabar_signal
 
-    if signal is None:
+    if signal is None and not bar_is_forming:
         signal = select_entry_signal(
             hourly_df=hourly_df,
             bar_idx=bar_idx,
@@ -500,7 +522,29 @@ def run_walk_forward(
     """
 
     debug = bool(debug) or _walk_debug_enabled()
-    _snap = bool(snapshot_source and params.trade_snapshot_logging)
+    # Backtest trades live in PostgreSQL — never written as JSON snapshots. Live
+    # trades can optionally be dumped to logs/ for real-time observability.
+    _snap = bool(
+        snapshot_source
+        and snapshot_source != 'backtest'
+        and params.trade_snapshot_logging
+    )
+
+    # Detect whether the final hourly bar in the input is still forming
+    # (i.e. its close time lies in the future). When live scans while the
+    # current hour is in progress, the last row's OHLC is a partial snapshot
+    # of the minutes that have closed so far — we must not treat it as a
+    # finalized bar. Backtest inputs are historical, so this is always False.
+    _last_bar_is_forming = False
+    if len(hourly_df):
+        _last_bar_ts = hourly_df.index[-1]
+        if getattr(_last_bar_ts, 'tzinfo', None) is None:
+            _last_bar_ts = pd.Timestamp(_last_bar_ts).tz_localize('UTC')
+        else:
+            _last_bar_ts = pd.Timestamp(_last_bar_ts).tz_convert('UTC')
+        _last_bar_is_forming = (
+            _last_bar_ts + pd.Timedelta(hours=1) > pd.Timestamp.now(tz='UTC')
+        )
 
     # Pre-compute ATR series for ATR-based SL/trailing modes
     atr_series = compute_atr(hourly_df, period=params.atr_period) if params.sl_mode == 'atr' or params.trailing_mode == 'atr' else None
@@ -614,6 +658,14 @@ def run_walk_forward(
             minute_exit_elapsed += time.perf_counter() - t_minute_exit
             if minute_result:
                 exit_reason, exit_price, exit_time = minute_result
+            elif _last_bar_is_forming and i == len(hourly_df) - 1:
+                # The final hourly bar hasn't closed yet, so its OHLC is a
+                # partial snapshot that mutates as more 1m bars arrive. Don't
+                # drive exit decisions from it — if the closed-minute check
+                # didn't trigger, leave the trade open and re-evaluate on
+                # the next scan cycle.
+                exit_reason = None
+                exit_time = current_time
             else:
                 # Ensure best_favorable_price reflects the hourly bar even
                 # when no minute data was available (fallback path).
@@ -937,6 +989,7 @@ def run_walk_forward(
                 minute_df=minute_df,
                 align_signal_time=False,
                 current_atr=current_atr,
+                bar_is_forming=_last_bar_is_forming and i == len(hourly_df) - 1,
             )
             signal_scan_elapsed += time.perf_counter() - t_signal
             if signal is not None:

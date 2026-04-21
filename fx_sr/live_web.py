@@ -1333,6 +1333,7 @@ class LiveDashboardHub:
             'zone_lower': signal.zone_lower,
             'zone_strength': signal.zone_strength,
             'zone_type': signal.zone_type,
+            'quality_score': float(getattr(signal, 'quality_score', 0.0) or 0.0),
             'decimals': pair_info.get('decimals', 5),
             'arrived_at': (
                 lifecycle.get('arrived_at')

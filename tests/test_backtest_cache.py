@@ -9,7 +9,9 @@ from fx_sr.backtest import (
     _params_signature,
     _serialize_backtest_result,
     _backtest_pair,
+    BacktestCacheMissingError,
     build_backtest_run_config_json,
+    run_all_backtests_parallel,
 )
 from fx_sr.backtest import BacktestResult
 from fx_sr.strategy import StrategyParams
@@ -48,8 +50,12 @@ def _sample_minute_df() -> pd.DataFrame:
 
 
 def _empty_backtest() -> BacktestResult:
+    return _empty_backtest_for_pair('EURUSD')
+
+
+def _empty_backtest_for_pair(pair: str) -> BacktestResult:
     return BacktestResult(
-        pair='EURUSD',
+        pair=pair,
         total_trades=0,
         winning_trades=0,
         losing_trades=0,
@@ -200,6 +206,47 @@ class BacktestCacheTests(unittest.TestCase):
         save_result.assert_called_once()
         _, kwargs = save_result.call_args
         self.assertEqual(kwargs['run_config_json'], run_config_json)
+
+    def test_run_all_backtests_parallel_skips_cache_gapped_pairs(self):
+        pairs = {
+            'EURUSD': {'ticker': 'EURUSD=X'},
+            'USDJPY': {'ticker': 'JPY=X'},
+        }
+        cached = _serialize_backtest_result(_empty_backtest_for_pair('USDJPY'))
+        expected_signature = _data_signature(
+            self.daily_df,
+            self.hourly_df,
+            self.minute_df,
+            execution_mode='intrabar',
+        )
+
+        def fake_fetch(pair, pair_info, *_args, **_kwargs):
+            if pair == 'EURUSD':
+                raise BacktestCacheMissingError('Cached 1d data for EURUSD=X has a gap')
+            return pair, self.daily_df, self.hourly_df, self.minute_df, []
+
+        with patch('fx_sr.backtest._fetch_pair_data_only', side_effect=fake_fetch), \
+                patch('fx_sr.backtest.load_backtest_result', return_value=(
+                    expected_signature,
+                    cached,
+                    BACKTEST_CACHE_VERSION,
+                    None,
+                )), \
+                patch('builtins.print'):
+            results = run_all_backtests_parallel(
+                params=self.params,
+                hourly_days=self.hourly_days,
+                zone_history_days=self.zone_history_days,
+                pairs=pairs,
+                run_id='test',
+                fetch_workers=1,
+                backtest_workers=1,
+            )
+
+        self.assertIn('USDJPY', results)
+        self.assertNotIn('EURUSD', results)
+        self.assertEqual(results['USDJPY'].pair, 'USDJPY')
+        self.assertEqual(len(results), 1)
 
 
 if __name__ == '__main__':

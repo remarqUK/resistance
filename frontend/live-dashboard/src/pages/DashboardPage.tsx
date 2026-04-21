@@ -35,6 +35,69 @@ function formatNumber(value: any, digits = 5) {
   });
 }
 
+function formatQualityPct(score: number | null | undefined): string {
+  if (score === null || score === undefined || Number.isNaN(Number(score))) {
+    return '–';
+  }
+  return `${Math.round(Number(score) * 100)}%`;
+}
+
+const QUALITY_BAR_SEGMENTS = 6;
+
+function QualityBar({
+  score,
+  showPct = true,
+  compact = false,
+}: {
+  score: number | null | undefined;
+  showPct?: boolean;
+  compact?: boolean;
+}) {
+  const raw = score === null || score === undefined ? NaN : Number(score);
+  const normalized = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : 0;
+  const filled = Math.round(normalized * QUALITY_BAR_SEGMENTS);
+  const hasScore = Number.isFinite(raw);
+  const color = !hasScore
+    ? 'rgba(91,75,58,0.35)'
+    : normalized < 0.33
+      ? '#b23b29'
+      : normalized < 0.67
+        ? '#d4a017'
+        : '#1f7a49';
+  const segW = compact ? 4 : 6;
+  const segH = compact ? 8 : 10;
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: compact ? 4 : 6,
+        verticalAlign: 'middle',
+      }}
+      title={`Signal quality: ${formatQualityPct(score)}`}
+    >
+      <span style={{ display: 'inline-flex', gap: 2 }}>
+        {Array.from({ length: QUALITY_BAR_SEGMENTS }).map((_, i) => (
+          <span
+            key={i}
+            style={{
+              width: segW,
+              height: segH,
+              background: i < filled ? color : 'rgba(91,75,58,0.15)',
+              borderRadius: 1,
+            }}
+          />
+        ))}
+      </span>
+      {showPct ? (
+        <span style={{ fontSize: compact ? '0.75em' : '0.85em', color: '#5b4b3a' }}>
+          {formatQualityPct(score)}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function formatSigned(value: any, digits = 1, suffix = '') {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return '–';
@@ -99,6 +162,7 @@ const STOP_ICON = '\u23F9';
 const AUDIT_LOG_ICON = '\uD83D\uDCCB';  // clipboard/log icon
 const HEALTH_ICON = '\uD83E\uDE7A';    // stethoscope icon
 const STATEMENT_ICON = '\uD83D\uDCB0';  // money bag icon
+const DASHBOARD_PAIR_UPDATE_MS = 1_000;
 
 function badgeClass(value: any) {
   const token = String(value || 'muted').toLowerCase().replaceAll(/[^a-z0-9]+/g, '-');
@@ -434,7 +498,15 @@ function normalizeState(payload: Partial<DashboardState> | undefined, previousSi
 
 const WatchlistRow = memo(function WatchlistRow({ row }: { row: PairRow }) {
   const signal = row.signal;
-  const setupText = signal ? `${signal.zone_type} · ${signal.zone_strength}` : row.note || 'No setup';
+  const setupLabel = signal ? `${signal.zone_type} · ${signal.zone_strength}` : row.note || 'No setup';
+  const setupCell = signal ? (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <span>{setupLabel}</span>
+      <QualityBar score={signal.quality_score} compact />
+    </span>
+  ) : (
+    <span>{setupLabel}</span>
+  );
   const supportNear = row.support_dist_pct != null && row.support_dist_pct <= NEAR_THRESHOLD;
   const resistanceNear = row.resistance_dist_pct != null && row.resistance_dist_pct <= NEAR_THRESHOLD;
 
@@ -455,7 +527,7 @@ const WatchlistRow = memo(function WatchlistRow({ row }: { row: PairRow }) {
       <td className="price">{formatNumber(row.price, row.decimals ?? PRICE_DISPLAY_DECIMALS)}</td>
       <td className={`price${supportNear ? ' zone-near' : ''}`}>{row.support_text || '–'}</td>
       <td className={`price${resistanceNear ? ' zone-near' : ''}`}>{row.resistance_text || '–'}</td>
-      <td>{setupText}</td>
+      <td>{setupCell}</td>
       <td>{signal ? <span className={badgeClass(signal.direction)}>{signal.direction}</span> : <span className="pair-sub">–</span>}</td>
     </tr>
   );
@@ -698,11 +770,30 @@ const CurrencyBalanceWarning = memo(function CurrencyBalanceWarning({ balances, 
   );
 });
 
-const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, entryTime, direction, slPrice, tpPrice, decimals = 4 }: { pair: string; entryPrice?: number; entryTime?: string; direction?: string; slPrice?: number; tpPrice?: number; decimals?: number }) {
+const PositionMiniChart = memo(function PositionMiniChart({
+  pair,
+  entryPrice,
+  entryTime,
+  direction,
+  slPrice,
+  tpPrice,
+  livePrice,
+  decimals = 4,
+}: {
+  pair: string;
+  entryPrice?: number;
+  entryTime?: string;
+  direction?: string;
+  slPrice?: number;
+  tpPrice?: number;
+  livePrice?: number | null;
+  decimals?: number;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
   const lastBarRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
+  const lastLiveUpdateRef = useRef(0);
   const [status, setStatus] = useState('Loading...');
 
   // Load chart data once
@@ -814,44 +905,38 @@ const PositionMiniChart = memo(function PositionMiniChart({ pair, entryPrice, en
     return () => { active = false; if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; } };
   }, [pair, entryPrice, slPrice, tpPrice]);
 
-  // Subscribe to WebSocket for live price updates
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+    if (livePrice == null || !seriesRef.current) {
+      return;
+    }
 
-    ws.addEventListener('message', (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        let price: number | null = null;
+    const now = Date.now();
+    const elapsed = now - lastLiveUpdateRef.current;
+    if (elapsed < DASHBOARD_PAIR_UPDATE_MS) {
+      return;
+    }
+    lastLiveUpdateRef.current = now;
 
-        if (msg.type === 'pair_update' && msg.row?.pair === pair) {
-          price = msg.row.price;
-        }
-        if ((msg.type === 'bootstrap' || msg.type === 'snapshot') && msg.state?.pairs?.[pair]) {
-          price = msg.state.pairs[pair].price;
-        }
+    const price = Number(livePrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      return;
+    }
 
-        if (price != null && price > 0 && seriesRef.current) {
-          const now = Math.floor(Date.now() / 1000);
-          const hourStart = now - (now % 3600);
-          const last = lastBarRef.current;
+    const nowSec = Math.floor(now / 1000);
+    const hourStart = nowSec - (nowSec % 3600);
+    const last = lastBarRef.current;
 
-          if (last && last.time === hourStart) {
-            last.high = Math.max(last.high, price);
-            last.low = Math.min(last.low, price);
-            last.close = price;
-            seriesRef.current.update(last);
-          } else {
-            const bar = { time: hourStart, open: price, high: price, low: price, close: price };
-            lastBarRef.current = bar;
-            seriesRef.current.update(bar);
-          }
-        }
-      } catch {}
-    });
-
-    return () => ws.close();
-  }, [pair]);
+    if (last && last.time === hourStart && seriesRef.current) {
+      last.high = Math.max(last.high, price);
+      last.low = Math.min(last.low, price);
+      last.close = price;
+      seriesRef.current.update(last);
+    } else if (seriesRef.current) {
+      const bar = { time: hourStart, open: price, high: price, low: price, close: price };
+      lastBarRef.current = bar;
+      seriesRef.current.update(bar);
+    }
+  }, [livePrice, pair]);
 
   return (
     <div className="mini-detail-wide">
@@ -1042,6 +1127,9 @@ export function DashboardPage() {
   const reconnectTimerRef = useRef<number | null>(null);
   const queueRef = useRef<any[]>([]);
   const frameRef = useRef<number | null>(null);
+  const pairUpdateRef = useRef<Map<string, any>>(new Map());
+  const pairUpdateTimerRef = useRef<number | null>(null);
+  const lastPairUpdateFlushRef = useRef(0);
 
   const pushLog = useCallback((entry: LogEntry) => {
     const nextEntry: LogEntry = {
@@ -1098,6 +1186,32 @@ export function DashboardPage() {
       setViewState((previous) => queued.reduce((nextState, message) => mergeStateWithMessage(nextState, message), previous));
     }
 
+    function flushPairUpdates() {
+      const updates = Array.from(pairUpdateRef.current.values());
+      pairUpdateRef.current.clear();
+      pairUpdateTimerRef.current = null;
+      lastPairUpdateFlushRef.current = Date.now();
+      if (!updates.length) {
+        return;
+      }
+      setViewState((previous) => updates.reduce((nextState, message) => mergeStateWithMessage(nextState, message), previous));
+      if (pairUpdateRef.current.size > 0) {
+        schedulePairUpdateFlush();
+      }
+    }
+
+    function schedulePairUpdateFlush() {
+      if (pairUpdateTimerRef.current !== null) {
+        return;
+      }
+
+      const elapsed = Date.now() - lastPairUpdateFlushRef.current;
+      const delay = Math.max(0, DASHBOARD_PAIR_UPDATE_MS - elapsed);
+      pairUpdateTimerRef.current = window.setTimeout(() => {
+        flushPairUpdates();
+      }, delay);
+    }
+
     function scheduleFlush() {
       if (frameRef.current !== null) {
         return;
@@ -1121,6 +1235,11 @@ export function DashboardPage() {
       socket.addEventListener('message', (event) => {
         try {
           const message = JSON.parse(event.data);
+          if (message.type === 'pair_update' && message.row?.pair) {
+            pairUpdateRef.current.set(message.row.pair, message);
+            schedulePairUpdateFlush();
+            return;
+          }
           queueRef.current.push(message);
           scheduleFlush();
         } catch (_error) {
@@ -1151,6 +1270,9 @@ export function DashboardPage() {
     return () => {
       if (frameRef.current !== null) {
         window.cancelAnimationFrame(frameRef.current);
+      }
+      if (pairUpdateTimerRef.current !== null) {
+        window.clearTimeout(pairUpdateTimerRef.current);
       }
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
@@ -1683,6 +1805,7 @@ export function DashboardPage() {
                           direction={position.direction}
                           slPrice={position.sl_price}
                           tpPrice={position.tp_price}
+                          livePrice={viewState.pairs[position.pair]?.price}
                           decimals={dec}
                         />
                       </div>
@@ -1722,6 +1845,7 @@ export function DashboardPage() {
                       <div><span className="value-label">Entry</span><span className="value">{formatNumber(signal.entry_price, dec)}</span></div>
                       <div><span className="value-label">Stop</span><span className="value">{formatNumber(signal.sl_price, dec)}</span></div>
                       <div><span className="value-label">Target</span><span className="value">{formatNumber(signal.tp_price, dec)}</span></div>
+                      <div><span className="value-label">Quality</span><span className="value"><QualityBar score={signal.quality_score} /></span></div>
                       <div><span className="value-label">Units</span><span className="value">{plan.units ? Number(plan.units).toLocaleString() : '–'}</span></div>
                       <div><span className="value-label">Risk</span><span className="value">{plan.risk_amount ? `${formatNumber(plan.risk_amount, 2)} ${plan.account_currency || ''}` : '–'}</span></div>
                       <div><span className="value-label">Notional</span><span className="value">{plan.notional_account ? `${formatNumber(plan.notional_account, 0)} ${plan.account_currency || ''}` : '–'}</span></div>
@@ -1739,6 +1863,7 @@ export function DashboardPage() {
                           direction={signal.direction}
                           slPrice={signal.sl_price}
                           tpPrice={signal.tp_price}
+                          livePrice={viewState.pairs[signal.pair]?.price}
                           decimals={dec}
                         />
                       </div>

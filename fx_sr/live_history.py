@@ -1970,6 +1970,55 @@ def record_exit_signal(
         _replace_row_conn(conn, merged)
 
 
+def _status_after_clearing_exit_signal(existing: dict) -> str:
+    """Restore the open-trade lifecycle state after removing exit intent."""
+
+    open_units = _normalize_units(existing.get('open_units'))
+    planned_units = _normalize_units(existing.get('planned_units'))
+    if open_units > 0:
+        if planned_units > 0 and open_units < planned_units:
+            return 'PARTIAL'
+        return 'OPEN'
+
+    broker_status = _normalize_status(existing.get('broker_order_status') or '')
+    if broker_status in {'SUBMITTED', 'PRESUBMITTED', 'FILLED', 'PARTIAL', 'OPEN'}:
+        return broker_status
+
+    current_status = (existing.get('status') or '').upper()
+    if current_status and current_status != 'EXIT_SIGNAL':
+        return current_status
+    return 'OPEN'
+
+
+def clear_exit_signal(
+    signal_id: str,
+    *,
+    db_path: str | None = None,
+) -> None:
+    """Clear a previously persisted strategy exit intent for an open trade."""
+
+    db_path = _ensure_table(db_path)
+    now = _normalize_ts(pd.Timestamp.now('UTC'))
+    with db_transaction(db_path) as conn:
+        existing = _load_detected_signal_conn(conn, signal_id)
+        if existing is None:
+            return
+
+        merged = _merge_row(
+            existing,
+            status=(
+                _status_after_clearing_exit_signal(existing)
+                if existing.get('closed_at') in (None, '')
+                else existing.get('status')
+            ),
+            exit_signal_at=None,
+            exit_signal_reason=None,
+            exit_signal_price=None,
+            last_updated_at=now,
+        )
+        _replace_row_conn(conn, merged)
+
+
 def record_closed_signal_conn(
     conn,
     signal_id: str,

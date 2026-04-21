@@ -77,7 +77,7 @@ def _cancel_orders_for_pairs(pairs: set[str], *, exclude_order_ids: set[int] | N
             cancel_ids: set[int] = set()
             for trade in all_orders:
                 status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
-                if status in ('Filled', 'Cancelled', 'ApiCancelled', 'Inactive'):
+                if status.upper() in {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE', 'PENDINGCANCEL'}:
                     continue
                 pair_id = ibkr._contract_to_pair(getattr(trade, 'contract', None))
                 if pair_id in pairs:

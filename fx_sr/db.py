@@ -1416,7 +1416,7 @@ def load_ohlc(
                     return pd.DataFrame()
                 t_index = time.perf_counter()
                 df.columns = ['ts', 'Open', 'High', 'Low', 'Close', 'Volume']
-                df["ts"] = pd.to_datetime(df["ts"], utc=True)
+                df["ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601")
                 df = df.set_index("ts")
                 index_elapsed = time.perf_counter() - t_index
                 _maybe_log_load_ohlc_timing(

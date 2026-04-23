@@ -363,6 +363,11 @@ def _get_connection(client_id: Optional[int] = None, retries: int = 20):
             ib.connect(TWS_HOST, TWS_PORT, clientId=candidate_client_id, timeout=5)
             _set_thread_connection_state(ib, True, candidate_client_id)
             _LAST_FALLBACK_OFFSET = max(_LAST_FALLBACK_OFFSET, start_offset + attempt)
+            if _ALLOW_CLIENT_ID_FALLBACK and candidate_client_id != resolved_client_id:
+                print(
+                    f'  IBKR connected with fallback client ID {candidate_client_id} '
+                    f'(requested {resolved_client_id}).'
+                )
             return ib, True
         except Exception as exc:
             if attempt < max_attempts - 1:
@@ -1254,13 +1259,20 @@ def stream_realtime_bars(
                     useRTH=False,
                 )
                 ib.sleep(0.1)
-                subscriptions.append((contract, bars, pair))
-            except Exception:
-                continue
+            except Exception as exc:
+                # A failed subscription used to be silently swallowed, which
+                # meant the live process kept running with zero streaming
+                # data and no diagnostic trail. Fail loud instead — the
+                # startup cannot proceed without real-time bars for every
+                # pair, and the operator needs to see which pair + why.
+                raise RuntimeError(
+                    f'Real-time bar subscription failed for {pair}: '
+                    f'{type(exc).__name__}: {exc}'
+                ) from exc
+            subscriptions.append((contract, bars, pair))
 
         if not subscriptions:
-            print("    Warning: no real-time bar subscriptions succeeded")
-            return
+            raise RuntimeError('No real-time bar subscriptions were created')
 
         # Wire up the barUpdateEvent for each subscription
         def _make_handler(pair_id):
@@ -1648,6 +1660,7 @@ def fetch_fx_fills(
                     {
                         'pair': pair_id,
                         'order_id': int(order_id) if order_id is not None else None,
+                        'perm_id': getattr(execution, 'permId', None),
                         'side': getattr(execution, 'side', '') or '',
                         'price': float(getattr(execution, 'price', 0.0) or 0.0),
                         'avg_price': float(getattr(execution, 'avgPrice', 0.0) or 0.0),
@@ -1709,6 +1722,7 @@ def fetch_completed_fx_orders(
                         'pair': pair_id,
                         'order_id': int(order_id) if order_id is not None else None,
                         'parent_id': getattr(order, 'parentId', None),
+                        'perm_id': getattr(order, 'permId', None),
                         'order_ref': getattr(order, 'orderRef', '') or '',
                         'order_type': getattr(order, 'orderType', '') or '',
                         'action': getattr(order, 'action', '') or '',
@@ -1777,9 +1791,15 @@ def _order_snapshot_from_trade(trade) -> Optional[dict]:
         'pair': pair_id,
         'order_id': int(order_id) if order_id is not None else None,
         'parent_id': getattr(order, 'parentId', None),
+        'perm_id': getattr(order, 'permId', None),
         'order_ref': getattr(order, 'orderRef', '') or '',
         'order_type': getattr(order, 'orderType', '') or '',
         'action': getattr(order, 'action', '') or '',
+        'quantity': total_units,
+        'lmt_price': _float_or_zero(getattr(order, 'lmtPrice', None)),
+        'aux_price': _float_or_zero(getattr(order, 'auxPrice', None)),
+        'oca_group': getattr(order, 'ocaGroup', '') or '',
+        'tif': getattr(order, 'tif', '') or '',
         'status': getattr(order_status, 'status', '') or '',
         'avg_fill_price': _float_or_zero(getattr(order_status, 'avgFillPrice', None)),
         'filled_units': filled_units,
@@ -1834,6 +1854,35 @@ def fetch_fx_order_statuses(
             return list(snapshots.values())
         except Exception as e:
             print(f"    Warning: failed to read IBKR FX order statuses: {e}")
+            return []
+
+
+def fetch_open_fx_orders(pair: Optional[str] = None) -> list[dict]:
+    """Return active FX open-order snapshots from all IBKR client sessions."""
+
+    pair = str(pair or '').upper() or None
+    terminal_statuses = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE'}
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return []
+
+        try:
+            snapshots: list[dict] = []
+            for trade in ib.reqAllOpenOrders():
+                snapshot = _order_snapshot_from_trade(trade)
+                if snapshot is None:
+                    continue
+                if pair is not None and snapshot.get('pair') != pair:
+                    continue
+                status = str(snapshot.get('status') or '').upper()
+                if status in terminal_statuses:
+                    continue
+                snapshots.append(snapshot)
+            return snapshots
+        except Exception as e:
+            print(f"    Warning: failed to read IBKR open FX orders: {e}")
             return []
 
 
@@ -1921,6 +1970,215 @@ def submit_fx_market_order(
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
             return None
+
+
+def _live_fx_position_from_ib_positions(positions, pair: str) -> Optional[dict]:
+    """Return one live signed FX position from raw IBKR positions."""
+
+    pair = str(pair or '').upper()
+    for pos in positions or []:
+        pair_id = _contract_to_pair(getattr(pos, 'contract', None))
+        if pair_id != pair:
+            continue
+        try:
+            size = float(getattr(pos, 'position', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(size) < 1.0:
+            continue
+        return {
+            'pair': pair,
+            'size': size,
+            'direction': 'LONG' if size > 0 else 'SHORT',
+            'avg_cost': float(getattr(pos, 'avgCost', 0.0) or 0.0),
+        }
+    return None
+
+
+def liquidate_fx_position(
+    pair: str,
+    *,
+    expected_direction: str | None = None,
+    order_ref: str = '',
+) -> dict:
+    """Cancel working FX orders for *pair* and submit a reducing market order.
+
+    IBKR spot-FX orders do not have a reduce-only flag, so this function
+    verifies the live net position immediately before submitting the close.
+    """
+
+    pair = str(pair or '').strip().upper()
+    expected_direction = str(expected_direction or '').strip().upper() or None
+    if expected_direction not in {None, 'LONG', 'SHORT'}:
+        return {
+            'pair': pair,
+            'status': 'FAILED',
+            'error': 'expected_direction must be LONG or SHORT.',
+        }
+
+    _audit_start = time.monotonic()
+    request_data = {
+        'expected_direction': expected_direction,
+        'order_ref': order_ref,
+    }
+
+    def _finish(response: dict, *, error: str | None = None, order_ids: list[int] | None = None) -> dict:
+        log_order_event(
+            function_name='liquidate_fx_position',
+            pair=pair,
+            direction=response.get('direction') or expected_direction,
+            action='liquidate',
+            request_data=request_data,
+            response_data=response,
+            error=error,
+            order_ids=order_ids,
+            duration_ms=(time.monotonic() - _audit_start) * 1000,
+        )
+        return response
+
+    if not pair:
+        return _finish({'pair': pair, 'status': 'FAILED', 'error': 'Pair is required.'}, error='Pair is required.')
+
+    with _IBKR_LOCK:
+        ib, connected = _get_connection()
+        if not connected:
+            return _finish(
+                {'pair': pair, 'status': 'FAILED', 'error': 'Not connected to IBKR.'},
+                error='Not connected to IBKR.',
+            )
+
+        try:
+            from ib_async import MarketOrder, Order
+
+            terminal_statuses = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE'}
+
+            def _active_pair_orders() -> list[dict]:
+                orders: list[dict] = []
+                for trade in ib.reqAllOpenOrders():
+                    snapshot = _order_snapshot_from_trade(trade)
+                    if snapshot is None or snapshot.get('pair') != pair:
+                        continue
+                    status = str(snapshot.get('status') or '').upper()
+                    if status in terminal_statuses:
+                        continue
+                    orders.append(snapshot)
+                return orders
+
+            live_position = _live_fx_position_from_ib_positions(ib.positions(), pair)
+            if live_position is None:
+                return _finish({
+                    'pair': pair,
+                    'status': 'FAILED',
+                    'error': f'IBKR has no live {pair} position.',
+                }, error=f'IBKR has no live {pair} position.')
+
+            live_direction = live_position['direction']
+            if expected_direction is not None and live_direction != expected_direction:
+                return _finish({
+                    'pair': pair,
+                    'direction': live_direction,
+                    'size': live_position['size'],
+                    'status': 'FAILED',
+                    'error': (
+                        f'IBKR reports {pair} {live_direction}, not '
+                        f'{expected_direction}.'
+                    ),
+                }, error='Live position direction mismatch.')
+
+            open_orders_before = _active_pair_orders()
+            cancelled_order_ids: list[int] = []
+            for snapshot in open_orders_before:
+                order_id = snapshot.get('order_id')
+                if order_id is None:
+                    continue
+                ib.cancelOrder(Order(orderId=int(order_id)))
+                cancelled_order_ids.append(int(order_id))
+            if cancelled_order_ids and hasattr(ib, 'sleep'):
+                ib.sleep(1)
+
+            remaining_orders = _active_pair_orders()
+            if remaining_orders:
+                return _finish({
+                    'pair': pair,
+                    'direction': live_direction,
+                    'size': live_position['size'],
+                    'status': 'FAILED',
+                    'error': (
+                        f'{len(remaining_orders)} working {pair} order(s) are still '
+                        'visible after cancellation; retry once they are gone.'
+                    ),
+                    'cancelled_order_ids': cancelled_order_ids,
+                    'remaining_open_orders': remaining_orders,
+                }, error='Working orders remain after cancellation.', order_ids=cancelled_order_ids)
+
+            live_position = _live_fx_position_from_ib_positions(ib.positions(), pair)
+            if live_position is None:
+                return _finish({
+                    'pair': pair,
+                    'direction': live_direction,
+                    'quantity': 0,
+                    'status': 'CLOSED',
+                    'cancelled_order_ids': cancelled_order_ids,
+                    'message': f'{pair} was flat after cancelling working orders.',
+                }, order_ids=cancelled_order_ids)
+
+            live_direction = live_position['direction']
+            if expected_direction is not None and live_direction != expected_direction:
+                return _finish({
+                    'pair': pair,
+                    'direction': live_direction,
+                    'size': live_position['size'],
+                    'status': 'FAILED',
+                    'cancelled_order_ids': cancelled_order_ids,
+                    'error': (
+                        f'IBKR position changed to {pair} {live_direction} before '
+                        'liquidation order submission.'
+                    ),
+                }, error='Live position direction changed.', order_ids=cancelled_order_ids)
+
+            quantity = int(abs(float(live_position['size'])))
+            if quantity <= 0:
+                return _finish({
+                    'pair': pair,
+                    'direction': live_direction,
+                    'quantity': 0,
+                    'status': 'CLOSED',
+                    'cancelled_order_ids': cancelled_order_ids,
+                }, order_ids=cancelled_order_ids)
+
+            close_direction = 'SHORT' if live_direction == 'LONG' else 'LONG'
+            action = 'BUY' if close_direction == 'LONG' else 'SELL'
+            contract = _make_contract(pair)
+            ib.qualifyContracts(contract)
+            order = MarketOrder(action, quantity, orderRef=order_ref)
+            trade = ib.placeOrder(contract, order)
+            if hasattr(ib, 'sleep'):
+                ib.sleep(1)
+
+            live_order = getattr(trade, 'order', None)
+            order_status = getattr(trade, 'orderStatus', None)
+            response = {
+                'pair': pair,
+                'direction': live_direction,
+                'close_direction': close_direction,
+                'quantity': quantity,
+                'order_id': getattr(live_order, 'orderId', None),
+                'status': getattr(order_status, 'status', None) or 'Submitted',
+                'avg_fill_price': getattr(order_status, 'avgFillPrice', None),
+                'cancelled_order_ids': cancelled_order_ids,
+                'open_orders_before': open_orders_before,
+                'remaining_open_orders': remaining_orders,
+            }
+            return _finish(response, order_ids=[
+                *cancelled_order_ids,
+                *([int(response['order_id'])] if response.get('order_id') is not None else []),
+            ])
+        except Exception as e:
+            print(f"    Warning: failed to liquidate FX position for {pair}: {e}")
+            return _finish(
+                {'pair': pair, 'status': 'FAILED', 'error': str(e)},
+                error=str(e),
+            )
 
 
 def _neutralization_pair_direction(
@@ -2669,6 +2927,7 @@ def submit_bracket_for_existing_position(
                     'rounded_tp': float(rounded_tp),
                     'rounded_sl': float(rounded_sl),
                     'oca_group': oca_result.get('oca_group'),
+                    'order_ref': order_ref,
                 },
                 response_data={
                     'tp_order_id': oca_result['take_profit_order_id'],
@@ -2745,22 +3004,31 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
             from ib_async import Order
             skip_statuses = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE', 'PENDINGCANCEL'}
             known_status_by_id: dict[int, str] = {}
+            known_order_by_id: dict[int, object] = {}
+            open_orders_loaded = False
             try:
                 for trade in ib.reqAllOpenOrders():
-                    oid = getattr(getattr(trade, 'order', None), 'orderId', None)
+                    broker_order = getattr(trade, 'order', None)
+                    oid = getattr(broker_order, 'orderId', None)
                     if oid is None:
                         continue
                     status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
                     known_status_by_id[int(oid)] = status.upper()
+                    if broker_order is not None:
+                        known_order_by_id[int(oid)] = broker_order
+                open_orders_loaded = True
             except Exception:
                 known_status_by_id = {}
+                known_order_by_id = {}
 
             for oid in order_ids:
                 try:
                     status = known_status_by_id.get(int(oid), '')
+                    if suppress_not_found and open_orders_loaded and int(oid) not in known_status_by_id:
+                        continue
                     if status in skip_statuses:
                         continue
-                    order = Order(orderId=int(oid))
+                    order = known_order_by_id.get(int(oid)) or Order(orderId=int(oid))
                     ib.cancelOrder(order)
                     cancelled.append(int(oid))
                 except Exception as e:

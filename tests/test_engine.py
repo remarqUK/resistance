@@ -1,6 +1,7 @@
 """Tests for the unified PairEngine (Phase 5)."""
 
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -153,6 +154,68 @@ class PairEngineTests(unittest.TestCase):
         engine = self._engine(_make_hourly_df(20))
         with self.assertRaises(RuntimeError):
             engine.process_new_bars(_make_hourly_df(25))
+
+    def test_process_new_bars_reuses_resume_on_same_hour_minute_changes(self):
+        """Same-hour intrabar scans should resume instead of forcing full replay."""
+        hourly = _make_hourly_df(60)
+        engine = self._engine(hourly.iloc[:40])
+        engine.run_historical(force_close_end=False)
+        self.assertIsNotNone(engine.state)
+
+        minute_df = pd.DataFrame(
+            [
+                {
+                    'Open': 1.1000,
+                    'High': 1.1000,
+                    'Low': 1.1000,
+                    'Close': 1.1000,
+                    'Volume': 100,
+                },
+            ],
+            index=pd.DatetimeIndex(
+                ['2026-01-02 02:30:00+00:00'],
+                tz='UTC',
+            ),
+        )
+
+        from fx_sr import walkforward
+        with patch('fx_sr.engine.resume_walk_forward', wraps=walkforward.resume_walk_forward) as resume_mock, \
+                patch('fx_sr.engine.run_walk_forward') as run_mock:
+            _ = engine.process_new_bars(hourly.iloc[:40], minute_df=minute_df)
+
+        self.assertEqual(run_mock.call_count, 0, 'minute churn must not force full replay')
+        self.assertEqual(resume_mock.call_count, 1, 'resume path should be used for intrabar updates')
+
+    def test_process_new_bars_full_replays_on_rollover_minute_changes(self):
+        """Minute data added after an hour closes must not be masked by resume state."""
+        hourly = _make_hourly_df(60)
+        engine = self._engine(hourly.iloc[:40])
+        engine.run_historical(force_close_end=False)
+        self.assertIsNotNone(engine.state)
+
+        minute_df = pd.DataFrame(
+            [
+                {
+                    'Open': 1.1000,
+                    'High': 1.1010,
+                    'Low': 1.0990,
+                    'Close': 1.1005,
+                    'Volume': 100,
+                },
+            ],
+            index=pd.DatetimeIndex(
+                ['2026-01-03 15:59:00+00:00'],
+                tz='UTC',
+            ),
+        )
+
+        from fx_sr import walkforward
+        with patch('fx_sr.engine.resume_walk_forward', wraps=walkforward.resume_walk_forward) as resume_mock, \
+                patch('fx_sr.engine.run_walk_forward', wraps=walkforward.run_walk_forward) as run_mock:
+            _ = engine.process_new_bars(hourly.iloc[:41], minute_df=minute_df)
+
+        self.assertEqual(resume_mock.call_count, 0)
+        self.assertEqual(run_mock.call_count, 1, 'rollover minute changes must full replay')
 
 
 if __name__ == '__main__':

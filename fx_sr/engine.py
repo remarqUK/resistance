@@ -12,7 +12,7 @@ Provides a single code path: load data → walk-forward → branch.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 import pandas as pd
@@ -24,6 +24,8 @@ from .strategy import Signal, StrategyParams, Trade, get_market_exit_price
 from .walkforward import (
     WalkForwardResult,
     WalkForwardState,
+    _compute_minute_hash,
+    _compute_prefix_hash,
     finalize_trade,
     make_execution_quote_provider,
     make_zone_provider,
@@ -246,9 +248,43 @@ class PairEngine:
         _daily = self._data.daily_df if self._data else None
         _minute = minute_df if minute_df is not None else (self._data.minute_df if self._data else None)
 
+        resume_state = self._state
+        force_full_replay = False
+        if self.execution_mode == 'intrabar' and resume_state is not None and minute_df is not None:
+            current_minute_hash = _compute_minute_hash(minute_df)
+            if not hourly_df.empty:
+                last_bar_time = hourly_df.index[-1]
+                if resume_state.last_bar_time == last_bar_time and len(hourly_df) >= 2:
+                    # In intrabar mode, the latest bar is still evolving.
+                    # Replaying that last bar keeps intrabar exits/entries
+                    # in sync while avoiding full-replay loops whenever the
+                    # minute cache changes between callbacks.
+                    checkpoint_pos = len(hourly_df) - 2
+                    resume_state = replace(
+                        resume_state,
+                        last_bar_time=hourly_df.index[checkpoint_pos],
+                        prefix_hash=_compute_prefix_hash(hourly_df, checkpoint_pos + 1),
+                        minute_hash=current_minute_hash,
+                    )
+                elif resume_state.minute_hash != current_minute_hash:
+                    # Minute data changed after the checkpoint hour closed.
+                    # We do not have the pre-checkpoint mutable state needed
+                    # to safely replay only that hour, so use the full replay
+                    # fallback and avoid missing late-minute TP/SL or entries.
+                    force_full_replay = True
+                else:
+                    resume_state = replace(
+                        resume_state,
+                        minute_hash=current_minute_hash,
+                    )
+            elif resume_state.minute_hash != current_minute_hash:
+                force_full_replay = True
+
         try:
+            if force_full_replay:
+                raise ValueError('minute data changed after checkpoint')
             result = resume_walk_forward(
-                self._state,
+                resume_state,
                 hourly_df,
                 pair=self.pair,
                 params=self.params,

@@ -249,7 +249,8 @@ function executionTimestampMs(execution: ExecutionRow) {
 
 function isClosedExecution(execution: ExecutionRow) {
   const status = String(execution.status || '').toUpperCase();
-  return execution.closed_at != null || (status !== '' && status !== 'OPEN');
+  const activeStatuses = new Set(['OPEN', 'PARTIAL', 'SUBMITTED', 'PRESUBMITTED', 'FILLED', 'EXIT_SIGNAL']);
+  return execution.closed_at != null || (status !== '' && !activeStatuses.has(status));
 }
 
 type ExecutionFilterMode = 'all' | 'open' | 'closed';
@@ -394,6 +395,104 @@ function currentBacktestButtonText(backtest: Record<string, any>) {
     return total > 0 ? `Re-running ${processed}/${total} (${pct}%)` : 'Starting...';
   }
   return 'Re-run Backtest';
+}
+
+const DATA_HEALTH_COLORS: Record<string, string> = {
+  ok: '#33cc66',
+  warn: '#ffaa00',
+  stale: '#ff4444',
+  closed: '#6b7280',
+  starting: '#6b7280',
+  unknown: '#6b7280',
+};
+
+function formatAgeSeconds(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return '—';
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.round((seconds % 3600) / 60);
+  return mins ? `${hours}h${mins}m` : `${hours}h`;
+}
+
+function dataHealthMessage(health: SummaryState['data_health']): string {
+  if (!health) return 'Data feed status unknown';
+  const missing = (health.missing_pairs || []);
+  const worstAge = formatAgeSeconds(health.worst_age_seconds ?? null);
+  if (health.pipeline_status === 'persistence_not_started') {
+    return `DB writer not started; persisted bars are ${worstAge} behind`;
+  }
+  if (health.pipeline_status === 'persistence_stopped') {
+    return `DB writer stopped; persisted bars are ${worstAge} behind`;
+  }
+  if (health.pipeline_status === 'persistence_error') {
+    return `DB writer error; persisted bars are ${worstAge} behind`;
+  }
+  switch (health.overall) {
+    case 'ok':
+      return `Data feed healthy (worst lag ${worstAge})`;
+    case 'warn':
+      return `Data feed lagging — worst pair ${health.worst_pair || '?'} ${worstAge} behind`;
+    case 'stale':
+      if (missing.length) {
+        return `Data feed stalled — ${missing.length} pair(s) missing, worst ${health.worst_pair || '?'} ${worstAge} behind`;
+      }
+      return `Data feed stalled — worst pair ${health.worst_pair || '?'} ${worstAge} behind`;
+    case 'closed':
+      return 'FX market closed — data feed suspended';
+    case 'starting':
+      return 'Data feed initialising — waiting for first bars to land';
+    case 'unknown':
+    default:
+      return 'Data feed status unknown';
+  }
+}
+
+function DataHealthDot({ health }: { health: SummaryState['data_health'] }) {
+  const overall = health?.overall ?? 'unknown';
+  const color = DATA_HEALTH_COLORS[overall] ?? DATA_HEALTH_COLORS.unknown;
+  const title = dataHealthMessage(health);
+  return (
+    <span
+      title={title}
+      aria-label={title}
+      role="status"
+      style={{
+        display: 'inline-block',
+        width: 10,
+        height: 10,
+        borderRadius: '50%',
+        backgroundColor: color,
+        marginLeft: 6,
+        verticalAlign: 'middle',
+        boxShadow: overall === 'stale' ? `0 0 6px ${color}` : 'none',
+      }}
+    />
+  );
+}
+
+function DataHealthBanner({ health }: { health: SummaryState['data_health'] }) {
+  if (!health || health.overall !== 'stale') return null;
+  const pipelineIssue = String(health.pipeline_status || '').startsWith('persistence');
+  const suffix = pipelineIssue
+    ? 'DB writer will auto-restart; check terminal logs if this does not clear.'
+    : 'check TWS / IBKR data subscription.';
+  return (
+    <div
+      role="alert"
+      style={{
+        marginBottom: 12,
+        padding: '10px 14px',
+        borderRadius: 6,
+        backgroundColor: 'rgba(255, 68, 68, 0.12)',
+        border: '1px solid rgba(255, 68, 68, 0.5)',
+        color: '#ff6a6a',
+        fontWeight: 600,
+      }}
+    >
+      ⚠ {dataHealthMessage(health)} — {suffix}
+    </div>
+  );
 }
 
 function scanProgressText(summary: SummaryState) {
@@ -1117,6 +1216,7 @@ export function DashboardPage() {
   const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
   const [selectedSignalKey, setSelectedSignalKey] = useState<string | null>(null);
   const [closingPositionKey, setClosingPositionKey] = useState<string | null>(null);
+  const [liquidatingPositionKey, setLiquidatingPositionKey] = useState<string | null>(null);
   const [showStatement, setShowStatement] = useState(false);
   const [statementData, setStatementData] = useState<any>(null);
   const [statementLoading, setStatementLoading] = useState(false);
@@ -1407,6 +1507,46 @@ export function DashboardPage() {
     }
   }, [closingPositionKey, pushLog]);
 
+  const liquidateLivePosition = useCallback(async (position: PositionRow) => {
+    const positionKey = `${position.pair}:${position.direction}`;
+    if (liquidatingPositionKey === positionKey) {
+      return;
+    }
+    const closeSide = position.direction === 'SHORT' ? 'BUY' : 'SELL';
+    const size = Number(position.size || 0).toLocaleString();
+    if (!window.confirm(
+      `Liquidate live IBKR ${position.direction} ${position.pair}?\n\n`
+      + `This cancels working ${position.pair} orders, then submits ${closeSide} for the verified live IBKR size.`
+      + (size !== '0' ? `\nCurrent dashboard size: ${size} units.` : '')
+    )) {
+      return;
+    }
+
+    setLiquidatingPositionKey(positionKey);
+    try {
+      const res = await fetch('/api/live-position-liquidate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ pair: position.pair, direction: position.direction }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Unable to liquidate live position.');
+      }
+      const cancelled = payload?.result?.cancelled_order_ids || [];
+      const suffix = cancelled.length ? ` Cancelled orders: ${cancelled.join(', ')}.` : '';
+      pushLog({ level: 'success', message: `${payload?.message || `Liquidation request sent for ${position.pair}.`}${suffix}` });
+    } catch (error: any) {
+      const message = error?.message || 'Unable to liquidate live position.';
+      pushLog({ level: 'error', message });
+      window.alert(`Unable to liquidate live position: ${message}`);
+    } finally {
+      setLiquidatingPositionKey(null);
+    }
+  }, [liquidatingPositionKey, pushLog]);
+
   const rerunBacktest = useCallback(async () => {
     if (!window.confirm('Re-run full backtest now?')) {
       return;
@@ -1617,6 +1757,7 @@ export function DashboardPage() {
 
       <main className="board live-marketboard">
         <section className="left-side-section">
+          <DataHealthBanner health={summary.data_health} />
           <section className="metrics-grid" id="metrics-grid">
             <article className="metric-card">
               <span className="meta-label">Scan state</span>
@@ -1640,7 +1781,10 @@ export function DashboardPage() {
               </span>
             </article>
             <article className="metric-card">
-              <span className="meta-label">Signals</span>
+              <span className="meta-label">
+                Signals
+                <DataHealthDot health={summary.data_health} />
+              </span>
               <strong id="signal-count">{signals.length || summary.signal_count || 0}</strong>
               <span id="pending-count" className="metric-detail">
                 {summary.pending_count || 0} pending blockers
@@ -1713,6 +1857,7 @@ export function DashboardPage() {
                 const pnlUp = Number(position.pnl_pips || 0) >= 0;
                 const posSelected = posKey === selectedPositionKey;
                 const dec = position.decimals ?? PRICE_DISPLAY_DECIMALS;
+                const canLiquidateLive = position.position_source === 'ibkr_position';
                 return (
                   <article
                     key={posKey}
@@ -1781,22 +1926,41 @@ export function DashboardPage() {
                               View Chart
                             </a>
                           </div>
-                          <button
-                            type="button"
-                            disabled={closingPositionKey === posKey}
-                            onClick={() => void closeTrackedPosition(position)}
-                            style={{
-                              background: 'rgba(178, 59, 41, 0.12)',
-                              border: '1px solid #b23b29',
-                              borderRadius: '4px',
-                              padding: '2px 8px',
-                              cursor: closingPositionKey === posKey ? 'not-allowed' : 'pointer',
-                              fontSize: '0.75rem',
-                              color: '#b23b29',
-                            }}
-                          >
-                            {closingPositionKey === posKey ? 'Closing...' : 'Close Trade'}
-                          </button>
+                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            <button
+                              type="button"
+                              disabled={!canLiquidateLive || liquidatingPositionKey === posKey}
+                              onClick={() => void liquidateLivePosition(position)}
+                              title={canLiquidateLive ? 'Cancel pair orders, then close the verified live IBKR position' : 'Only available for live IBKR position rows'}
+                              style={{
+                                background: canLiquidateLive ? 'rgba(178, 59, 41, 0.16)' : 'rgba(91, 75, 58, 0.08)',
+                                border: canLiquidateLive ? '1px solid #b23b29' : '1px solid var(--line)',
+                                borderRadius: '4px',
+                                padding: '2px 8px',
+                                cursor: (!canLiquidateLive || liquidatingPositionKey === posKey) ? 'not-allowed' : 'pointer',
+                                fontSize: '0.75rem',
+                                color: canLiquidateLive ? '#b23b29' : 'var(--muted)',
+                              }}
+                            >
+                              {liquidatingPositionKey === posKey ? 'Liquidating...' : 'Liquidate IBKR'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={closingPositionKey === posKey}
+                              onClick={() => void closeTrackedPosition(position)}
+                              style={{
+                                background: 'rgba(178, 59, 41, 0.08)',
+                                border: '1px solid rgba(178, 59, 41, 0.55)',
+                                borderRadius: '4px',
+                                padding: '2px 8px',
+                                cursor: closingPositionKey === posKey ? 'not-allowed' : 'pointer',
+                                fontSize: '0.75rem',
+                                color: '#b23b29',
+                              }}
+                            >
+                              {closingPositionKey === posKey ? 'Closing...' : 'Close Trade'}
+                            </button>
+                          </div>
                         </div>
                         <PositionMiniChart
                           pair={position.pair}

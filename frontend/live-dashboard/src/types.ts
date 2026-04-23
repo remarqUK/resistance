@@ -58,6 +58,9 @@ export interface PositionRow {
   current_price?: number;
   pnl_pips?: number;
   status?: string;
+  position_source?: string;
+  broker_fill_count?: number | null;
+  last_broker_fill_at?: string | null;
   decimals?: number;
   is_remainder?: boolean;
   position_fraction?: number;
@@ -98,6 +101,31 @@ export interface LogEntry {
   message?: string;
 }
 
+export interface DataHealth {
+  overall?: 'ok' | 'warn' | 'stale' | 'closed' | 'starting' | 'unknown';
+  worst_pair?: string | null;
+  worst_age_seconds?: number | null;
+  missing_pairs?: string[];
+  market_open?: boolean;
+  pipeline_status?: 'ok' | 'persistence_not_started' | 'persistence_stopped' | 'persistence_error' | string;
+  pipeline_message?: string | null;
+  persist_enabled?: boolean;
+  persist_thread_alive?: boolean;
+  persist_last_error?: string | null;
+  persist_restart_count?: number;
+  persist_flush_count?: number;
+  persist_last_flush_completed_at?: string | null;
+  warn_threshold_seconds?: number;
+  stale_threshold_seconds?: number;
+  evaluated_at?: string;
+  per_pair?: Array<{
+    pair: string;
+    ticker: string;
+    last_ts: string | null;
+    age_seconds: number | null;
+  }>;
+}
+
 export interface SummaryState {
   status?: string;
   pairs_total?: number;
@@ -119,6 +147,7 @@ export interface SummaryState {
   backfill?: Record<string, any>;
   fill?: Record<string, any>;
   backtest?: Record<string, any>;
+  data_health?: DataHealth;
 }
 
 export interface DashboardState {

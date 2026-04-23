@@ -1,7 +1,9 @@
 """Tests for the HourlyBarAccumulator."""
 
 import unittest
+import time
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -170,6 +172,44 @@ class AccumulatorTests(unittest.TestCase):
         acc.seed('EURUSD', pd.DataFrame(rows, index=index))
         df = acc.get_hourly_df('EURUSD', tail_n=10)
         self.assertEqual(len(df), 10)
+
+    def test_persistence_thread_survives_save_failures(self):
+        acc = HourlyBarAccumulator()
+        df = pd.DataFrame(
+            {'Open': [1.1], 'High': [1.11], 'Low': [1.09], 'Close': [1.105], 'Volume': [100]},
+            index=pd.DatetimeIndex([pd.Timestamp('2026-03-10 13:00', tz='UTC')]),
+        )
+        acc.seed('EURUSD', df)
+
+        with patch('fx_sr.db.save_ohlc', side_effect=RuntimeError('boom')):
+            try:
+                acc.start_persistence({'EURUSD': 'EURUSD=X'}, interval=0.02)
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    diagnostics = acc.snapshot_diagnostics()
+                    if diagnostics['persist_flush_count'] >= 2:
+                        break
+                    time.sleep(0.02)
+
+                diagnostics = acc.snapshot_diagnostics()
+                self.assertTrue(diagnostics['persist_thread_alive'])
+                self.assertGreaterEqual(diagnostics['persist_flush_count'], 2)
+                self.assertIn('RuntimeError: boom', diagnostics['persist_last_error'])
+            finally:
+                acc.stop_persistence()
+
+    def test_ensure_persistence_running_restarts_dead_thread(self):
+        acc = HourlyBarAccumulator()
+        acc._persist_enabled = True
+        acc._persist_ticker_map = {'EURUSD': 'EURUSD=X'}
+        acc._persist_thread = SimpleNamespace(is_alive=lambda: False)
+
+        with patch.object(acc, '_start_persistence_thread') as start_mock:
+            restarted = acc.ensure_persistence_running()
+
+        self.assertTrue(restarted)
+        self.assertEqual(acc.snapshot_diagnostics()['persist_restart_count'], 1)
+        start_mock.assert_called_once()
 
 
 if __name__ == '__main__':

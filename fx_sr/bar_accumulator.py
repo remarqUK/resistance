@@ -18,7 +18,7 @@ import pandas as pd
 
 _LOGGER = logging.getLogger(__name__)
 
-_MINUTE_TAIL = 3000  # rolling cap: ~50 hours of minute bars kept in memory
+_MINUTE_TAIL = 10080  # rolling cap: 7 days of minute bars kept in memory
 _PERSIST_INTERVAL = 60  # seconds between bulk saves
 
 
@@ -68,6 +68,21 @@ class HourlyBarAccumulator:
         self._current_minute_bar: Dict[str, dict] = {}
 
         self._seeded: set[str] = set()
+
+        # Persistence state is initialized here so diagnostics are stable even
+        # before the live dashboard starts the background writer.
+        self._persist_enabled = False
+        self._persist_stop: Optional[threading.Event] = None
+        self._persist_thread: Optional[threading.Thread] = None
+        self._persist_ticker_map: Dict[str, str] = {}
+        self._persist_last_saved: Dict[str, pd.Timestamp] = {}
+        self._persist_interval = float(_PERSIST_INTERVAL)
+        self._persist_restart_count = 0
+        self._persist_flush_count = 0
+        self._persist_last_flush_started_at: Optional[pd.Timestamp] = None
+        self._persist_last_flush_completed_at: Optional[pd.Timestamp] = None
+        self._persist_last_error: Optional[str] = None
+        self._persist_last_error_at: Optional[pd.Timestamp] = None
 
     @property
     def seeded_pairs(self) -> set[str]:
@@ -412,6 +427,54 @@ class HourlyBarAccumulator:
         return None
 
     # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
+    def snapshot_diagnostics(self) -> dict:
+        """Return a JSON-safe view of internal state for debug endpoints.
+
+        Stable contract: consumers (e.g. ``/api/debug/positions``) read from
+        this method instead of private attributes, so future refactors of
+        the internal dict names don't silently turn the diagnostics into
+        empty fields.
+        """
+        persist_thread = getattr(self, '_persist_thread', None)
+        last_error_at = getattr(self, '_persist_last_error_at', None)
+        last_flush_started_at = getattr(self, '_persist_last_flush_started_at', None)
+        last_flush_completed_at = getattr(self, '_persist_last_flush_completed_at', None)
+        return {
+            'current_hourly_pairs': sorted(self._current.keys()),
+            'current_minute_pairs': sorted(self._current_minute_bar.keys()),
+            'completed_hourly_rows': {
+                pair: int(len(df)) for pair, df in self._completed.items()
+            },
+            'completed_minute_rows': {
+                pair: int(len(df)) for pair, df in self._completed_minutes.items()
+            },
+            'persist_thread_alive': bool(
+                persist_thread is not None and persist_thread.is_alive()
+            ),
+            'persist_last_saved': {
+                key: str(ts)
+                for key, ts in getattr(self, '_persist_last_saved', {}).items()
+            },
+            'persist_enabled': bool(getattr(self, '_persist_enabled', False)),
+            'persist_interval': float(getattr(self, '_persist_interval', _PERSIST_INTERVAL)),
+            'persist_restart_count': int(getattr(self, '_persist_restart_count', 0)),
+            'persist_flush_count': int(getattr(self, '_persist_flush_count', 0)),
+            'persist_last_flush_started_at': (
+                last_flush_started_at.isoformat() if last_flush_started_at is not None else None
+            ),
+            'persist_last_flush_completed_at': (
+                last_flush_completed_at.isoformat() if last_flush_completed_at is not None else None
+            ),
+            'persist_last_error': getattr(self, '_persist_last_error', None),
+            'persist_last_error_at': (
+                last_error_at.isoformat() if last_error_at is not None else None
+            ),
+        }
+
+    # ------------------------------------------------------------------
     # Periodic persistence — bulk-save accumulated bars to PostgreSQL
     # ------------------------------------------------------------------
 
@@ -425,20 +488,62 @@ class HourlyBarAccumulator:
         *pair_ticker_map* maps pair IDs (e.g. ``'EURUSD'``) to cache ticker
         symbols (e.g. ``'EURUSD=X'``) used by ``save_ohlc``.
         """
-        self._persist_stop = threading.Event()
+        self._persist_enabled = True
+        self._persist_interval = float(interval)
         self._persist_ticker_map = dict(pair_ticker_map)
-        self._persist_last_saved: Dict[str, Dict[str, pd.Timestamp]] = {}
+
+        thread = getattr(self, '_persist_thread', None)
+        if thread is not None and thread.is_alive():
+            _LOGGER.info("Bar persistence thread already running")
+            return
+
+        self._start_persistence_thread()
+        _LOGGER.info("Bar persistence thread started (interval=%ss)", interval)
+
+    def ensure_persistence_running(
+        self,
+        pair_ticker_map: Optional[Dict[str, str]] = None,
+        interval: Optional[float] = None,
+    ) -> bool:
+        """Restart the persistence thread if it should be running but died."""
+
+        if pair_ticker_map is not None:
+            self._persist_ticker_map = dict(pair_ticker_map)
+        if interval is not None:
+            self._persist_interval = float(interval)
+
+        if not self._persist_enabled:
+            return False
+
+        if not self._persist_ticker_map:
+            return False
+
+        thread = getattr(self, '_persist_thread', None)
+        if thread is not None and thread.is_alive():
+            return False
+
+        if thread is not None:
+            self._persist_restart_count += 1
+            _LOGGER.warning("Bar persistence thread is not alive; restarting")
+
+        self._start_persistence_thread()
+        return True
+
+    def _start_persistence_thread(self) -> None:
+        """Create and start the persistence daemon."""
+
+        self._persist_stop = threading.Event()
         self._persist_thread = threading.Thread(
             target=self._persist_loop,
-            args=(interval,),
+            args=(float(self._persist_interval),),
             name='bar-persist',
             daemon=True,
         )
         self._persist_thread.start()
-        _LOGGER.info("Bar persistence thread started (interval=%ss)", interval)
 
     def stop_persistence(self) -> None:
         """Stop the persistence thread and do a final flush."""
+        self._persist_enabled = False
         stop = getattr(self, '_persist_stop', None)
         if stop is None:
             return
@@ -446,21 +551,47 @@ class HourlyBarAccumulator:
         thread = getattr(self, '_persist_thread', None)
         if thread is not None:
             thread.join(timeout=10)
-        self._flush_to_db()
+        self._safe_flush_to_db()
         _LOGGER.info("Bar persistence thread stopped, final flush complete")
 
     def _persist_loop(self, interval: float) -> None:
-        """Background loop: sleep then flush."""
-        while not self._persist_stop.is_set():
-            self._persist_stop.wait(timeout=interval)
-            if not self._persist_stop.is_set():
-                self._flush_to_db()
-        # Final flush on stop is handled by stop_persistence
+        """Background loop: flush immediately, then flush at the interval."""
+
+        stop = getattr(self, '_persist_stop', None)
+        if stop is None:
+            return
+
+        while not stop.is_set():
+            self._safe_flush_to_db()
+            stop.wait(timeout=interval)
+        # Final flush on stop is handled by stop_persistence.
+
+    def _safe_flush_to_db(self) -> None:
+        """Run one persistence flush without letting the thread die."""
+
+        self._persist_current_flush_errors = 0
+        try:
+            self._flush_to_db()
+        except Exception as exc:
+            self._record_persist_error(exc)
+            _LOGGER.exception("Bar persistence flush failed")
+        else:
+            if getattr(self, '_persist_current_flush_errors', 0) == 0:
+                self._persist_last_error = None
+                self._persist_last_error_at = None
+
+    def _record_persist_error(self, exc: BaseException) -> None:
+        self._persist_current_flush_errors = int(
+            getattr(self, '_persist_current_flush_errors', 0)
+        ) + 1
+        self._persist_last_error = f"{type(exc).__name__}: {exc}"
+        self._persist_last_error_at = pd.Timestamp.now(tz='UTC')
 
     def _flush_to_db(self) -> None:
         """Bulk-save new completed hourly and minute bars to PostgreSQL."""
         from .db import save_ohlc
 
+        self._persist_last_flush_started_at = pd.Timestamp.now(tz='UTC')
         ticker_map = getattr(self, '_persist_ticker_map', {})
         last_saved = getattr(self, '_persist_last_saved', {})
 
@@ -476,33 +607,38 @@ class HourlyBarAccumulator:
                 continue
             self._save_interval(pair, ticker, '1m', self._completed_minutes, last_saved, save_ohlc)
 
-    @staticmethod
+        self._persist_flush_count += 1
+        self._persist_last_flush_completed_at = pd.Timestamp.now(tz='UTC')
+
     def _save_interval(
+        self,
         pair: str,
         ticker: str,
         interval: str,
         store: Dict[str, pd.DataFrame],
-        last_saved: Dict[str, Dict[str, pd.Timestamp]],
+        last_saved: Dict[str, pd.Timestamp],
         save_fn,
     ) -> None:
         """Save only new bars (after last saved timestamp) for one pair+interval."""
-        df = store.get(pair)
-        if df is None or df.empty:
-            return
-
-        key = f"{pair}:{interval}"
-        cutoff = last_saved.get(key)
-        if cutoff is not None:
-            new_bars = df[df.index > cutoff]
-        else:
-            new_bars = df
-
-        if new_bars.empty:
-            return
-
         try:
+            df = store.get(pair)
+            if df is None or df.empty:
+                return
+
+            key = f"{pair}:{interval}"
+            cutoff = last_saved.get(key)
+            if cutoff is not None:
+                new_bars = df[df.index > cutoff]
+            else:
+                new_bars = df
+
+            if new_bars.empty:
+                return
+
+            new_bars = new_bars.copy()
             save_fn(ticker, interval, new_bars)
             last_saved[key] = new_bars.index[-1]
             _LOGGER.debug("Saved %d %s bars for %s", len(new_bars), interval, pair)
-        except Exception:
+        except Exception as exc:
+            self._record_persist_error(exc)
             _LOGGER.exception("Failed to save %s bars for %s", interval, pair)

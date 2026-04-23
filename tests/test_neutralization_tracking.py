@@ -110,8 +110,9 @@ def _make_ibkr_position(pair, size, avg_cost):
 @patch('fx_sr.positions.set_setting')
 @patch('fx_sr.positions._load_trades', return_value={})
 @patch('fx_sr.positions.ibkr')
-@patch('fx_sr.positions.reconcile_detected_signal_orders')
-def test_sync_skips_neutralization_positions(mock_reconcile, mock_ibkr, mock_load, mock_setting):
+@patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[])
+@patch('fx_sr.positions.reconcile_broker_ledger')
+def test_sync_skips_neutralization_positions(mock_reconcile, mock_broker_positions, mock_ibkr, mock_load, mock_setting):
     """sync_positions should not create open_trades for neutralization positions."""
     mock_ibkr.fetch_positions.return_value = [
         _make_ibkr_position('GBPJPY', 30000, 213.76),
@@ -131,8 +132,9 @@ def test_sync_skips_neutralization_positions(mock_reconcile, mock_ibkr, mock_loa
 @patch('fx_sr.positions.set_setting')
 @patch('fx_sr.positions._load_trades', return_value={})
 @patch('fx_sr.positions.ibkr')
-@patch('fx_sr.positions.reconcile_detected_signal_orders')
-def test_sync_skips_blocked_pair_directions(mock_reconcile, mock_ibkr, mock_load, mock_setting):
+@patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[])
+@patch('fx_sr.positions.reconcile_broker_ledger')
+def test_sync_skips_blocked_pair_directions(mock_reconcile, mock_broker_positions, mock_ibkr, mock_load, mock_setting):
     """sync_positions should not adopt positions for blocked pair+direction combos."""
     mock_ibkr.fetch_positions.return_value = [
         _make_ibkr_position('GBPJPY', 30000, 213.76),  # GBPJPY LONG is blocked
@@ -140,7 +142,8 @@ def test_sync_skips_blocked_pair_directions(mock_reconcile, mock_ibkr, mock_load
     mock_ibkr.fetch_open_order_counts.return_value = {}
 
     params = StrategyParams(use_pair_direction_filter=True)
-    result = sync_positions(params=params)
+    with patch('fx_sr.positions.BLOCKED_PAIR_DIRECTIONS', {('GBPJPY', 'LONG')}):
+        result = sync_positions(params=params)
 
     assert 'GBPJPY:LONG' not in result
     # Must not attempt bracket resubmission for blocked positions.

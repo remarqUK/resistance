@@ -131,7 +131,98 @@ class SharedEntryLogicTests(unittest.TestCase):
         live_module._LIVE_ZONE_CACHE.clear()
         live_module._LIVE_HOURLY_DATA_CACHE.clear()
         live_module._WALK_FORWARD_CACHE.clear()
+        live_module._WALK_FORWARD_STATE.clear()
         live_module._SEEN_WF_TRADES.clear()
+
+    def test_live_scan_bounds_minute_fetch_to_live_lookback(self):
+        daily_df = _build_daily_df()
+        hourly_index = pd.date_range('2026-02-01 00:00:00', periods=200, freq='h', tz='UTC')
+        hourly_df = pd.DataFrame(
+            {
+                'Open': [1.0500] * len(hourly_index),
+                'High': [1.0510] * len(hourly_index),
+                'Low': [1.0490] * len(hourly_index),
+                'Close': [1.0500] * len(hourly_index),
+                'Volume': [0.0] * len(hourly_index),
+            },
+            index=hourly_index,
+        )
+        minute_df = _build_minute_df([('2026-02-09 07:00:00', 1.0500)])
+        params = StrategyParams(
+            scan_lookback_bars=72,
+            max_hold_bars=72,
+            use_time_filters=False,
+            use_pair_direction_filter=False,
+        )
+
+        with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_minute_data_cached', return_value=minute_df) as minute_mock, \
+                patch('fx_sr.walkforward.detect_zones', return_value=[]), \
+                patch('fx_sr.live.detect_zones', return_value=[]):
+            row, signal, _wf = _scan_pair(
+                'EURUSD',
+                {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
+                params,
+                zone_history_days=20,
+                tracked_pairs={},
+                blocked_pairs=set(),
+                daily_data_cache={},
+                zone_cache={},
+                hourly_data_cache={},
+                minute_data_cache={},
+                execution_mode='intrabar',
+                hourly_days=365,
+            )
+
+        self.assertIsNone(signal)
+        self.assertEqual(row.state, 'WATCH')
+        self.assertEqual(minute_mock.call_args.kwargs['days'], live_module.live_scan_minute_days(params))
+        self.assertEqual(minute_mock.call_args.kwargs['days'], 4)
+
+    def test_live_scan_uses_supplied_minute_cache(self):
+        daily_df = _build_daily_df()
+        hourly_index = pd.date_range('2026-02-01 00:00:00', periods=80, freq='h', tz='UTC')
+        hourly_df = pd.DataFrame(
+            {
+                'Open': [1.0500] * len(hourly_index),
+                'High': [1.0510] * len(hourly_index),
+                'Low': [1.0490] * len(hourly_index),
+                'Close': [1.0500] * len(hourly_index),
+                'Volume': [0.0] * len(hourly_index),
+            },
+            index=hourly_index,
+        )
+        minute_df = _build_minute_df([('2026-02-04 07:00:00', 1.0500)])
+        params = StrategyParams(
+            scan_lookback_bars=72,
+            max_hold_bars=72,
+            use_time_filters=False,
+            use_pair_direction_filter=False,
+        )
+
+        with patch('fx_sr.live.fetch_daily_data', return_value=daily_df), \
+                patch('fx_sr.live.fetch_hourly_data', return_value=hourly_df), \
+                patch('fx_sr.live.fetch_minute_data_cached', side_effect=AssertionError('unexpected minute fetch')), \
+                patch('fx_sr.walkforward.detect_zones', return_value=[]), \
+                patch('fx_sr.live.detect_zones', return_value=[]):
+            row, signal, _wf = _scan_pair(
+                'EURUSD',
+                {'ticker': 'EURUSD=X', 'name': 'EUR/USD', 'decimals': 5},
+                params,
+                zone_history_days=20,
+                tracked_pairs={},
+                blocked_pairs=set(),
+                daily_data_cache={},
+                zone_cache={},
+                hourly_data_cache={},
+                minute_data_cache={'EURUSD=X': minute_df},
+                execution_mode='intrabar',
+                hourly_days=365,
+            )
+
+        self.assertIsNone(signal)
+        self.assertEqual(row.state, 'WATCH')
 
     def test_live_scan_and_backtest_both_honor_time_filters(self):
         daily_df = _build_daily_df()

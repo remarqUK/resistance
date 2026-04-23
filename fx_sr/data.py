@@ -160,6 +160,11 @@ def _trailing_gap_days(cached: pd.DataFrame, *, interval: str) -> int:
 
     # Compute business days in the gap as the fetch size
     trading = _trading_days_between(last, now)
+    if interval in {'1h', '1m'}:
+        # Intraday caches can legitimately be a few minutes behind.
+        # Use business-day count directly for the trailing fetch window, but
+        # avoid the daily-style +1 bump that inflates same-day staleness.
+        return max(1, trading)
     return max(1, trading + 1)
 
 

@@ -902,12 +902,27 @@ async def handle_trade_log_page(_request: web.Request) -> web.StreamResponse:
 async def handle_trade_log_api(_request: web.Request) -> web.Response:
     """Return detected signals from the live history database."""
     from .live_history import load_detected_signals
+    from .broker_ledger import load_unmatched_broker_liquidation_trades
 
     pair = _pair_from_request(_request)
     status = (_request.query.get('status', '') or '').strip() or None
     limit = int(_request.query.get('limit', '200'))
 
     signals = load_detected_signals(pair=pair, status=status, limit=limit)
+    if status is None or status.upper() == 'CLOSED':
+        signals.extend(
+            load_unmatched_broker_liquidation_trades(pair=pair, limit=limit)
+        )
+        signals.sort(
+            key=lambda row: pd.Timestamp(
+                row.get('closed_at')
+                or row.get('last_updated_at')
+                or row.get('signal_time')
+                or row.get('detected_at')
+            ),
+            reverse=True,
+        )
+        signals = signals[:limit]
     all_pairs = sorted({s['pair'] for s in signals})
 
     # Ensure JSON-safe values

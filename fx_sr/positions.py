@@ -21,10 +21,14 @@ from .live_history import (
     claim_signal_for_position_conn,
     ensure_detected_signal_table,
     load_detected_signal,
-    reconcile_detected_signal_orders,
     record_closed_signal_conn,
     record_exit_signal,
 )
+from .broker_ledger import (
+    load_open_broker_execution_positions,
+    reconcile_broker_ledger,
+)
+from .signal_store import signal_order_ref
 from .levels import detect_zones, SRZone
 from .strategy import Trade, StrategyParams, check_exit, get_market_exit_price, get_tradeable_zones
 from . import ibkr
@@ -85,8 +89,9 @@ def _cancel_orders_for_pairs(pairs: set[str], *, exclude_order_ids: set[int] | N
                     if oid is not None and oid not in exclude:
                         cancel_ids.add(int(oid))
             if cancel_ids:
-                ibkr.cancel_orders(cancel_ids)
-                print(f"    Cancelled {len(cancel_ids)} orphaned orders")
+                cancelled = ibkr.cancel_orders(cancel_ids, suppress_not_found=True)
+                if cancelled:
+                    print(f"    Cancelled {len(cancelled)} orphaned orders")
         except Exception as e:
             print(f"    Warning: failed to cancel orphaned orders: {e}")
 
@@ -461,6 +466,9 @@ def _load_trades() -> Dict[str, dict]:
             'ibkr_size': r['ibkr_size'],
             'signal_id': signal_id,
             'signal_status': signal_row.get('status') if signal_row is not None else None,
+            'position_source': 'open_trades',
+            'broker_fill_count': signal_row.get('fill_count') if signal_row is not None else None,
+            'last_broker_fill_at': signal_row.get('last_fill_at') if signal_row is not None else None,
             'pending_exit_reason': pending_exit_reason,
             'pending_exit_price': pending_exit_price,
             'pending_exit_detected_at': pending_exit_detected_at,
@@ -763,14 +771,14 @@ def _update_signal_bracket_ids(
     sl_order_id: int | None,
 ) -> None:
     """Overwrite the TP/SL order IDs on a detected_signal row."""
-    from .live_history import _load_detected_signal_conn, _replace_row_conn
+    from .signal_store import load_detected_signal_conn, replace_detected_signal_conn
     with _tracking_db_transaction() as conn:
-        row = _load_detected_signal_conn(conn, signal_id)
+        row = load_detected_signal_conn(conn, signal_id)
         if row is None:
             return
         row['take_profit_order_id'] = tp_order_id
         row['stop_loss_order_id'] = sl_order_id
-        _replace_row_conn(conn, row)
+        replace_detected_signal_conn(conn, row)
 
 
 _BRACKET_RESUBMIT_FAILURES: dict[str, int] = {}
@@ -871,6 +879,7 @@ def _resubmit_missing_brackets(
         quantity=quantity,
         take_profit_price=tp_price,
         stop_loss_price=sl_price,
+        order_ref=signal_order_ref(signal_row) if signal_row is not None else '',
     )
     if result is None:
         _BRACKET_RESUBMIT_FAILURES[pair] = fail_count + 1
@@ -923,14 +932,36 @@ def sync_positions(
     # Load neutralization positions to skip virtual FX positions from currency conversion.
     neutralization_keys = load_neutralization_positions()
 
-    # Build live position keys BEFORE reconciliation so it never closes
-    # a signal whose position still exists at IBKR.
-    live_position_keys = set()
-    for pos in ibkr_positions:
-        direction = 'LONG' if pos['size'] > 0 else 'SHORT'
-        live_position_keys.add(f"{pos['pair']}:{direction}")
+    ibkr_positions = list(ibkr_positions)
+    live_position_keys = {
+        f"{pos['pair']}:{'LONG' if pos['size'] > 0 else 'SHORT'}"
+        for pos in ibkr_positions
+    }
+    live_position_pairs = {str(pos['pair']).upper() for pos in ibkr_positions}
+    broker_live_pairs = set(live_position_pairs)
 
-    reconcile_detected_signal_orders(live_position_keys=live_position_keys)
+    # First reconcile executions into the local ledger.  Some IBKR spot-FX
+    # fills appear as cash exposure rather than positions(), so the ledger is
+    # the durable source for strategy-owned open exposure.
+    reconcile_broker_ledger(live_position_keys=live_position_keys)
+
+    broker_positions = load_open_broker_execution_positions()
+    for pos in broker_positions:
+        direction = 'LONG' if pos['size'] > 0 else 'SHORT'
+        key = f"{pos['pair']}:{direction}"
+        if key in live_position_keys:
+            continue
+        if str(pos['pair']).upper() in live_position_pairs:
+            continue
+        if (pos['pair'], direction) in neutralization_keys:
+            continue
+        print(
+            f"    Broker-ledger FX exposure detected: {pos['pair']} {direction} "
+            f"@ {pos['avg_cost']:.5f} (size: {abs(pos['size']):.0f})"
+        )
+        ibkr_positions.append(pos)
+        live_position_keys.add(key)
+
     db_trades = _load_trades()
 
     if not ibkr_positions and not db_trades:
@@ -1057,15 +1088,17 @@ def sync_positions(
         # Run for ALL positions (including newly detected ones after a crash/restart)
         # to ensure every live position has bracket protection.
         pair_close_ids = (exclude_close_order_ids_by_pair or {}).get(pos['pair'], set())
-        _resubmit_missing_brackets(
-            signal_row,
-            ibkr_size=pos['size'],
-            trade=trade,
-            pair=pos['pair'],
-            direction=direction,
-            open_order_counts=open_order_counts,
-            exclude_order_ids=pair_close_ids,
-        )
+        position_source = pos.get('position_source') or pos.get('source') or 'ibkr_position'
+        if position_source != 'broker_execution':
+            _resubmit_missing_brackets(
+                signal_row,
+                ibkr_size=pos['size'],
+                trade=trade,
+                pair=pos['pair'],
+                direction=direction,
+                open_order_counts=open_order_counts,
+                exclude_order_ids=pair_close_ids,
+            )
 
         signal_status = signal_row.get('status') if signal_row is not None else (
             existing_info.get('signal_status') if existing_info is not None else None
@@ -1101,6 +1134,9 @@ def sync_positions(
             'ibkr_size': pos['size'],
             'signal_id': signal_id,
             'signal_status': signal_status,
+            'position_source': position_source,
+            'broker_fill_count': pos.get('broker_fill_count'),
+            'last_broker_fill_at': pos.get('last_broker_fill_at'),
             'pending_exit_reason': pending_exit_reason,
             'pending_exit_price': pending_exit_price,
             'pending_exit_detected_at': pending_exit_detected_at,
@@ -1111,7 +1147,7 @@ def sync_positions(
     # Cancel any working orders on pairs that no longer have a position.
     # This catches brackets left behind by gateway restarts, partial OCA
     # failures, or correlation replacements that didn't cancel old orders.
-    live_pairs = {pos['pair'] for pos in ibkr_positions}
+    live_pairs = {str(key).split(':', 1)[0] for key in ibkr_by_key}
     orphaned_order_pairs = open_order_pairs - live_pairs
     if orphaned_order_pairs:
         print(f"    Cancelling orphaned orders on pairs with no position: "

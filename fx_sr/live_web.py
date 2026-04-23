@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -33,12 +33,12 @@ from .live import (
     collect_scan_rows,
     execute_signal_plans,
     load_closed_trade_summaries,
+    live_scan_minute_days,
     refresh_pair_row_price,
     run_startup_scan_pair,
     seed_seen_wf_trades,
 )
 from .live_history import (
-    clear_exit_signal,
     enqueue_write_async,
     load_detected_signal,
     load_execution_activity,
@@ -48,10 +48,21 @@ from .live_history import (
     start_background_writer,
     stop_background_writer,
 )
-from .db import _connect, get_cached_range, get_db_path, get_setting, init_db, load_ohlc, set_setting
+from .data import fx_market_is_open
+from .db import (
+    _connect,
+    get_cache_summary,
+    get_cached_range,
+    get_db_path,
+    get_setting,
+    init_db,
+    load_ohlc,
+    set_setting,
+)
 from .portfolio import build_portfolio_state, closed_trade_summary_from_row, get_entry_block
 from .live_stream import StreamingScanner
 from .positions import calc_pnl_pips, cancel_bracket_children, pair_pip, process_hourly_exit_bars, sync_positions
+from .signal_store import signal_order_ref
 
 
 WEB_DIR = Path(__file__).resolve().parent / 'web_live'
@@ -65,6 +76,11 @@ _STARTUP_WARM_CACHE_VERSION = 1
 _STARTUP_WARM_CACHE_ALIAS = 'live_startup_warm:latest'
 _HOLE_REFILL_MAX_AGE = pd.Timedelta(days=30)
 _PHASE2_SCAN_WORKERS_DEFAULT = 4
+_PHASE3_SCAN_WORKERS_DEFAULT = 8
+_ACCOUNT_HISTORY_REFRESH_INTERVAL = timedelta(seconds=45)
+_ACCOUNT_HISTORY_REFRESH_TIMEOUT = 6.0
+_ACCOUNT_HISTORY_REFRESH_STATE_KEY = '_account_history_refresh'
+_BROKER_CLOSE_FAILURE_STATUSES = {'INACTIVE', 'REJECTED', 'CANCELLED', 'APICANCELLED'}
 
 
 @dataclass(slots=True)
@@ -92,6 +108,29 @@ def _execution_mode_label(mode: str) -> str:
         if mode == 'intrabar'
         else 'Next-bar (completed hourly)'
     )
+
+
+def _live_ibkr_position_for_pair(raw_positions: list | None, pair: str) -> dict | None:
+    """Return the live IBKR net position for a pair, ignoring ledger-only rows."""
+
+    pair = str(pair or '').upper()
+    for pos in raw_positions or []:
+        if str(pos.get('pair') or '').upper() != pair:
+            continue
+        try:
+            size = float(pos.get('size') or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(size) < 1.0:
+            continue
+        direction = 'LONG' if size > 0 else 'SHORT'
+        return {
+            'pair': pair,
+            'direction': direction,
+            'size': size,
+            'avg_cost': pos.get('avg_cost'),
+        }
+    return None
 
 
 def _configure_windows_event_loop_policy() -> None:
@@ -165,6 +204,7 @@ class LiveDashboardHub:
         self._early_exit_active: dict[str, dict] = {}  # pair:direction -> alert dict, cleared when price recovers
         self._inflight_close_orders: dict[str, tuple[int, str, str | None, float | None]] = {}  # key -> (order_id, exit_reason, signal_id, exit_price)
         self._inflight_miss_counts: dict[str, int] = {}  # key -> consecutive housekeeping cycles where order was invisible
+        self._failed_close_orders: dict[str, dict] = {}
         self._execution_results = deque(maxlen=EXECUTION_LIMIT)
         self._last_quotes: dict[str, float] = {}
         self._currency_balances: dict[str, float] = {}
@@ -219,9 +259,18 @@ class LiveDashboardHub:
         self._startup_bar_buffering = True
         self._startup_bar_sequence = 0
         self._startup_bar_buffer: list[tuple[pd.Timestamp, int, str, _BufferedRealtimeBar]] = []
+        self._bar_processing_lock = asyncio.Lock()
+        self._last_realtime_bar_received_at: dict[str, pd.Timestamp] = {}
+        self._last_realtime_bar_time: dict[str, pd.Timestamp] = {}
+        self._last_accumulator_minute: dict[str, pd.Timestamp] = {}
+        self._realtime_bar_ingest_count: dict[str, int] = {}
+        self._realtime_bar_skip_counts: dict[str, dict[str, int]] = {}
+        self._last_realtime_bar_skip: dict[str, dict] = {}
         self._portfolio_state = build_portfolio_state([], params=params, current_balance=balance)
         self._daily_closed_pnl: float = 0.0
         self._backfill_done = False
+        self._backfill_completed_at: pd.Timestamp | None = None
+        self._last_data_health: dict | None = None
         self._backfill_progress: dict = {
             'phase': 'waiting',
             'total': len(pairs),
@@ -724,7 +773,7 @@ class LiveDashboardHub:
                 progress['returncode'] = returncode
 
             self.summary = self._build_summary(status=self.summary.get('status', 'starting'))
-            summary = dict(self.summary)
+            summary = self._serialize_summary()
 
         if should_log_progress and task_message:
             await self._broadcast_log(log_level, task_message)
@@ -1415,7 +1464,8 @@ class LiveDashboardHub:
             trade = info['trade']
             snap = self._position_snapshots.get(key, {})
             pair = info['pair']
-            status = alert_lookup.get(key)
+            close_failure = self._failed_close_orders.get(key) or info.get('close_failure')
+            status = 'CLOSE_FAILED' if close_failure else alert_lookup.get(key)
             if status is None:
                 status = 'PARTIAL' if info.get('signal_status') == 'PARTIAL' else 'OK'
 
@@ -1454,6 +1504,14 @@ class LiveDashboardHub:
                     'pnl_amount': pnl_amount,
                     'account_currency': account_currency,
                     'status': status,
+                    'position_source': info.get('position_source') or 'open_trades',
+                    'broker_fill_count': info.get('broker_fill_count'),
+                    'close_failure': close_failure,
+                    'last_broker_fill_at': (
+                        pd.Timestamp(info['last_broker_fill_at']).isoformat()
+                        if info.get('last_broker_fill_at') is not None
+                        else None
+                    ),
                     'decimals': self.pairs.get(pair, {}).get('decimals', 5),
                     'is_remainder': getattr(trade, 'is_remainder', False),
                     'position_fraction': getattr(trade, 'position_fraction', 1.0),
@@ -1793,6 +1851,200 @@ class LiveDashboardHub:
             )
         self._tick_pending_pairs = pending_pairs
 
+    # Freshness thresholds for the 1m persistence pipeline. Under normal
+    # streaming we expect the DB to lag ~1–2 minutes behind real time because
+    # the accumulator only finalises a 1m bar when the next minute's tick
+    # arrives, then the persistence loop flushes every 60s.
+    _DATA_HEALTH_WARN_SECONDS = 120
+    _DATA_HEALTH_STALE_SECONDS = 600
+    # Grace window after backfill completes before we're willing to call the
+    # feed "stale". The persistence thread flushes every 60s and the first
+    # real-time bars need to close and finalise before the DB advances, so a
+    # brief lag right after startup is expected, not an alert.
+    _DATA_HEALTH_POST_START_GRACE_SECONDS = 120
+    # How often the data-health loop refreshes the cached health and pushes
+    # a snapshot to clients. Short enough that a stalled feed crosses the
+    # warn/stale threshold within one cycle; long enough that the DB query
+    # overhead is negligible.
+    _DATA_HEALTH_LOOP_INTERVAL_SECONDS = 30
+
+    def _serialize_summary(self) -> dict:
+        """Return a copy of ``self.summary`` decorated with ``data_health``.
+
+        Use this for every broadcast that carries a ``summary`` field so
+        tick-driven events don't wipe the feed-health dot / banner between
+        ``_data_health_loop`` refreshes. Uses the cached value when fresh;
+        falls back to an inline computation on first use.
+        """
+
+        summary = dict(self.summary)
+        health = self._last_data_health
+        if health is None:
+            health = self._compute_data_health()
+            self._last_data_health = health
+        summary['data_health'] = health
+        return summary
+
+    def _emit_backfill_complete_beep(self) -> None:
+        """Best-effort terminal beep when startup backfill finishes.
+
+        The beep is intentionally non-fatal and best-effort because users may
+        be running in environments where a terminal bell is unavailable.
+        """
+        if not sys.stdout.isatty():
+            return
+        try:
+            if os.name == 'nt':
+                import winsound
+
+                winsound.MessageBeep(getattr(winsound, 'MB_ICONASTERISK', 0x40))
+            else:
+                print('\a', end='', flush=True)
+        except Exception:
+            try:
+                print('\a', end='', flush=True)
+            except Exception:
+                pass
+
+    def _compute_data_health(self) -> dict:
+        """Return a compact health report on the 1m DB ingestion pipeline.
+
+        Classifies every configured pair by the age of its newest cached 1m
+        bar. Suppressed outside FX market hours so weekend closures don't
+        masquerade as outages, and during the startup grace window so the
+        first post-restart snapshot doesn't flash the "stale" banner for the
+        stale-but-expected pre-restart cache contents.
+        """
+
+        now_ts = pd.Timestamp.now(tz='UTC')
+        market_open = fx_market_is_open(now_ts)
+        accumulator_state = self._accumulator.snapshot_diagnostics()
+        persist_enabled = bool(accumulator_state.get('persist_enabled'))
+        persist_thread_alive = bool(accumulator_state.get('persist_thread_alive'))
+        persist_last_error = accumulator_state.get('persist_last_error')
+        pipeline_status = 'ok'
+        pipeline_message = None
+
+        # Startup-phase guard: backfill running, or backfill finished less
+        # than the grace window ago. The cache still reflects pre-restart
+        # state until the persistence loop emits its first flush.
+        starting = not self._backfill_done
+        if not starting and self._backfill_completed_at is not None:
+            elapsed = (now_ts - self._backfill_completed_at).total_seconds()
+            if elapsed < self._DATA_HEALTH_POST_START_GRACE_SECONDS:
+                starting = True
+
+        expected_tickers = {
+            info['ticker']: pair_id
+            for pair_id, info in self.pairs.items()
+            if info.get('ticker')
+        }
+
+        try:
+            summary_df = get_cache_summary()
+        except Exception:
+            # Don't let a transient DB hiccup take out the dashboard.
+            return {
+                'overall': 'unknown',
+                'worst_pair': None,
+                'worst_age_seconds': None,
+                'missing_pairs': [],
+                'market_open': bool(market_open),
+                'evaluated_at': now_ts.isoformat(),
+            }
+
+        latest_per_ticker: dict[str, pd.Timestamp] = {}
+        if not summary_df.empty:
+            minute_rows = summary_df[summary_df['interval'] == '1m']
+            for _, row in minute_rows.iterrows():
+                ticker = str(row.get('ticker') or '')
+                if ticker not in expected_tickers:
+                    continue
+                last_ts = pd.Timestamp(row['last_ts'])
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize('UTC')
+                else:
+                    last_ts = last_ts.tz_convert('UTC')
+                existing = latest_per_ticker.get(ticker)
+                if existing is None or last_ts > existing:
+                    latest_per_ticker[ticker] = last_ts
+
+        per_pair: list[dict] = []
+        missing: list[str] = []
+        worst_age: float | None = None
+        worst_pair: str | None = None
+        for ticker, pair_id in sorted(expected_tickers.items(), key=lambda kv: kv[1]):
+            last_ts = latest_per_ticker.get(ticker)
+            if last_ts is None:
+                missing.append(pair_id)
+                per_pair.append({
+                    'pair': pair_id,
+                    'ticker': ticker,
+                    'last_ts': None,
+                    'age_seconds': None,
+                })
+                continue
+            age = max(0.0, (now_ts - last_ts).total_seconds())
+            per_pair.append({
+                'pair': pair_id,
+                'ticker': ticker,
+                'last_ts': last_ts.isoformat(),
+                'age_seconds': age,
+            })
+            if worst_age is None or age > worst_age:
+                worst_age = age
+                worst_pair = pair_id
+
+        if not market_open:
+            overall = 'closed'
+        elif starting:
+            overall = 'starting'
+        elif not persist_enabled:
+            overall = 'stale'
+            pipeline_status = 'persistence_not_started'
+            pipeline_message = 'Bar persistence has not started; live bars are not reaching the database.'
+        elif not persist_thread_alive:
+            overall = 'stale'
+            pipeline_status = 'persistence_stopped'
+            pipeline_message = 'Bar persistence thread is not running; live bars are not reaching the database.'
+        elif persist_last_error:
+            overall = 'stale'
+            pipeline_status = 'persistence_error'
+            pipeline_message = str(persist_last_error)
+        elif missing:
+            # Any configured pair without a cached 1m row means its
+            # subscription never landed even one bar — escalate straight to
+            # stale so silent orphans can't hide behind healthy peers.
+            overall = 'stale'
+        elif worst_age is None:
+            overall = 'ok'
+        elif worst_age > self._DATA_HEALTH_STALE_SECONDS:
+            overall = 'stale'
+        elif worst_age > self._DATA_HEALTH_WARN_SECONDS:
+            overall = 'warn'
+        else:
+            overall = 'ok'
+
+        return {
+            'overall': overall,
+            'worst_pair': worst_pair,
+            'worst_age_seconds': worst_age,
+            'missing_pairs': missing,
+            'market_open': bool(market_open),
+            'warn_threshold_seconds': self._DATA_HEALTH_WARN_SECONDS,
+            'stale_threshold_seconds': self._DATA_HEALTH_STALE_SECONDS,
+            'evaluated_at': now_ts.isoformat(),
+            'per_pair': per_pair,
+            'pipeline_status': pipeline_status,
+            'pipeline_message': pipeline_message,
+            'persist_enabled': persist_enabled,
+            'persist_thread_alive': persist_thread_alive,
+            'persist_last_error': persist_last_error,
+            'persist_restart_count': accumulator_state.get('persist_restart_count'),
+            'persist_flush_count': accumulator_state.get('persist_flush_count'),
+            'persist_last_flush_completed_at': accumulator_state.get('persist_last_flush_completed_at'),
+        }
+
     def _export_state(self) -> dict:
         """Serialize the entire dashboard state."""
 
@@ -1801,7 +2053,11 @@ class LiveDashboardHub:
             if row.signal is not None:
                 signals.append(self._serialize_signal(row.signal, None))
 
-        summary = dict(self.summary)
+        # Refresh data_health on every full export so the snapshot reflects
+        # the current DB state; shorter-lived broadcasts read the cached
+        # value via ``_serialize_summary``.
+        self._last_data_health = self._compute_data_health()
+        summary = self._serialize_summary()
         summary['signal_count'] = len(signals)
 
         return {
@@ -1821,11 +2077,72 @@ class LiveDashboardHub:
     def _export_position_state(self) -> dict:
         """Serialize the position-specific state updated on live price ticks."""
 
+        # Use the shared helper so tick-driven broadcasts carry the same
+        # data_health field as full snapshots. Without this, a tick update
+        # would replace the client's summary with one missing data_health,
+        # clearing the red banner between data-health-loop ticks even when
+        # the feed is still dead.
         return {
-            'summary': dict(self.summary),
+            'summary': self._serialize_summary(),
             'positions': self._serialize_positions(),
             'alerts': self._serialize_alerts(),
         }
+
+    def _mark_close_failed_locked(
+        self,
+        *,
+        alert_key: str,
+        pair: str,
+        direction: str,
+        exit_reason: str,
+        signal_id: str | None,
+        exit_price: float | None,
+        order_status: str | None,
+        order_id: int | None,
+        source: str,
+        detail: str | None = None,
+    ) -> None:
+        """Latch a failed strategy close so live ticks do not retry in a loop.
+
+        The caller must hold ``self._lock``.  The persisted exit intent is
+        intentionally left in place; clearing it is what caused rejected close
+        orders to be resubmitted every tick.
+        """
+
+        self._inflight_close_orders.pop(alert_key, None)
+        self._inflight_miss_counts.pop(alert_key, None)
+        self._tick_exit_alerted.add(alert_key)
+
+        now = pd.Timestamp.now(tz='UTC')
+        failure = {
+            'pair': pair,
+            'direction': direction,
+            'exit_reason': exit_reason,
+            'signal_id': signal_id,
+            'exit_price': exit_price,
+            'order_status': order_status,
+            'order_id': order_id,
+            'source': source,
+            'detail': detail,
+            'failed_at': now.isoformat(),
+        }
+        self._failed_close_orders[alert_key] = failure
+
+        info = self._tracked.get(alert_key)
+        if info:
+            info['pending_exit_reason'] = exit_reason
+            info['pending_exit_price'] = exit_price
+            info['pending_exit_detected_at'] = now
+            info['close_failure'] = failure
+
+        status_note = f' status={order_status}' if order_status else ''
+        order_note = f' order={order_id}' if order_id else ''
+        detail_note = f' ({detail})' if detail else ''
+        self._append_log(
+            'error',
+            f'{exit_reason} close FAILED: {pair} {direction}{order_note}{status_note}{detail_note}; '
+            'automatic retry paused until the position changes or you close it manually.',
+        )
 
     async def set_execution_paused(self, paused: bool) -> dict:
         """Pause or resume new order placement without restarting the dashboard."""
@@ -1908,8 +2225,8 @@ class LiveDashboardHub:
             info = self._tracked.get(position_key)
             if info is None:
                 raise LookupError(f'No tracked position found for {pair} {direction}.')
-            size = int(abs(float(info.get('ibkr_size') or 0.0)))
-            if size <= 0:
+            tracked_size = int(abs(float(info.get('ibkr_size') or 0.0)))
+            if tracked_size <= 0:
                 raise RuntimeError('Tracked position has no executable size.')
 
             close_direction = 'SHORT' if direction == 'LONG' else 'LONG'
@@ -1918,7 +2235,35 @@ class LiveDashboardHub:
 
             signal_id = info.get('signal_id')
 
-        # Cancel bracket TP/SL children first so they can't fire on a flat book
+        live_positions = await self._loop.run_in_executor(
+            self._scan_executor,
+            ibkr.fetch_positions,
+        )
+        if live_positions is None:
+            raise RuntimeError(
+                f'Could not verify live IBKR position for {pair}; refusing to submit '
+                'an unverified market close.'
+            )
+        live_position = _live_ibkr_position_for_pair(live_positions, pair)
+        if live_position is None:
+            raise RuntimeError(
+                f'IBKR has no live {pair} position; refusing to submit a market order '
+                'that could open new exposure.'
+            )
+        live_direction = live_position['direction']
+        if live_direction != direction:
+            live_size = int(abs(float(live_position['size'])))
+            raise RuntimeError(
+                f'IBKR reports {pair} {live_direction} {live_size:,} units, but the '
+                f'dashboard row is {direction} {tracked_size:,} units. Refusing to '
+                'submit a close that would increase or flip exposure.'
+            )
+
+        size = int(abs(float(live_position['size'])))
+        if size <= 0:
+            raise RuntimeError(f'IBKR reports no executable {pair} {direction} size.')
+
+        # Cancel bracket TP/SL children first so they can't fire on a flat book.
         await self._loop.run_in_executor(
             self._scan_executor,
             lambda: cancel_bracket_children(signal_id),
@@ -1945,11 +2290,17 @@ class LiveDashboardHub:
             order_id = order.get('order_id')
             avg_fill_price = order.get('avg_fill_price')
             broker_status = order.get('status')
-            if status == 'FILLED':
+            if status in _BROKER_CLOSE_FAILURE_STATUSES:
+                status = 'FAILED'
+                note = (
+                    f'Manual close rejected by broker for {pair} '
+                    f'({direction} -> {close_direction}).'
+                )
+            elif status == 'FILLED':
                 status = 'CLOSED'
-            note = f'Manual close submitted for {pair} ({direction} -> {close_direction}).'
-            if status == 'CLOSED':
                 note = f'Manual close filled for {pair} ({direction} -> {close_direction}).'
+            else:
+                note = f'Manual close submitted for {pair} ({direction} -> {close_direction}).'
 
         result = ExecutionResult(
             pair=pair,
@@ -2007,6 +2358,10 @@ class LiveDashboardHub:
             if status == 'FAILED':
                 self._tick_pending_pairs.discard(pair)
             elif order_id is not None:
+                self._failed_close_orders.pop(position_key, None)
+                tracked_info = self._tracked.get(position_key)
+                if tracked_info:
+                    tracked_info.pop('close_failure', None)
                 self._tick_pending_pairs.add(pair)
 
             if refreshed_tracked is not None:
@@ -2042,6 +2397,182 @@ class LiveDashboardHub:
             'state': state,
             'message': note,
         }
+
+    async def liquidate_live_position(self, *, pair: str, direction: str | None = None) -> dict:
+        """Liquidate the verified live IBKR net position for a pair."""
+
+        pair = str(pair).strip().upper()
+        direction = str(direction or '').strip().upper() or None
+        if direction is not None and direction not in {'LONG', 'SHORT'}:
+            raise ValueError('Direction must be LONG or SHORT.')
+
+        async with self._lock:
+            if not self._execution_available:
+                raise RuntimeError('Execution is unavailable in scan-only mode.')
+            if self._loop is None:
+                raise RuntimeError('Dashboard loop not initialized.')
+            tracked_info = self._tracked.get(f'{pair}:{direction}') if direction else None
+            if tracked_info is None and direction is None:
+                pair_matches = [
+                    info for info in self._tracked.values()
+                    if str(info.get('pair') or '').upper() == pair
+                ]
+                if len(pair_matches) == 1:
+                    tracked_info = pair_matches[0]
+            signal_id = (tracked_info or {}).get('signal_id')
+
+        order_ref = f'fxsr:liquidate:{pair}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
+        if signal_id:
+            signal_row = await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda: load_detected_signal(signal_id),
+            )
+            strategy_ref = signal_order_ref(signal_row or {})
+            if strategy_ref:
+                order_ref = f'{strategy_ref}:liquidate:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
+
+        order = await self._loop.run_in_executor(
+            self._scan_executor,
+            lambda: ibkr.liquidate_fx_position(
+                pair=pair,
+                expected_direction=direction,
+                order_ref=order_ref,
+            ),
+        )
+
+        if order is None:
+            order = {
+                'pair': pair,
+                'direction': direction,
+                'status': 'FAILED',
+                'error': 'IBKR liquidation request returned no response.',
+            }
+
+        broker_status = order.get('status')
+        status = str(broker_status or 'FAILED').upper()
+        order_id = order.get('order_id')
+        avg_fill_price = order.get('avg_fill_price')
+        live_direction = str(order.get('direction') or direction or '').upper()
+        size = int(abs(float(order.get('quantity') or order.get('size') or 0.0)))
+        if status in _BROKER_CLOSE_FAILURE_STATUSES:
+            status = 'FAILED'
+        elif status == 'FILLED':
+            status = 'CLOSED'
+
+        error = order.get('error')
+        close_direction = order.get('close_direction') or (
+            'SHORT' if live_direction == 'LONG' else 'LONG' if live_direction == 'SHORT' else None
+        )
+        if status == 'FAILED':
+            note = str(error or f'Live liquidation rejected for {pair}.')
+        elif status == 'CLOSED' and order_id is None:
+            note = str(order.get('message') or f'{pair} is flat.')
+        elif status == 'CLOSED':
+            note = f'Live liquidation filled for {pair} ({live_direction} -> {close_direction}).'
+        else:
+            note = f'Live liquidation submitted for {pair} ({live_direction} -> {close_direction}).'
+
+        result = ExecutionResult(
+            pair=pair,
+            direction=live_direction or direction or '',
+            units=size,
+            status=status,
+            order_id=order_id,
+            avg_fill_price=avg_fill_price,
+            remaining_units=0,
+            broker_status=broker_status,
+            closed_price=self._as_float(avg_fill_price),
+            closed_at=pd.Timestamp.now('UTC') if status == 'CLOSED' else None,
+            close_reason='LIVE_LIQUIDATE',
+            quote_time=pd.Timestamp.now('UTC'),
+            note=note,
+        )
+
+        refreshed_tracked = None
+        sync_error = None
+        if status != 'FAILED':
+            try:
+                refreshed_tracked = await self._loop.run_in_executor(
+                    self._scan_executor,
+                    lambda: sync_positions(self.params, self.zone_history_days),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                sync_error = str(exc)
+
+        async with self._lock:
+            self._execution_results.append(result)
+            level = 'error' if status == 'FAILED' else 'warning' if status != 'CLOSED' else 'success'
+            self._append_log(
+                level,
+                f'Liquidate live {pair} {live_direction or "position"} {status}: '
+                f'{size:,} units (order {order_id or "n/a"})',
+            )
+            if status != 'FAILED':
+                for key in list(self._failed_close_orders):
+                    if key.startswith(f'{pair}:'):
+                        self._failed_close_orders.pop(key, None)
+                self._tick_pending_pairs.add(pair)
+            else:
+                self._tick_pending_pairs.discard(pair)
+
+            if refreshed_tracked is not None:
+                self._tracked = refreshed_tracked
+                self._apply_live_quotes()
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+            state = self._export_state()
+
+        await self._broadcast({'type': 'snapshot', 'state': state})
+
+        payload = {
+            'result': {
+                'status': status,
+                'pair': pair,
+                'direction': live_direction,
+                'close_direction': close_direction,
+                'order_id': order_id,
+                'size': size,
+                'cancelled_order_ids': order.get('cancelled_order_ids') or [],
+                'remaining_open_orders': order.get('remaining_open_orders') or [],
+            },
+            'state': state,
+            'message': note,
+        }
+        if sync_error is not None:
+            payload['warning'] = sync_error
+        return payload
+
+    async def _submit_strategy_liquidation(
+        self,
+        *,
+        pair: str,
+        direction: str,
+        exit_reason: str,
+        signal_id: str | None,
+    ) -> dict | None:
+        """Submit a verified reducing close for a strategy-managed position."""
+
+        if self._loop is None:
+            return None
+
+        stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        order_ref = f'fxsr:{exit_reason.lower()}:{pair}:{direction}:{stamp}'
+        if signal_id:
+            signal_row = await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda: load_detected_signal(signal_id),
+            )
+            strategy_ref = signal_order_ref(signal_row or {})
+            if strategy_ref:
+                order_ref = f'{strategy_ref}:close:{exit_reason.lower()}:{stamp}'
+
+        return await self._loop.run_in_executor(
+            self._scan_executor,
+            lambda p=pair, d=direction, r=order_ref: ibkr.liquidate_fx_position(
+                pair=p,
+                expected_direction=d,
+                order_ref=r,
+            ),
+        )
 
     def _apply_live_quotes(self) -> None:
         """Overlay the latest subscribed quotes onto the current snapshot-derived state."""
@@ -2092,7 +2623,7 @@ class LiveDashboardHub:
 
             # --- Skip all trading logic until backfill is complete ---
             if not self._backfill_done:
-                summary = dict(self.summary)
+                summary = self._serialize_summary()
                 row_payload = self._serialize_pair_row(updated_row) if updated_row is not None else None
                 position_payload = self._export_position_state() if positions_changed else None
 
@@ -2103,7 +2634,7 @@ class LiveDashboardHub:
                 await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
             return
 
-        _VIABLE_ORDER_STATUSES = {'Submitted', 'Filled', 'PreSubmitted'}
+        _VIABLE_ORDER_STATUSES = {'Submitted', 'Filled', 'PreSubmitted', 'CLOSED'}
 
         # Separate bracket-managed exits (TP/SL) from exits that need a
         # market close order.  Only mark handled / persist after confirmation.
@@ -2151,16 +2682,12 @@ class LiveDashboardHub:
                         f"{alert['exit_reason']} @ {alert['exit_price']:.5f}",
                     )
 
-            summary = dict(self.summary)
+            summary = self._serialize_summary()
             row_payload = self._serialize_pair_row(updated_row) if updated_row is not None else None
             position_payload = self._export_position_state() if positions_changed else None
 
         # Process bracket exits (TP/SL) — persist immediately.
         for _key, signal_id, exit_reason, exit_price in bracket_exits:
-            await self._loop.run_in_executor(
-                self._scan_executor,
-                lambda sid=signal_id: cancel_bracket_children(sid),
-            )
             await enqueue_write_async(
                 lambda s=signal_id, r=exit_reason, p=exit_price: record_exit_signal(
                     s, exit_reason=r, exit_price=p,
@@ -2178,20 +2705,15 @@ class LiveDashboardHub:
                         s, exit_reason=r, exit_price=p,
                     )
                 )
-                await self._loop.run_in_executor(
-                    self._scan_executor,
-                    lambda sid=signal_id: cancel_bracket_children(sid),
-                )
-            opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
-            ref = f'fxsr:{exit_reason.lower()}:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
-            order = await self._loop.run_in_executor(
-                self._scan_executor,
-                lambda p=close_pair, d=opp, s=close_size, r=ref: ibkr.submit_fx_market_order(
-                    pair=p, direction=d, quantity=s, order_ref=r,
-                ),
+            order = await self._submit_strategy_liquidation(
+                pair=close_pair,
+                direction=close_dir,
+                exit_reason=exit_reason,
+                signal_id=signal_id,
             )
             order_status = order.get('status') if order else None
             order_id = order.get('order_id') if order else None
+            actual_size = int(abs(float((order or {}).get('quantity') or close_size or 0.0)))
             if order is not None and order_status in _VIABLE_ORDER_STATUSES:
                 async with self._lock:
                     # Replace placeholder with real order ID.
@@ -2205,27 +2727,27 @@ class LiveDashboardHub:
                     })
                     self._append_log(
                         'info',
-                        f'{exit_reason} close submitted: {close_pair} {close_dir} size={close_size} order={order_id} status={order_status}',
+                        f'{exit_reason} close submitted: {close_pair} {close_dir} size={actual_size} order={order_id} status={order_status}',
                     )
                     positions_changed = True
             else:
-                if signal_id:
-                    await enqueue_write_async(
-                        lambda s=signal_id: clear_exit_signal(s),
-                    )
-                # Close failed — remove placeholder and guard so next tick retries.
                 async with self._lock:
-                    self._inflight_close_orders.pop(alert_key, None)
-                    self._tick_exit_alerted.discard(alert_key)
-                    # Clear pending_exit_reason so restart doesn't suppress retries.
-                    info = self._tracked.get(alert_key)
-                    if info:
-                        info.pop('pending_exit_reason', None)
-                        info.pop('pending_exit_price', None)
-                        info.pop('pending_exit_detected_at', None)
                     self._append_log(
                         'error',
-                        f'{exit_reason} close REJECTED: {close_pair} {close_dir} size={close_size} status={order_status} — will retry',
+                        f'{exit_reason} close REJECTED: {close_pair} {close_dir} size={actual_size} status={order_status} - retry paused',
+                    )
+
+                    self._mark_close_failed_locked(
+                        alert_key=alert_key,
+                        pair=close_pair,
+                        direction=close_dir,
+                        exit_reason=exit_reason,
+                        signal_id=signal_id,
+                        exit_price=exit_price,
+                        order_status=order_status,
+                        order_id=order_id,
+                        source='tick',
+                        detail=f"size={actual_size}; {(order or {}).get('error') or ''}".strip('; '),
                     )
 
         # Nudge housekeeping to confirm fills and persist exit signals.
@@ -2444,14 +2966,9 @@ class LiveDashboardHub:
     def _copy_realtime_bar(bar) -> _BufferedRealtimeBar | None:
         """Copy a realtime bar into a lightweight startup-buffer payload."""
 
-        bar_time = getattr(bar, 'time', None) or getattr(bar, 'date', None)
-        if bar_time is None:
+        ts = LiveDashboardHub._realtime_bar_timestamp(bar)
+        if ts is None:
             return None
-        ts = pd.Timestamp(bar_time)
-        if ts.tzinfo is None:
-            ts = ts.tz_localize('UTC')
-        else:
-            ts = ts.tz_convert('UTC')
         return _BufferedRealtimeBar(
             time=ts,
             open_=float(getattr(bar, 'open_', 0) or 0),
@@ -2460,6 +2977,91 @@ class LiveDashboardHub:
             close=float(getattr(bar, 'close', 0) or 0),
             volume=float(getattr(bar, 'volume', 0) or 0),
         )
+
+    @staticmethod
+    def _realtime_bar_timestamp(bar) -> pd.Timestamp | None:
+        """Return the broker timestamp for a realtime bar, normalized to UTC."""
+
+        bar_time = getattr(bar, 'time', None) or getattr(bar, 'date', None)
+        if bar_time is None:
+            return None
+        try:
+            ts = pd.Timestamp(bar_time)
+        except Exception:
+            return None
+        if ts.tzinfo is None:
+            return ts.tz_localize('UTC')
+        return ts.tz_convert('UTC')
+
+    @staticmethod
+    def _minute_from_ts(ts: pd.Timestamp) -> pd.Timestamp:
+        return ts.replace(second=0, microsecond=0, nanosecond=0)
+
+    def _record_realtime_bar_skip(self, pair: str, reason: str, *, bar_ts=None) -> None:
+        counts = self._realtime_bar_skip_counts.setdefault(pair, {})
+        counts[reason] = int(counts.get(reason, 0)) + 1
+        self._last_realtime_bar_skip[pair] = {
+            'reason': reason,
+            'bar_time': None if bar_ts is None else pd.Timestamp(bar_ts).isoformat(),
+            'seen_at': pd.Timestamp.now(tz='UTC').isoformat(),
+        }
+
+    def _ingest_realtime_bar(self, pair: str, bar) -> tuple[float | None, bool]:
+        """Update the accumulator and minute tracker without awaiting I/O."""
+
+        price = float(getattr(bar, 'close', 0) or 0)
+        if price <= 0:
+            self._record_realtime_bar_skip(pair, 'non_positive_price')
+            return None, False
+
+        received_at = pd.Timestamp.now(tz='UTC')
+        self._last_realtime_bar_received_at[pair] = received_at
+
+        if not self._realtime_bars_enabled:
+            self._record_realtime_bar_skip(pair, 'realtime_bars_disabled')
+            return price, False
+
+        bar_ts = self._realtime_bar_timestamp(bar)
+        if bar_ts is None:
+            self._record_realtime_bar_skip(pair, 'missing_timestamp')
+            return price, False
+
+        previous_ts = self._last_realtime_bar_time.get(pair)
+        if previous_ts is not None and bar_ts < previous_ts:
+            self._record_realtime_bar_skip(pair, 'out_of_order_timestamp', bar_ts=bar_ts)
+            return price, False
+
+        accumulator_bar = bar if getattr(bar, 'time', None) is not None else self._copy_realtime_bar(bar)
+        if accumulator_bar is None:
+            self._record_realtime_bar_skip(pair, 'missing_timestamp')
+            return price, False
+
+        self._last_realtime_bar_time[pair] = bar_ts
+        self._accumulator.on_realtime_bar(pair, accumulator_bar)
+        self._realtime_bar_ingest_count[pair] = int(
+            self._realtime_bar_ingest_count.get(pair, 0)
+        ) + 1
+
+        minute = self._minute_from_ts(bar_ts)
+        prev_minute = self._minute_tracker.get(pair)
+        minute_ts = int(bar_ts.timestamp()) // 60
+        self._minute_tracker[pair] = minute_ts
+        self._last_accumulator_minute[pair] = minute
+        return price, prev_minute is not None and minute_ts != prev_minute
+
+    async def _run_post_ingest_work(
+        self,
+        pair: str,
+        price: float | None,
+        minute_completed: bool,
+    ) -> None:
+        """Run UI, exit, and signal work after accumulator ingestion."""
+
+        if price is None or price <= 0:
+            return
+        await self._handle_quote_update(pair, price)
+        if minute_completed and self._backfill_done and self.execution_mode == 'intrabar':
+            await self._handle_minute_bar_complete(pair, price)
 
     def _buffer_startup_bar(self, pair: str, bar) -> None:
         """Append one incoming realtime bar to the startup replay buffer."""
@@ -2475,50 +3077,44 @@ class LiveDashboardHub:
     async def _process_realtime_bar(self, pair: str, bar) -> None:
         """Apply one realtime bar to quotes, accumulator, and live logic."""
 
-        price = float(getattr(bar, 'close', 0) or 0)
-        if price <= 0:
-            return
-
-        # Delegate to the existing quote handler for display and tick exits
-        await self._handle_quote_update(pair, price)
-
-        if not self._realtime_bars_enabled:
-            return
-
-        self._accumulator.on_realtime_bar(pair, bar)
-
-        if self._backfill_done and self.execution_mode == 'intrabar':
-            bar_time = getattr(bar, 'time', None) or getattr(bar, 'date', None)
-            if bar_time is not None:
-                import datetime as _dt
-                if isinstance(bar_time, _dt.datetime):
-                    minute_ts = int(bar_time.timestamp()) // 60
-                else:
-                    minute_ts = int(pd.Timestamp(bar_time).timestamp()) // 60
-                prev_minute = self._minute_tracker.get(pair)
-                self._minute_tracker[pair] = minute_ts
-                if prev_minute is not None and minute_ts != prev_minute:
-                    await self._handle_minute_bar_complete(pair, price)
+        async with self._bar_processing_lock:
+            price, minute_completed = self._ingest_realtime_bar(pair, bar)
+        await self._run_post_ingest_work(pair, price, minute_completed)
 
     async def _replay_startup_bars(self) -> int:
-        """Replay buffered realtime bars collected while startup work ran."""
+        """Replay buffered realtime bars collected while startup work ran.
+
+        Flipping ``_startup_bar_buffering`` to False *before* processing is
+        essential: with 22 pairs × 5s real-time bars ≈ 4 ticks/sec, the
+        previous "drain loop" livelocked because new bars kept arriving via
+        ``_buffer_startup_bar`` between iterations faster than we could
+        drain them. The loop never saw an empty buffer, never reached the
+        break, never flipped the flag, never returned, and ``start()`` never
+        spawned the persistence thread.
+
+        The replay owns ``_bar_processing_lock`` while processing the
+        snapshot, so bars arriving after the flip wait until older buffered
+        bars have updated the accumulator.
+        """
+
+        async with self._lock:
+            batch = sorted(
+                self._startup_bar_buffer,
+                key=lambda item: (item[0], item[1]),
+            )
+            self._startup_bar_buffer = []
+            self._startup_bar_buffering = False
 
         replayed = 0
-        while True:
-            async with self._lock:
-                if not self._startup_bar_buffer:
-                    break
-                batch = sorted(
-                    self._startup_bar_buffer,
-                    key=lambda item: (item[0], item[1]),
-                )
-                self._startup_bar_buffer = []
+        post_ingest: list[tuple[str, float | None, bool]] = []
+        async with self._bar_processing_lock:
             for _ts, _seq, pair, bar in batch:
-                await self._process_realtime_bar(pair, bar)
-                replayed += 1
-            await asyncio.sleep(0)
-
-        self._startup_bar_buffering = False
+                price, minute_completed = self._ingest_realtime_bar(pair, bar)
+                if price is not None and price > 0:
+                    replayed += 1
+                post_ingest.append((pair, price, minute_completed))
+        for pair, price, minute_completed in post_ingest:
+            await self._run_post_ingest_work(pair, price, minute_completed)
         return replayed
 
     async def _handle_bar_update(self, pair: str, bar) -> None:
@@ -2709,7 +3305,7 @@ class LiveDashboardHub:
             )
 
         # Persist intent, cancel brackets, submit market close for non-TP/SL exits.
-        _VIABLE = {'Submitted', 'Filled', 'PreSubmitted'}
+        _VIABLE = {'Submitted', 'Filled', 'PreSubmitted', 'CLOSED'}
         for alert_key, close_pair, close_dir, exit_reason, close_size, sig_id, exit_price in bar_close_orders:
             if sig_id:
                 await enqueue_write_async(
@@ -2717,20 +3313,15 @@ class LiveDashboardHub:
                         s, exit_reason=r, exit_price=p,
                     )
                 )
-                await self._loop.run_in_executor(
-                    self._scan_executor,
-                    lambda sid=sig_id: cancel_bracket_children(sid),
-                )
-            opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
-            ref = f'fxsr:{exit_reason.lower()}:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
-            order = await self._loop.run_in_executor(
-                self._scan_executor,
-                lambda p=close_pair, d=opp, s=close_size, r=ref: ibkr.submit_fx_market_order(
-                    pair=p, direction=d, quantity=s, order_ref=r,
-                ),
+            order = await self._submit_strategy_liquidation(
+                pair=close_pair,
+                direction=close_dir,
+                exit_reason=exit_reason,
+                signal_id=sig_id,
             )
             order_status = order.get('status') if order else None
             order_id = order.get('order_id') if order else None
+            actual_size = int(abs(float((order or {}).get('quantity') or close_size or 0.0)))
             if order is not None and order_status in _VIABLE:
                 async with self._lock:
                     # Replace placeholder with real order ID.
@@ -2742,22 +3333,23 @@ class LiveDashboardHub:
                         'exit_reason': exit_reason, 'exit_price': exit_price,
                         'source': 'hourly',
                     })
-                    self._append_log('info', f'{exit_reason} close submitted: {close_pair} {close_dir} size={close_size} order={order_id} status={order_status}')
+                    self._append_log('info', f'{exit_reason} close submitted: {close_pair} {close_dir} size={actual_size} order={order_id} status={order_status}')
             else:
-                if sig_id:
-                    await enqueue_write_async(
-                        lambda s=sig_id: clear_exit_signal(s),
-                    )
                 async with self._lock:
-                    self._inflight_close_orders.pop(alert_key, None)
-                    self._tick_exit_alerted.discard(alert_key)
-                    # Clear pending_exit_reason so restart doesn't suppress retries.
-                    info = self._tracked.get(alert_key)
-                    if info:
-                        info.pop('pending_exit_reason', None)
-                        info.pop('pending_exit_price', None)
-                        info.pop('pending_exit_detected_at', None)
-                    self._append_log('error', f'{exit_reason} close REJECTED: {close_pair} {close_dir} status={order_status} — will retry')
+                    self._append_log('error', f'{exit_reason} close REJECTED: {close_pair} {close_dir} status={order_status} - retry paused')
+
+                    self._mark_close_failed_locked(
+                        alert_key=alert_key,
+                        pair=close_pair,
+                        direction=close_dir,
+                        exit_reason=exit_reason,
+                        signal_id=sig_id,
+                        exit_price=exit_price,
+                        order_status=order_status,
+                        order_id=order_id,
+                        source='hourly',
+                        detail=f"size={actual_size}; {(order or {}).get('error') or ''}".strip('; '),
+                    )
 
         if bar_close_orders:
             self._housekeeping_nudge.set()
@@ -2812,16 +3404,43 @@ class LiveDashboardHub:
         await self._broadcast({'type': 'snapshot', 'state': state})
 
     def _run_realtime_bar_stream(self) -> None:
-        """Run the blocking IBKR real-time bar subscription loop."""
+        """Run the blocking IBKR real-time bar subscription loop.
+
+        Any streaming-subscription failure is fatal: the live process has no
+        useful state without market data, so we exit the whole process so
+        that supervisors/operators notice immediately rather than silently
+        running blind.
+
+        Scope note: ``os._exit(1)`` bypasses asyncio and daemon-thread
+        cleanup (housekeeping loop, persistence flush, websocket close).
+        That's the right trade-off for startup — nothing important has been
+        produced yet. If this fail-fast ever widens to mid-run failures
+        (e.g. a subscription dropping hours in), the exit should be routed
+        through ``hub.stop()`` so the persistence thread gets a chance to
+        flush its in-memory accumulator to the DB before the process dies.
+        """
+
+        import os as _os
+        import sys as _sys
+        import traceback as _traceback
 
         base_client_id = self.client_id if self.client_id is not None else ibkr.TWS_CLIENT_ID
         stream_client_id = int(base_client_id) + 1000
-        ibkr.stream_realtime_bars(
-            pairs=list(self.pairs.keys()),
-            on_bar=self._queue_bar_update,
-            stop_event=self._quote_stop,
-            client_id=stream_client_id,
-        )
+        try:
+            ibkr.stream_realtime_bars(
+                pairs=list(self.pairs.keys()),
+                on_bar=self._queue_bar_update,
+                stop_event=self._quote_stop,
+                client_id=stream_client_id,
+            )
+        except Exception as exc:
+            print(
+                f'FATAL: real-time bar stream aborted: {type(exc).__name__}: {exc}',
+                file=_sys.stderr,
+                flush=True,
+            )
+            _traceback.print_exc()
+            _os._exit(1)
 
     def _ensure_quote_stream_started(self) -> bool:
         """Start the real-time bar thread once and report whether it was newly started."""
@@ -2848,16 +3467,20 @@ class LiveDashboardHub:
         pair_list = list(self.pairs.items())
         total = len(pair_list)
         backfill_client_id = self._backfill_client_id_base()
-        minute_seed_days = 2
+        minute_seed_days = live_scan_minute_days(self.params)
         daily_cache: dict[tuple[str, int], object] = {}
         zone_cache: dict[tuple[str, int], object] = {}
         hourly_cache: dict[str, object] = {}
+        minute_cache: dict[str, object] = {}
         pair_status = self._backfill_progress['pair_status']
 
         # Phase 2: scan for cache holes in parallel, refill recent holes
         # sequentially, then seed daily/hourly/minute state from cache.
         phase2_start = _time.monotonic()
-        print(f'  [backfill] Phase 2: cache-hole check + seed for {total} pairs')
+        print(
+            f'  [backfill] Phase 2: cache-hole check + seed for {total} pairs '
+            f'({minute_seed_days}d minute seed)'
+        )
         self._backfill_progress.update(phase='seed', completed=0, total=total)
         self._backfill_progress['current_detail'] = ''
 
@@ -3100,6 +3723,7 @@ class LiveDashboardHub:
                 self._accumulator.seed_minutes(pair_id, minute_df)
                 if ticker:
                     hourly_cache[ticker] = self._accumulator.get_hourly_df(pair_id)
+                    minute_cache[ticker] = self._accumulator.get_minute_df(pair_id, tail_n=0)
 
                 pair_status[pair_id] = 'ready'
                 note_parts: list[str] = []
@@ -3127,7 +3751,7 @@ class LiveDashboardHub:
         print(f'  [backfill] Phase 2 done in {_time.monotonic()-phase2_start:.1f}s')
         self._realtime_bars_enabled = True
 
-        # Phase 3: Full walk-forward scan from the seeded cache window.
+        # Phase 3: Bounded live walk-forward scan from the seeded cache window.
         phase3_start = _time.monotonic()
         scan_pairs = [
             (pair_id, pair_info)
@@ -3135,7 +3759,10 @@ class LiveDashboardHub:
             if not is_pair_fully_blocked(pair_id, self.params)
         ]
         scan_total = len(scan_pairs)
-        print(f'  [backfill] Phase 3: walk-forward scan for {scan_total} pairs')
+        print(
+            f'  [backfill] Phase 3: bounded walk-forward scan for {scan_total} pairs '
+            f'({self.params.scan_lookback_bars}h lookback)'
+        )
         self._backfill_progress.update(phase='scan', current_pair=None, completed=0, total=scan_total)
         closed_trades = load_closed_trade_summaries()
         portfolio_state = build_portfolio_state(closed_trades, params=self.params)
@@ -3144,7 +3771,13 @@ class LiveDashboardHub:
         signals = []
         pair_rows = []
         wf_signals = []
-        phase3_workers = max(1, min(scan_total, int(os.getenv('FX_SR_PHASE3_WORKERS', '18') or '18')))
+        phase3_workers = max(
+            1,
+            min(
+                scan_total,
+                int(os.getenv('FX_SR_PHASE3_WORKERS', str(_PHASE3_SCAN_WORKERS_DEFAULT)) or str(_PHASE3_SCAN_WORKERS_DEFAULT)),
+            ),
+        )
 
         def _run_phase3_local(pair_id: str, pair_info: dict) -> tuple[PairScanRow, object | None, list, float]:
             t0 = _time.monotonic()
@@ -3159,7 +3792,7 @@ class LiveDashboardHub:
                 daily_data_cache=daily_cache,
                 zone_cache=zone_cache,
                 hourly_data_cache=hourly_cache,
-                minute_data_cache=None,
+                minute_data_cache=minute_cache,
                 execution_mode=self.execution_mode,
                 portfolio_state=portfolio_state,
                 hourly_days=self.hourly_days,
@@ -3179,8 +3812,8 @@ class LiveDashboardHub:
                     signals.append(signal)
                 wf_signals.extend(pair_wf_signals)
         else:
-            print(f'  [backfill] Phase 3 workers: {phase3_workers} process(es)')
-            with ProcessPoolExecutor(max_workers=phase3_workers) as executor:
+            print(f'  [backfill] Phase 3 workers: {phase3_workers} thread(s)')
+            with ThreadPoolExecutor(max_workers=phase3_workers, thread_name_prefix='startup-phase3') as executor:
                 futures = {}
                 for pair_id, pair_info in scan_pairs:
                     ticker = pair_info.get('ticker')
@@ -3196,7 +3829,7 @@ class LiveDashboardHub:
                         daily_df=daily_cache.get((ticker, int(self.zone_history_days))) if ticker else None,
                         zones=zone_cache.get((ticker, int(self.zone_history_days))) if ticker else None,
                         hourly_df=hourly_cache.get(ticker) if ticker else None,
-                        minute_df=None,
+                        minute_df=minute_cache.get(ticker) if ticker else None,
                     )] = (pair_id, pair_info, _time.monotonic())
 
                 for future in as_completed(futures):
@@ -3229,7 +3862,7 @@ class LiveDashboardHub:
         print(f'  [backfill] Phase 3 done in {_time.monotonic()-phase3_start:.1f}s '
               f'({len(signals)} signals, {len(pair_rows)} pairs)')
         # Compute daily closed-trade P&L at startup
-        from .live_history import _compute_daily_pnl_gbp
+        from .live_history import compute_daily_pnl_gbp
         from .db import _connect, get_db_path, init_db
         from datetime import date
         daily_closed_pnl = 0.0
@@ -3238,7 +3871,7 @@ class LiveDashboardHub:
             init_db(db_path)
             conn = _connect(db_path)
             try:
-                daily_closed_pnl = _compute_daily_pnl_gbp(conn, date.today())
+                daily_closed_pnl = compute_daily_pnl_gbp(conn, date.today())
             finally:
                 conn.close()
         except Exception:
@@ -3252,7 +3885,7 @@ class LiveDashboardHub:
         async with self._lock:
             self.summary = self._build_summary(status='backfilling')
             self._append_log('info', 'Starting startup backfill...')
-        await self._broadcast({'type': 'scan_status', 'summary': dict(self.summary)})
+        await self._broadcast({'type': 'scan_status', 'summary': self._serialize_summary()})
         await self._broadcast_log('info', 'Startup backfill started. Loading zone and hourly history...')
 
         # Start a progress broadcast task
@@ -3264,7 +3897,7 @@ class LiveDashboardHub:
             while not progress_stop.is_set():
                 async with self._lock:
                     self.summary = self._build_summary(status='backfilling')
-                    summary = dict(self.summary)
+                    summary = self._serialize_summary()
                     # When new pairs have been scanned, send full snapshot so
                     # the dashboard grid populates incrementally.
                     current_count = len(self._pair_rows)
@@ -3295,7 +3928,7 @@ class LiveDashboardHub:
             async with self._lock:
                 self.summary = self._build_summary(status='error')
             await self._broadcast_log('error', f'Backfill failed: {exc}')
-            await self._broadcast({'type': 'error', 'summary': dict(self.summary), 'message': str(exc)})
+            await self._broadcast({'type': 'error', 'summary': self._serialize_summary(), 'message': str(exc)})
             return
 
         progress_stop.set()
@@ -3363,14 +3996,22 @@ class LiveDashboardHub:
                     self._append_or_merge_execution_result(closed_execution)
             self._portfolio_state.sync_balance(self.balance)
             self._tick_pending_pairs = set()
+            self._failed_close_orders = {
+                key: failure
+                for key, failure in self._failed_close_orders.items()
+                if key in self._tracked
+            }
             self._tick_exit_alerted = (
                 (self._tick_exit_alerted & set(self._tracked))
                 | {k for k, info in self._tracked.items() if info.get('pending_exit_reason')}
                 | set(self._inflight_close_orders)
+                | set(self._failed_close_orders)
             )
             self._early_exit_active = {}
             self._backfill_done = True
+            self._backfill_completed_at = pd.Timestamp.now(tz='UTC')
             self._append_log('success', f'Backfill complete: {len(pair_rows)} pairs, {len(signals)} signals')
+            self._emit_backfill_complete_beep()
             # Log all walk-forward trade signals discovered at startup
             if wf_signals:
                 self._append_log('info', f'Walk-forward found {len(wf_signals)} trade signal(s):')
@@ -3388,6 +4029,8 @@ class LiveDashboardHub:
             # close order — these were interrupted mid-close before the last shutdown.
             stale_exits: list[tuple[str, str, str, str, int, str | None, float | None]] = []
             for key, info in self._tracked.items():
+                if key in self._failed_close_orders:
+                    continue
                 reason = info.get('pending_exit_reason')
                 if reason and reason not in ('TP', 'SL') and key not in self._inflight_close_orders:
                     size = int(abs(float(info.get('ibkr_size') or 0.0)))
@@ -3408,23 +4051,17 @@ class LiveDashboardHub:
         )
 
         # Resubmit close orders for positions with stale exit intents.
-        _VIABLE_RECOVERY = {'Submitted', 'Filled', 'PreSubmitted'}
+        _VIABLE_RECOVERY = {'Submitted', 'Filled', 'PreSubmitted', 'CLOSED'}
         for alert_key, close_pair, close_dir, exit_reason, close_size, sig_id, exit_price in stale_exits:
-            opp = 'SHORT' if close_dir == 'LONG' else 'LONG'
-            ref = f'fxsr:recovery:{close_pair}:{close_dir}:{int(datetime.now(timezone.utc).timestamp() * 1000)}'
-            if sig_id:
-                await self._loop.run_in_executor(
-                    self._scan_executor,
-                    lambda sid=sig_id: cancel_bracket_children(sid),
-                )
-            order = await self._loop.run_in_executor(
-                self._scan_executor,
-                lambda p=close_pair, d=opp, s=close_size, r=ref: ibkr.submit_fx_market_order(
-                    pair=p, direction=d, quantity=s, order_ref=r,
-                ),
+            order = await self._submit_strategy_liquidation(
+                pair=close_pair,
+                direction=close_dir,
+                exit_reason=f'recovery_{exit_reason}',
+                signal_id=sig_id,
             )
             order_status = order.get('status') if order else None
             order_id = order.get('order_id') if order else None
+            actual_size = int(abs(float((order or {}).get('quantity') or close_size or 0.0)))
             if order is not None and order_status in _VIABLE_RECOVERY:
                 async with self._lock:
                     self._inflight_close_orders[alert_key] = (
@@ -3432,27 +4069,75 @@ class LiveDashboardHub:
                     )
                     self._append_log(
                         'info',
-                        f'Recovery close submitted: {close_pair} {close_dir} {exit_reason} size={close_size} order={order_id}',
+                        f'Recovery close submitted: {close_pair} {close_dir} {exit_reason} size={actual_size} order={order_id}',
                     )
             else:
-                if sig_id:
-                    await enqueue_write_async(
-                        lambda s=sig_id: clear_exit_signal(s),
-                    )
                 async with self._lock:
-                    # Failed to resubmit — clear the stale guard so live exit logic retries.
-                    self._tick_exit_alerted.discard(alert_key)
-                    info = self._tracked.get(alert_key)
-                    if info:
-                        info.pop('pending_exit_reason', None)
-                        info.pop('pending_exit_price', None)
-                        info.pop('pending_exit_detected_at', None)
                     self._append_log(
                         'warning',
-                        f'Recovery close REJECTED for {close_pair} {close_dir} — releasing for live retry',
+                        f'Recovery close REJECTED for {close_pair} {close_dir} - retry paused',
                     )
+                    self._mark_close_failed_locked(
+                        alert_key=alert_key,
+                        pair=close_pair,
+                        direction=close_dir,
+                        exit_reason=exit_reason,
+                        signal_id=sig_id,
+                        exit_price=exit_price,
+                        order_status=order_status,
+                        order_id=order_id,
+                        source='recovery',
+                        detail=f"size={actual_size}; {(order or {}).get('error') or ''}".strip('; '),
+                    )
+
         if stale_exits:
             self._housekeeping_nudge.set()
+
+    def _pair_ticker_map(self) -> dict[str, str]:
+        """Return accumulator pair IDs mapped to cache ticker symbols."""
+
+        return {
+            pair_id: pair_info['ticker']
+            for pair_id, pair_info in self.pairs.items()
+            if pair_info.get('ticker')
+        }
+
+    async def _data_health_loop(self) -> None:
+        """Broadcast a freshness snapshot every 30s so the UI flags stalls.
+
+        ``_export_state`` already computes ``summary.data_health`` on every
+        snapshot, but normal snapshots are driven by ticks/scans. When the
+        pipeline stalls those stop firing, so without this loop the frontend
+        would keep rendering the last-known-good health forever. Pushing a
+        fresh snapshot on a timer lets the dot turn amber/red even when the
+        upstream has gone silent. This loop is also the canonical refresh
+        point for ``self._last_data_health``, which shorter-lived broadcasts
+        read via ``_serialize_summary`` so the banner stays sticky between
+        ticks.
+        """
+
+        while True:
+            try:
+                await asyncio.sleep(self._DATA_HEALTH_LOOP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                return
+            try:
+                pair_ticker_map = self._pair_ticker_map()
+                restarted = self._accumulator.ensure_persistence_running(pair_ticker_map)
+                if restarted:
+                    await self._broadcast_log(
+                        'warning',
+                        'Bar persistence thread was stopped; restarted it.',
+                    )
+                self._last_data_health = self._compute_data_health()
+                async with self._lock:
+                    state = self._export_state()
+                await self._broadcast({'type': 'snapshot', 'state': state})
+            except Exception as exc:
+                await self._broadcast_log(
+                    'warning',
+                    f'Data-health broadcast skipped: {exc}',
+                )
 
     async def _housekeeping_loop(self) -> None:
         """Low-frequency periodic tasks: position sync, zone refresh, balance."""
@@ -3508,7 +4193,7 @@ class LiveDashboardHub:
                     cash_balances = ibkr.fetch_cash_balances()
 
                     # Daily closed-trade P&L (same source as live diary)
-                    from .live_history import _compute_daily_pnl_gbp
+                    from .live_history import compute_daily_pnl_gbp
                     from .db import _connect, get_db_path, init_db
                     from datetime import date
                     daily_closed_pnl = 0.0
@@ -3517,7 +4202,7 @@ class LiveDashboardHub:
                         init_db(db_path)
                         conn = _connect(db_path)
                         try:
-                            daily_closed_pnl = _compute_daily_pnl_gbp(conn, date.today())
+                            daily_closed_pnl = compute_daily_pnl_gbp(conn, date.today())
                         finally:
                             conn.close()
                     except Exception:
@@ -3549,9 +4234,15 @@ class LiveDashboardHub:
                                 self._append_or_merge_execution_result(closed_execution)
                     self._portfolio_state.sync_balance(self.balance)
                     self._tick_pending_pairs = set()
+                    self._failed_close_orders = {
+                        key: failure
+                        for key, failure in self._failed_close_orders.items()
+                        if key in self._tracked
+                    }
                     self._tick_exit_alerted = (
                         (self._tick_exit_alerted & set(self._tracked))
                         | {k for k, info in self._tracked.items() if info.get('pending_exit_reason')}
+                        | set(self._failed_close_orders)
                     )
                     # Also preserve in-flight guard keys.
                     self._tick_exit_alerted |= set(self._inflight_close_orders)
@@ -3590,11 +4281,7 @@ class LiveDashboardHub:
                             continue
                         order_status = statuses.get(oid)
                         if order_status in ('Cancelled', 'ApiCancelled', 'Inactive'):
-                            # Order explicitly dead — release for retry.
-                            if sig_id:
-                                await enqueue_write_async(
-                                    lambda s=sig_id: clear_exit_signal(s),
-                                )
+                            # Order explicitly dead; keep the exit intent latched.
                             async with self._lock:
                                 self._inflight_close_orders.pop(key, None)
                                 self._inflight_miss_counts.pop(key, None)
@@ -3606,7 +4293,20 @@ class LiveDashboardHub:
                                     tracked_info.pop('pending_exit_detected_at', None)
                                 self._append_log(
                                     'warning',
-                                    f'Close order {oid} {order_status} for {key} — releasing for retry',
+                                    f'Close order {oid} {order_status} for {key} — retry paused',
+                                )
+                                pair_key, direction_key = key.split(':', 1)
+                                self._mark_close_failed_locked(
+                                    alert_key=key,
+                                    pair=pair_key,
+                                    direction=direction_key,
+                                    exit_reason=reason,
+                                    signal_id=sig_id,
+                                    exit_price=price,
+                                    order_status=order_status,
+                                    order_id=oid,
+                                    source='housekeeping',
+                                    detail='order terminal before position closed',
                                 )
                         elif order_status is None:
                             # Order invisible, position still open.  Could be
@@ -3615,10 +4315,6 @@ class LiveDashboardHub:
                             misses = self._inflight_miss_counts.get(key, 0) + 1
                             self._inflight_miss_counts[key] = misses
                             if misses >= 3:
-                                if sig_id:
-                                    await enqueue_write_async(
-                                        lambda s=sig_id: clear_exit_signal(s),
-                                    )
                                 async with self._lock:
                                     self._inflight_close_orders.pop(key, None)
                                     self._inflight_miss_counts.pop(key, None)
@@ -3630,7 +4326,20 @@ class LiveDashboardHub:
                                         tracked_info.pop('pending_exit_detected_at', None)
                                     self._append_log(
                                         'warning',
-                                        f'Close order {oid} invisible for {misses} cycles, position {key} still open — releasing for retry',
+                                        f'Close order {oid} invisible for {misses} cycles, position {key} still open — retry paused',
+                                    )
+                                    pair_key, direction_key = key.split(':', 1)
+                                    self._mark_close_failed_locked(
+                                        alert_key=key,
+                                        pair=pair_key,
+                                        direction=direction_key,
+                                        exit_reason=reason,
+                                        signal_id=sig_id,
+                                        exit_price=price,
+                                        order_status=None,
+                                        order_id=oid,
+                                        source='housekeeping',
+                                        detail=f'order invisible for {misses} cycles',
                                     )
                         else:
                             # Order still working (Submitted/PreSubmitted) — reset miss counter.
@@ -3675,6 +4384,21 @@ class LiveDashboardHub:
 
         # Phase 1: backfill historical data with progress
         await self._run_backfill()
+
+        # Start persistence as soon as backfill has seeded the accumulator.
+        # Startup replay and execution hydration can be slow; DB writes should
+        # not wait for those post-backfill scans to finish.
+        pair_ticker_map = self._pair_ticker_map()
+        self._accumulator.start_persistence(pair_ticker_map)
+        await self._broadcast_log('info', 'Bar persistence thread started.')
+
+        # Pre-warm the data-health cache and start its monitor before slower
+        # startup scan work, so persistence failures are visible while replay
+        # is still catching up.
+        self._last_data_health = self._compute_data_health()
+        data_health_task = asyncio.create_task(self._data_health_loop())
+        self._track_task(data_health_task, label='data-health')
+
         await self._broadcast_log('info', 'Loading recent execution activity...')
         await self._loop.run_in_executor(
             self._scan_executor,
@@ -3690,16 +4414,7 @@ class LiveDashboardHub:
             await self._broadcast_log('info', f'Replayed {replayed_bars} buffered live bars.')
         await self._broadcast_log('info', 'Startup scans complete.')
 
-        # Phase 2: start bar persistence (bulk-save to PostgreSQL every ~60s)
-        pair_ticker_map = {
-            pair_id: pair_info['ticker']
-            for pair_id, pair_info in self.pairs.items()
-            if pair_info.get('ticker')
-        }
-        self._accumulator.start_persistence(pair_ticker_map)
-        await self._broadcast_log('info', 'Bar persistence thread started.')
-
-        # Phase 3: start low-frequency housekeeping
+        # Phase 2: start low-frequency housekeeping
         self._scan_task = asyncio.create_task(self._housekeeping_loop())
         await self._broadcast_log('info', 'Housekeeping loop running.')
 
@@ -3755,28 +4470,73 @@ async def _chart_page(_request: web.Request) -> web.StreamResponse:
 
 
 async def _account_history_api(_request: web.Request) -> web.Response:
-    """Return daily account balance and P&L snapshots for the equity chart."""
+    """Return daily account balance and P&L snapshots for the equity chart.
 
-    import asyncio
-    from .live_history import load_daily_snapshots, get_or_fetch_today_snapshot
+    Keep the API fast even when live account fetches stall by returning cached
+    snapshots first and doing best-effort, short-timeout refreshes in the
+    background.
+    """
 
-    hub = _request.app.get('hub')
-    loop = getattr(hub, '_loop', None) if hub is not None else None
+    from .live_history import get_or_fetch_today_snapshot, load_daily_snapshots
 
-    if hub is None or loop is None:
-        today_task = asyncio.to_thread(get_or_fetch_today_snapshot, force_refresh=True)
-    else:
-        today_task = loop.run_in_executor(
-            hub._scan_executor,
-            lambda: get_or_fetch_today_snapshot(force_refresh=True),
-        )
+    query = getattr(_request, 'query', {})
+    query_refresh = str(query.get('refresh', '')).strip().lower()
+    force_refresh = query_refresh in {'1', 'true', 'yes', 'on'}
 
-    snapshots, today = await asyncio.gather(
-        asyncio.to_thread(load_daily_snapshots),
-        today_task,
-    )
+    snapshots = await asyncio.to_thread(load_daily_snapshots)
+    today = None
+    now = datetime.now(timezone.utc)
+    today_key = now.date().isoformat()
 
-    # Merge today's live snapshot if it's not already the last entry
+    if snapshots and snapshots[-1].get('date') == today_key:
+        today = snapshots[-1].copy()
+
+    # Only do an inline refresh when requested, or when today's value is missing
+    # and the market is open (so we have a chance to capture a valid point).
+    should_refresh_inline = force_refresh or (today is None and fx_market_is_open(now))
+
+    if should_refresh_inline:
+        try:
+            today = await asyncio.wait_for(
+                asyncio.to_thread(
+                    get_or_fetch_today_snapshot,
+                    force_refresh=force_refresh or today is None,
+                ),
+                timeout=_ACCOUNT_HISTORY_REFRESH_TIMEOUT,
+            )
+        except Exception:
+            today = None
+
+    # Keep cache fresh without blocking requests.
+    app = getattr(_request, 'app', {})
+    if app is not None and today is not None and force_refresh is False and fx_market_is_open(now):
+        state = app.setdefault(_ACCOUNT_HISTORY_REFRESH_STATE_KEY, {})
+        lock = state.setdefault('lock', asyncio.Lock())
+        async with lock:
+            now_ts = now.timestamp()
+            last_attempt_ts = float(state.get('last_attempt', 0.0))
+            task = state.get('task')
+            if (
+                now_ts - last_attempt_ts >= _ACCOUNT_HISTORY_REFRESH_INTERVAL.total_seconds()
+                and (task is None or task.done())
+            ):
+                state['last_attempt'] = now_ts
+
+                async def _background_refresh() -> None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                get_or_fetch_today_snapshot,
+                                force_refresh=True,
+                            ),
+                            timeout=_ACCOUNT_HISTORY_REFRESH_TIMEOUT,
+                        )
+                    except Exception:
+                        return
+
+                state['task'] = asyncio.create_task(_background_refresh())
+
+    # Merge today's snapshot if it is the latest date.
     if today:
         if not snapshots or snapshots[-1]['date'] != today['date']:
             snapshots.append(today)
@@ -3832,12 +4592,42 @@ async def _debug_positions_api(request: web.Request) -> web.Response:
     """Return in-memory position tracking state for diagnostics."""
     hub: LiveDashboardHub = request.app['hub']
     async with hub._lock:
+        # Streaming / accumulator diagnostics — useful when the DB isn't
+        # advancing to tell which stage of the pipeline is blocked.
+        accumulator_state = hub._accumulator.snapshot_diagnostics()
+        quote_thread = hub._quote_thread
+
+        def _timestamp_map(attr_name: str) -> dict:
+            return {
+                pair: pd.Timestamp(ts).isoformat()
+                for pair, ts in getattr(hub, attr_name, {}).items()
+                if ts is not None
+            }
+
+        streaming_state = {
+            'quote_thread_alive': bool(quote_thread and quote_thread.is_alive()),
+            'realtime_bars_enabled': bool(getattr(hub, '_realtime_bars_enabled', False)),
+            'startup_bar_buffering': bool(getattr(hub, '_startup_bar_buffering', False)),
+            'startup_bar_buffer_size': len(getattr(hub, '_startup_bar_buffer', []) or []),
+            'backfill_done': bool(getattr(hub, '_backfill_done', False)),
+            'last_realtime_bar_received_at': _timestamp_map('_last_realtime_bar_received_at'),
+            'last_realtime_bar_time': _timestamp_map('_last_realtime_bar_time'),
+            'last_accumulator_minute': _timestamp_map('_last_accumulator_minute'),
+            'realtime_bar_ingest_count': dict(getattr(hub, '_realtime_bar_ingest_count', {})),
+            'realtime_bar_skip_counts': {
+                pair: dict(counts)
+                for pair, counts in getattr(hub, '_realtime_bar_skip_counts', {}).items()
+            },
+            'last_realtime_bar_skip': dict(getattr(hub, '_last_realtime_bar_skip', {})),
+        }
         return web.json_response({
             'track_positions': hub.track_positions,
             'tracked_count': len(hub._tracked),
             'tracked_keys': sorted(hub._tracked.keys()),
             'snapshot_keys': sorted(hub._position_snapshots.keys()),
             'last_quote_pairs': sorted(hub._last_quotes.keys()),
+            'streaming': streaming_state,
+            'accumulator': accumulator_state,
         })
 
 
@@ -3856,49 +4646,43 @@ async def _position_health_api(request: web.Request) -> web.Response:
         # 1. Live positions
         raw_positions = ibkr.fetch_positions()
         positions = []
+        live_position_pairs = set()
         if raw_positions:
             for p in raw_positions:
                 direction = 'LONG' if p['size'] > 0 else 'SHORT'
+                pair = str(p['pair']).upper()
                 positions.append({
-                    'pair': p['pair'],
+                    'pair': pair,
                     'direction': direction,
                     'size': p['size'],
                     'avg_cost': p['avg_cost'],
+                    'position_source': 'ibkr_position',
                 })
+                live_position_pairs.add(pair)
+        try:
+            from .broker_ledger import load_open_broker_execution_positions
+            existing_pairs = {str(p['pair']).upper() for p in positions}
+            for p in load_open_broker_execution_positions():
+                direction = 'LONG' if p['size'] > 0 else 'SHORT'
+                pair = str(p['pair']).upper()
+                if pair in existing_pairs:
+                    continue
+                positions.append({
+                    'pair': pair,
+                    'direction': direction,
+                    'size': p['size'],
+                    'avg_cost': p['avg_cost'],
+                    'position_source': p.get('position_source') or p.get('source') or 'broker_execution',
+                    'broker_fill_count': p.get('broker_fill_count'),
+                    'last_broker_fill_at': str(p.get('last_broker_fill_at')) if p.get('last_broker_fill_at') is not None else None,
+                })
+                existing_pairs.add(pair)
+                live_position_pairs.add(pair)
+        except Exception:
+            pass
 
         # 2. Open orders with detail
-        open_orders = []
-        terminal = {'Filled', 'Cancelled', 'ApiCancelled', 'Inactive'}
-        with ibkr._IBKR_LOCK:
-            ib, connected = ibkr._get_connection()
-            if connected:
-                try:
-                    all_orders = ib.reqAllOpenOrders()
-                    for t in all_orders:
-                        status = getattr(getattr(t, 'orderStatus', None), 'status', '') or ''
-                        if status in terminal:
-                            continue
-                        o = t.order
-                        c = t.contract
-                        pair_id = ibkr._contract_to_pair(c)
-                        if not pair_id:
-                            continue
-                        open_orders.append({
-                            'pair': pair_id,
-                            'action': getattr(o, 'action', ''),
-                            'quantity': float(getattr(o, 'totalQuantity', 0)),
-                            'order_type': getattr(o, 'orderType', ''),
-                            'lmt_price': float(getattr(o, 'lmtPrice', 0) or 0),
-                            'aux_price': float(getattr(o, 'auxPrice', 0) or 0),
-                            'order_id': getattr(o, 'orderId', None),
-                            'parent_id': getattr(o, 'parentId', None),
-                            'oca_group': getattr(o, 'ocaGroup', ''),
-                            'tif': getattr(o, 'tif', ''),
-                            'status': status,
-                            'order_ref': getattr(o, 'orderRef', ''),
-                        })
-                except Exception:
-                    pass
+        open_orders = ibkr.fetch_open_fx_orders()
 
         # 3. Closed trades from DB
         closed_trades = []
@@ -3937,10 +4721,27 @@ async def _position_health_api(request: web.Request) -> web.Response:
                     if d.get('open_units') is not None:
                         d['open_units'] = int(d['open_units'])
                     # Compute £ P&L amount
-                    from .live_history import _compute_pnl_gbp
-                    pnl_amount = _compute_pnl_gbp(d, conn)
+                    from .live_history import compute_pnl_gbp
+                    pnl_amount = compute_pnl_gbp(d, conn)
                     d['pnl_amount'] = round(pnl_amount, 2) if pnl_amount is not None else None
                     closed_trades.append(d)
+                from .broker_ledger import load_unmatched_broker_liquidation_trades_conn
+                for d in load_unmatched_broker_liquidation_trades_conn(
+                    conn,
+                    closed_after=cutoff,
+                ):
+                    for ts_key in ('detected_at', 'closed_at'):
+                        if d.get(ts_key):
+                            d[ts_key] = str(d[ts_key])
+                    if d.get('pnl_pips') is not None:
+                        d['pnl_pips'] = float(d['pnl_pips'])
+                    d['pnl_amount'] = (
+                        round(float(d['pnl_gbp']), 2)
+                        if d.get('pnl_gbp') is not None
+                        else None
+                    )
+                    closed_trades.append(d)
+                closed_trades.sort(key=lambda row: str(row.get('closed_at') or ''), reverse=True)
             finally:
                 conn.close()
         except Exception:
@@ -3953,8 +4754,7 @@ async def _position_health_api(request: web.Request) -> web.Response:
             pos['bracket_orders'] = [o for o in open_orders if o['pair'] == pos['pair']]
 
         # Orphaned orders (orders with no matching position)
-        position_pairs = {p['pair'] for p in positions}
-        orphaned_orders = [o for o in open_orders if o['pair'] not in position_pairs]
+        orphaned_orders = [o for o in open_orders if o['pair'] not in live_position_pairs]
 
         return {
             'positions': positions,
@@ -4066,7 +4866,8 @@ async def _live_trade_api(request: web.Request) -> web.Response:
 
     open_signals = [
         t for t in signals
-        if str(t.get('status') or '').upper() in {'OPEN', 'PARTIAL'}
+        if str(t.get('status') or '').upper() in {'SUBMITTED', 'PRESUBMITTED', 'FILLED', 'PARTIAL', 'OPEN', 'EXIT_SIGNAL'}
+        and not t.get('closed_at')
     ]
     trade = open_signals[0] if open_signals else signals[0]
     return web.json_response({'trade': trade})
@@ -4302,6 +5103,40 @@ async def _close_tracked_position(request: web.Request) -> web.Response:
         return web.json_response({'error': str(exc)}, status=400)
     except LookupError as exc:
         return web.json_response({'error': str(exc)}, status=404)
+    except RuntimeError as exc:
+        return web.json_response({'error': str(exc)}, status=409)
+    except Exception as exc:
+        return web.json_response({'error': str(exc)}, status=500)
+
+
+async def _liquidate_live_position(request: web.Request) -> web.Response:
+    """Cancel pair orders and submit a verified reducing order for the live IBKR position."""
+
+    _validate_dashboard_request(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({'error': 'Invalid JSON body'}, status=400)
+
+    pair = payload.get('pair')
+    direction = payload.get('direction')
+    if not pair:
+        return web.json_response(
+            {'error': 'Expected JSON body with "pair".'},
+            status=400,
+        )
+
+    hub: LiveDashboardHub = request.app["hub"]
+    try:
+        result = await hub.liquidate_live_position(pair=pair, direction=direction)
+        if result.get('result', {}).get('status') == 'FAILED':
+            return web.json_response(
+                {'error': result.get('message', 'Failed to liquidate live position.'), 'result': result},
+                status=409,
+            )
+        return web.json_response(result)
+    except ValueError as exc:
+        return web.json_response({'error': str(exc)}, status=400)
     except RuntimeError as exc:
         return web.json_response({'error': str(exc)}, status=409)
     except Exception as exc:
@@ -4562,6 +5397,7 @@ def run_live_web_app(
     app.router.add_get('/api/chart-data', _chart_data)
     app.router.add_post('/api/position-close', _close_tracked_position)
     app.router.add_post('/position-close', _close_tracked_position)
+    app.router.add_post('/api/live-position-liquidate', _liquidate_live_position)
     app.router.add_post('/api/neutralize-currency', _neutralize_currency)
     app.router.add_post('/api/execution-mode', _set_execution_mode)
     _register_fill_route(app, _fill_cache)

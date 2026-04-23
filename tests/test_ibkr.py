@@ -67,14 +67,59 @@ class IbkrHistoricalFetchTests(unittest.TestCase):
         with patch.dict(sys.modules, {'ib_async': fake_ib_async}):
             ibkr.disconnect()
             previous = ibkr.set_client_id_fallback(True)
+            previous_offset = ibkr._LAST_FALLBACK_OFFSET
+            ibkr._LAST_FALLBACK_OFFSET = 0
             try:
                 ib, connected = ibkr._get_connection(client_id=99, retries=3)
             finally:
+                ibkr._LAST_FALLBACK_OFFSET = previous_offset
                 ibkr.set_client_id_fallback(previous)
 
         self.assertIsNone(ib)
         self.assertFalse(connected)
         self.assertEqual(connect_calls, [99, 100, 101])
+
+    def test_get_connection_logs_successful_fallback_client_id(self):
+        connect_calls = []
+
+        class FallbackIb:
+            def __init__(self):
+                self.connected = False
+
+            def connect(self, _host, _port, clientId, timeout=5):
+                connect_calls.append(clientId)
+                if clientId == 100:
+                    raise RuntimeError('Unable to connect as the client id is already in use')
+                self.connected = True
+
+            def isConnected(self):
+                return self.connected
+
+            def disconnect(self):
+                self.connected = False
+
+        fake_ib_async = _fake_ib_async_module()
+        fake_ib_async.IB = FallbackIb
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}), \
+                patch('builtins.print') as print_mock:
+            ibkr.disconnect()
+            previous_fallback = ibkr.set_client_id_fallback(True)
+            previous_offset = ibkr._LAST_FALLBACK_OFFSET
+            ibkr._LAST_FALLBACK_OFFSET = 0
+            try:
+                ib, connected = ibkr._get_connection(client_id=100, retries=3)
+            finally:
+                ibkr.disconnect()
+                ibkr._LAST_FALLBACK_OFFSET = previous_offset
+                ibkr.set_client_id_fallback(previous_fallback)
+
+        self.assertIsNotNone(ib)
+        self.assertTrue(connected)
+        self.assertEqual(connect_calls, [100, 101])
+        print_mock.assert_called_once_with(
+            '  IBKR connected with fallback client ID 101 (requested 100).'
+        )
 
     def test_fetch_historical_uses_connection_with_client_id(self):
         fake_ib_async = _fake_ib_async_module()
@@ -565,6 +610,21 @@ class CancelOrdersAuditTests(unittest.TestCase):
         finally:
             conn.close()
 
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    def test_cancel_orders_suppress_not_found_skips_unknown_open_order_ids(self, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        ib = MagicMock()
+        ib.reqAllOpenOrders.return_value = []
+        mock_conn.return_value = (ib, True)
+
+        from fx_sr.ibkr import cancel_orders
+        cancelled = cancel_orders({500, 501}, suppress_not_found=True)
+
+        self.assertEqual(cancelled, [])
+        ib.cancelOrder.assert_not_called()
+
 
 class SubmitMarketOrderAuditTests(unittest.TestCase):
     def setUp(self):
@@ -626,10 +686,12 @@ class OrphanSweepAuditTests(unittest.TestCase):
     @patch('fx_sr.positions._resubmit_missing_brackets')
     @patch('fx_sr.positions.ibkr')
     @patch('fx_sr.positions._load_trades')
-    @patch('fx_sr.positions.reconcile_detected_signal_orders')
+    @patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[])
+    @patch('fx_sr.positions.reconcile_broker_ledger')
     def test_orphan_sweep_logs_audit(
         self,
         _recon,
+        _broker_positions,
         mock_load_trades,
         mock_ibkr,
         mock_resubmit,

@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
-from fx_sr.data import _is_cache_fresh, _remaining_days_to_fetch
+from fx_sr.data import _is_cache_fresh, _remaining_days_to_fetch, _trailing_gap_days
 
 
 class RemainingDaysToFetchTests(unittest.TestCase):
@@ -87,6 +88,29 @@ class RemainingDaysToFetchTests(unittest.TestCase):
             ),
             1,
         )
+
+
+class TrailingGapDaysTests(unittest.TestCase):
+    def test_trailing_gap_minutes_within_window_is_fresh(self):
+        index = pd.date_range('2026-04-22T22:09:00Z', periods=1, freq='1min')
+        cached = pd.DataFrame({'Close': [1.0]}, index=index)
+        now = pd.Timestamp('2026-04-22T22:11:00Z')
+        with patch('fx_sr.data.pd.Timestamp.now', lambda *_args, **_kwargs: now):
+            self.assertEqual(
+                _trailing_gap_days(cached, interval='1m'),
+                0,
+            )
+
+    def test_trailing_gap_minutes_same_day_uses_single_day(self):
+        index = pd.date_range('2026-04-22T22:00:00Z', periods=1, freq='1min')
+        cached = pd.DataFrame({'Close': [1.0]}, index=index)
+        # 10 minutes behind, same trading day -> should be a single-day refresh window.
+        now = pd.Timestamp('2026-04-22T22:10:00Z')
+        with patch('fx_sr.data.pd.Timestamp.now', lambda *_args, **_kwargs: now):
+            self.assertEqual(
+                _trailing_gap_days(cached, interval='1m'),
+                1,
+            )
 
 
 class CacheFreshnessTests(unittest.TestCase):

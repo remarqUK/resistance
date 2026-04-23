@@ -28,6 +28,7 @@ from .live_history import (
     record_execution_results,
     record_pair_scan_log,
 )
+from .broker_ledger import has_active_broker_activity_for_order_ref
 from .portfolio import (
     CorrelationExposure,
     PortfolioState,
@@ -569,6 +570,38 @@ def _get_live_minute_data(
     return minute_df
 
 
+def live_scan_lookback_bars(params: StrategyParams) -> int:
+    """Return the bounded hourly window live scans need to replay."""
+
+    min_bars = params.atr_period + 10 if params.sl_mode == 'atr' else 20
+    candidates = [
+        getattr(params, 'scan_lookback_bars', 72),
+        getattr(params, 'max_hold_bars', 72),
+        getattr(params, 'sideways_bars', 0),
+        getattr(params, 'zone_exhaustion_lookback', 0),
+        getattr(params, 'linger_lookback', 0),
+        getattr(params, 'momentum_lookback', 0),
+        min_bars,
+    ]
+    required = max(int(value or 0) for value in candidates)
+    return max(required + 4, min_bars)
+
+
+def live_scan_minute_days(params: StrategyParams) -> int:
+    """Return minute-cache days needed for the bounded live scan window."""
+
+    return max(3, live_scan_lookback_bars(params) // 24 + 1)
+
+
+def live_scan_hourly_window(hourly_df: pd.DataFrame, params: StrategyParams) -> pd.DataFrame:
+    """Trim hourly data to the finite live scan window."""
+
+    lookback = live_scan_lookback_bars(params)
+    if hourly_df.empty or len(hourly_df) <= lookback:
+        return hourly_df
+    return hourly_df.iloc[-lookback:]
+
+
 def _completed_live_hourly_data(
     hourly_df: pd.DataFrame,
     *,
@@ -899,7 +932,7 @@ def _scan_pair(
     # decision granularity); the hourly-OHLC fallback is suppressed for a
     # forming bar via run_walk_forward's _last_bar_is_forming detection, so
     # a partial hourly candle can never generate a phantom signal.
-    scan_df = hourly_df
+    scan_df = live_scan_hourly_window(hourly_df, params)
     if scan_df.empty:
         return (
             PairScanRow(
@@ -1012,11 +1045,10 @@ def _scan_pair(
     # Minute data for intrabar signal detection — match the hourly window
     # so every bar in the walk-forward has minute data available.
     minute_df: Optional[pd.DataFrame] = None
-    hourly_span_days = max(3, len(scan_df) // 24 + 1)
     if execution_mode == 'intrabar':
         minute_df = _get_live_minute_data(
             pair_info['ticker'],
-            days=hourly_span_days,
+            days=live_scan_minute_days(params),
             minute_data_cache=minute_data_cache,
         )
 
@@ -1024,11 +1056,12 @@ def _scan_pair(
     # Use saved WalkForwardState to resume from the last checkpoint when the
     # hourly data has only grown by new bars — avoids replaying all history.
     hourly_bucket = _current_hour_bucket()
+    first_bar_key = str(scan_df.index[0])
     last_bar_key = str(scan_df.index[-1])
     minute_freshness = ''
     if minute_df is not None and not minute_df.empty:
         minute_freshness = str(minute_df.index[-1])
-    wf_cache_key = f"{hourly_bucket}:{last_bar_key}:{minute_freshness}:{execution_mode}"
+    wf_cache_key = f"{hourly_bucket}:{first_bar_key}:{last_bar_key}:{minute_freshness}:{execution_mode}"
     wf_cached = _WALK_FORWARD_CACHE.get(pair_id)
     if wf_cached is not None and wf_cached[0] == wf_cache_key:
         signal = wf_cached[1]
@@ -1906,7 +1939,21 @@ def execute_signal_plans(
                 )
                 continue
 
-        order_ref = f"fxsr:{signal.pair}:{signal.direction}:{signal.time.strftime('%Y%m%d%H%M%S')}"
+        order_ref_time = pd.Timestamp(signal.time)
+        if order_ref_time.tzinfo is None:
+            order_ref_time = order_ref_time.tz_localize('UTC')
+        else:
+            order_ref_time = order_ref_time.tz_convert('UTC')
+        order_ref = f"fxsr:{signal.pair}:{signal.direction}:{order_ref_time.strftime('%Y%m%d%H%M%S')}"
+        if has_active_broker_activity_for_order_ref(order_ref):
+            results[idx] = ExecutionResult(
+                signal.pair,
+                signal.direction,
+                plan.units,
+                'SKIPPED',
+                note='orderRef already has broker activity',
+            )
+            continue
         order = ibkr.submit_fx_market_bracket_order(
             pair=signal.pair,
             direction=signal.direction,

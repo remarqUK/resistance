@@ -73,8 +73,20 @@ class LiveExecutionTests(unittest.TestCase):
             return_value=(True, ''),
         )
         self._protection_patcher.start()
+        self._excess_liquidity_patcher = patch(
+            'fx_sr.live.ibkr.fetch_excess_liquidity',
+            return_value=(None, None),
+        )
+        self._excess_liquidity_patcher.start()
+        self._order_ref_patcher = patch(
+            'fx_sr.live.has_active_broker_activity_for_order_ref',
+            return_value=False,
+        )
+        self._order_ref_patcher.start()
 
     def tearDown(self):
+        self._order_ref_patcher.stop()
+        self._excess_liquidity_patcher.stop()
         self._protection_patcher.stop()
 
     def test_execute_signal_plans_submits_market_bracket_orders(self):
@@ -116,6 +128,37 @@ class LiveExecutionTests(unittest.TestCase):
         self.assertEqual(submit_kwargs['quantity'], 39999)
         self.assertAlmostEqual(submit_kwargs['take_profit_price'], 1.1100)
         self.assertAlmostEqual(submit_kwargs['stop_loss_price'], 1.0950)
+
+    def test_execute_signal_plans_skips_when_order_ref_already_active(self):
+        signal = _signal('EURUSD')
+        plan = _plan('EURUSD')
+
+        with patch(
+            'fx_sr.live.ibkr.fetch_execution_quote',
+            return_value=_quote('EURUSD', bid=1.0998, ask=1.1000, source='l2'),
+        ), patch(
+            'fx_sr.live.has_active_broker_activity_for_order_ref',
+            return_value=True,
+        ), patch(
+            'fx_sr.live.ibkr.submit_fx_market_bracket_order',
+        ) as submit_mock:
+            results = execute_signal_plans(
+                [signal],
+                [plan],
+                execute_orders=True,
+                existing_pairs=set(),
+                pending_pairs=set(),
+                params=StrategyParams(max_correlated_trades=2, margin_slots=1, margin_cushion_pct=0.0),
+                tracked_positions={},
+                balance=10000.0,
+                risk_pct=0.02,
+                account_currency='USD',
+            )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, 'SKIPPED')
+        self.assertEqual(results[0].note, 'orderRef already has broker activity')
+        submit_mock.assert_not_called()
 
     def test_execute_signal_plans_marks_initial_partial_fill(self):
         signal = _signal('EURUSD')

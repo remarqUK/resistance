@@ -14,9 +14,26 @@ from typing import Callable, Iterable, Optional
 
 import pandas as pd
 
-from .config import PAIRS
 from .data import fx_market_is_open
-from .db import _connect, _normalize_ts, _table_columns, db_transaction, get_db_path, init_db
+from .db import _connect, _normalize_ts, db_transaction, get_db_path
+from .signal_store import (
+    NON_TRANSACTIONAL_RESULT_STATUSES as _NON_TRANSACTIONAL_RESULT_STATUSES,
+    derive_signal_execution_status as _derive_signal_execution_status,
+    detected_signal_fill_summary_conn as _signal_fill_summary_conn,
+    ensure_signal_tables as _ensure_table,
+    existing_has_execution_evidence as _existing_has_execution_evidence,
+    load_detected_signal_conn as _load_detected_signal_conn,
+    merge_row as _merge_row,
+    normalize_status as _normalize_status,
+    normalize_units as _normalize_units,
+    pair_pip as _pair_pip,
+    record_detected_signal_fill_conn as _record_signal_fill_conn,
+    replace_detected_signal_conn as _replace_row_conn,
+    result_has_execution_evidence as _result_has_execution_evidence,
+    row_to_dict as _row_to_dict,
+    signal_order_ref as _signal_order_ref,
+    status_from_existing_execution as _status_from_existing_execution,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,245 +167,11 @@ def ensure_detected_signal_table(db_path: str | None = None) -> str:
     return _ensure_table(db_path)
 
 
-_ENSURE_TABLE_PATHS: set[str] = set()
-_ENSURE_TABLE_LOCK = threading.Lock()
-
-
-def _serialize_ts(value) -> str | None:
-    if value is None:
-        return None
-    if value == '':
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (dt_datetime, pd.Timestamp, date)):
-        return value.isoformat().replace('T', ' ')
-    return value
-
-
-def _ensure_table(db_path: str | None = None) -> str:
-    """Create the detected-signal history table if needed (once per path)."""
-
-    if db_path is None:
-        db_path = get_db_path()
-
-    with _ENSURE_TABLE_LOCK:
-        if db_path in _ENSURE_TABLE_PATHS:
-            return db_path
-
-        init_db(db_path, migrate_legacy=False)
-        conn = _connect(db_path)
-        ts_type = "TIMESTAMPTZ"
-        real_type = "DOUBLE PRECISION"
-        int_type = "BIGINT"
-        try:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS detected_signal (
-                    signal_id             TEXT PRIMARY KEY,
-                    pair                  TEXT NOT NULL,
-                    direction             TEXT NOT NULL,
-                    signal_time           {ts_type} NOT NULL,
-                    detected_at           {ts_type} NOT NULL,
-                    entry_price           {real_type} NOT NULL,
-                    sl_price              {real_type} NOT NULL,
-                    tp_price              {real_type} NOT NULL,
-                    zone_upper            {real_type} NOT NULL,
-                    zone_lower            {real_type} NOT NULL,
-                    zone_strength         TEXT NOT NULL,
-                    zone_type             TEXT NOT NULL,
-                    quality_score         {real_type} NOT NULL DEFAULT 0,
-                    status                TEXT NOT NULL,
-                    transacted            INTEGER NOT NULL DEFAULT 0,
-                    execution_enabled     INTEGER NOT NULL DEFAULT 0,
-                    planned_units         {int_type},
-                    risk_amount           {real_type},
-                    account_currency      TEXT,
-                    notional_account      {real_type},
-                    order_id              {int_type},
-                    take_profit_order_id  {int_type},
-                    stop_loss_order_id    {int_type},
-                    note                  TEXT,
-                    executed_at           {ts_type},
-                    opened_at             {ts_type},
-                    opened_price          {real_type},
-                    open_units            {int_type},
-                    remaining_units       {int_type},
-                    fill_count            {int_type},
-                    last_fill_at          {ts_type},
-                    broker_order_status   TEXT,
-                    exit_signal_at        {ts_type},
-                    exit_signal_reason    TEXT,
-                    exit_signal_price     {real_type},
-                    closed_at             {ts_type},
-                    closed_price          {real_type},
-                    close_reason          TEXT,
-                    close_source          TEXT,
-                    pnl_pips              {real_type},
-                    execution_mode        TEXT,
-                    ibkr_account          TEXT,
-                    submitted_entry_price {real_type},
-                    submitted_tp_price    {real_type},
-                    submitted_sl_price    {real_type},
-                    submit_bid            {real_type},
-                    submit_ask            {real_type},
-                    submit_spread         {real_type},
-                    quote_source          TEXT,
-                    quote_time            {ts_type},
-                    last_updated_at       {ts_type} NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS detected_signal_fill (
-                    exec_id      TEXT PRIMARY KEY,
-                    signal_id    TEXT NOT NULL,
-                    pair         TEXT NOT NULL,
-                    direction    TEXT NOT NULL,
-                    order_id     {int_type},
-                    fill_time    {ts_type},
-                    fill_price   {real_type} NOT NULL,
-                    fill_units   {int_type} NOT NULL,
-                    cum_qty      {real_type},
-                    avg_price    {real_type},
-                    side         TEXT,
-                    order_ref    TEXT,
-                    recorded_at  {ts_type} NOT NULL
-                )
-                """
-            )
-            existing = _table_columns(conn, "detected_signal")
-            for col, ddl in (
-                ('execution_mode', 'TEXT'),
-                ('ibkr_account', 'TEXT'),
-                ('submitted_entry_price', real_type),
-                ('submitted_tp_price', real_type),
-                ('submitted_sl_price', real_type),
-                ('submit_bid', real_type),
-                ('submit_ask', real_type),
-                ('submit_spread', real_type),
-                ('quote_source', 'TEXT'),
-                ('quote_time', ts_type),
-                ('remaining_units', 'INTEGER'),
-                ('fill_count', 'INTEGER'),
-                ('last_fill_at', ts_type),
-                ('broker_order_status', 'TEXT'),
-            ):
-                if col not in existing:
-                    conn.execute(f"ALTER TABLE detected_signal ADD COLUMN {col} {ddl}")
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_time
-                ON detected_signal (pair, signal_time DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_status
-                ON detected_signal (status, transacted, pair, direction)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_status_time
-                ON detected_signal (pair, status, signal_time DESC, detected_at DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_status_last_updated
-                ON detected_signal (status, pair, last_updated_at DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_claim
-                ON detected_signal (
-                    pair,
-                    direction,
-                    status,
-                    opened_at,
-                    executed_at,
-                    detected_at
-                )
-                WHERE transacted = 1 AND closed_at IS NULL
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_reconcile
-                ON detected_signal (order_id, status, pair)
-                WHERE transacted = 1 AND closed_at IS NULL AND order_id IS NOT NULL
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_signal_time
-                ON detected_signal_fill (signal_id, fill_time DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_signal_time_asc
-                ON detected_signal_fill (signal_id, fill_time ASC, recorded_at ASC, exec_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_detected_signal_fill_order
-                ON detected_signal_fill (order_id, fill_time DESC)
-                """
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS pair_scan_log (
-                    id         BIGSERIAL PRIMARY KEY,
-                    scan_time  {ts_type} NOT NULL,
-                    pair       TEXT NOT NULL,
-                    state      TEXT NOT NULL,
-                    note       TEXT,
-                    price      {real_type},
-                    signal_generated BOOLEAN NOT NULL DEFAULT FALSE,
-                    direction  TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pair_scan_log_pair_time
-                ON pair_scan_log (pair, scan_time DESC)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_pair_scan_log_time
-                ON pair_scan_log (scan_time DESC)
-                """
-            )
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS system_event (
-                    id         BIGSERIAL PRIMARY KEY,
-                    event_time {ts_type} NOT NULL DEFAULT NOW(),
-                    event_type TEXT NOT NULL,
-                    detail     TEXT
-                )
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        _ENSURE_TABLE_PATHS.add(db_path)
-        return db_path
-
-
 def record_system_event(event_type: str, detail: str | None = None) -> None:
     """Record a system lifecycle event (startup, shutdown, etc.)."""
     try:
-        db_path = _ensure_signal_tables()
-        conn = db._connect(db_path)
+        db_path = _ensure_table()
+        conn = _connect(db_path)
         try:
             conn.execute(
                 "INSERT INTO system_event (event_type, detail) VALUES (%s, %s)",
@@ -399,23 +182,6 @@ def record_system_event(event_type: str, detail: str | None = None) -> None:
             conn.close()
     except Exception:
         pass
-
-
-def _row_to_dict(cursor, row) -> dict:
-    """Convert a DB row to a dict keyed by column name."""
-
-    if row is None:
-        return {}
-    return {
-        description[0]: _serialize_ts(row[idx])
-        for idx, description in enumerate(cursor.description)
-    }
-
-
-def _pair_pip(pair: str) -> float:
-    """Return the configured pip size for a pair."""
-
-    return PAIRS.get(pair, {}).get('pip', 0.0001)
 
 
 def build_signal_id(signal) -> str:
@@ -782,7 +548,45 @@ def _compute_daily_pnl_gbp(conn, target_date: date) -> float:
         gbp = _compute_pnl_gbp(d, conn)
         if gbp is not None:
             total += gbp
+    try:
+        from .broker_ledger import load_unmatched_broker_liquidation_trades_conn
+        broker_rows = load_unmatched_broker_liquidation_trades_conn(
+            conn,
+            closed_after=target_date,
+            closed_before=target_date + pd.Timedelta(days=1),
+        )
+        for row in broker_rows:
+            gbp = row.get('pnl_gbp')
+            if gbp is not None:
+                total += float(gbp)
+    except Exception:
+        pass
     return round(total, 2)
+
+
+def compute_pnl_gbp(
+    row: dict,
+    conn,
+    *,
+    current_price: float | None = None,
+    as_of: dt_datetime | date | None = None,
+    to_currency: str = 'GBP',
+) -> float | None:
+    """Public wrapper for realised/unrealised GBP P&L calculation."""
+
+    return _compute_pnl_gbp(
+        row,
+        conn,
+        current_price=current_price,
+        as_of=as_of,
+        to_currency=to_currency,
+    )
+
+
+def compute_daily_pnl_gbp(conn, target_date: date) -> float:
+    """Public wrapper for summing closed-trade GBP P&L for one date."""
+
+    return _compute_daily_pnl_gbp(conn, target_date)
 
 
 def record_daily_snapshot(
@@ -950,134 +754,6 @@ def get_or_fetch_today_snapshot(
     return snapshot
 
 
-def _merge_row(existing: dict | None, **updates) -> dict:
-    """Merge DB updates into an existing row payload."""
-
-    merged = dict(existing or {})
-    merged.update(updates)
-    return merged
-
-
-def _load_detected_signal_conn(conn, signal_id: str) -> dict | None:
-    """Load one detected-signal row using an existing DB connection."""
-
-    cursor = conn.execute(
-        "SELECT * FROM detected_signal WHERE signal_id=%s",
-        (signal_id,),
-    )
-    row = cursor.fetchone()
-    if row is None:
-        return None
-    return _row_to_dict(cursor, row)
-
-
-def _replace_row_conn(conn, row: dict) -> None:
-    """Insert or replace one fully materialized detected-signal row."""
-
-    conn.execute(
-        """
-        INSERT INTO detected_signal (
-            signal_id, pair, direction, signal_time, detected_at,
-            entry_price, sl_price, tp_price, zone_upper, zone_lower,
-            zone_strength, zone_type, quality_score, status, transacted,
-            execution_enabled, planned_units, risk_amount, account_currency,
-            notional_account, order_id, take_profit_order_id,
-            stop_loss_order_id, note, executed_at, opened_at,
-            opened_price, open_units, remaining_units, fill_count,
-            last_fill_at, broker_order_status, exit_signal_at, exit_signal_reason,
-            exit_signal_price, closed_at, closed_price, close_reason,
-            close_source, pnl_pips, execution_mode, ibkr_account,
-            submitted_entry_price, submitted_tp_price, submitted_sl_price,
-            submit_bid, submit_ask, submit_spread, quote_source, quote_time,
-            last_updated_at
-        )
-        VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s
-        )
-        ON CONFLICT (signal_id) DO UPDATE SET
-            pair = EXCLUDED.pair,
-            direction = EXCLUDED.direction,
-            signal_time = EXCLUDED.signal_time,
-            detected_at = EXCLUDED.detected_at,
-            entry_price = EXCLUDED.entry_price,
-            sl_price = EXCLUDED.sl_price,
-            tp_price = EXCLUDED.tp_price,
-            zone_upper = EXCLUDED.zone_upper,
-            zone_lower = EXCLUDED.zone_lower,
-            zone_strength = EXCLUDED.zone_strength,
-            zone_type = EXCLUDED.zone_type,
-            quality_score = EXCLUDED.quality_score,
-            status = EXCLUDED.status,
-            transacted = EXCLUDED.transacted,
-            execution_enabled = EXCLUDED.execution_enabled,
-            planned_units = EXCLUDED.planned_units,
-            risk_amount = EXCLUDED.risk_amount,
-            account_currency = EXCLUDED.account_currency,
-            notional_account = EXCLUDED.notional_account,
-            order_id = EXCLUDED.order_id,
-            take_profit_order_id = EXCLUDED.take_profit_order_id,
-            stop_loss_order_id = EXCLUDED.stop_loss_order_id,
-            note = EXCLUDED.note,
-            executed_at = EXCLUDED.executed_at,
-            opened_at = EXCLUDED.opened_at,
-            opened_price = EXCLUDED.opened_price,
-            open_units = EXCLUDED.open_units,
-            remaining_units = EXCLUDED.remaining_units,
-            fill_count = EXCLUDED.fill_count,
-            last_fill_at = EXCLUDED.last_fill_at,
-            broker_order_status = EXCLUDED.broker_order_status,
-            exit_signal_at = EXCLUDED.exit_signal_at,
-            exit_signal_reason = EXCLUDED.exit_signal_reason,
-            exit_signal_price = EXCLUDED.exit_signal_price,
-            closed_at = EXCLUDED.closed_at,
-            closed_price = EXCLUDED.closed_price,
-            close_reason = EXCLUDED.close_reason,
-            close_source = EXCLUDED.close_source,
-            pnl_pips = EXCLUDED.pnl_pips,
-            execution_mode = EXCLUDED.execution_mode,
-            ibkr_account = EXCLUDED.ibkr_account,
-            submitted_entry_price = EXCLUDED.submitted_entry_price,
-            submitted_tp_price = EXCLUDED.submitted_tp_price,
-            submitted_sl_price = EXCLUDED.submitted_sl_price,
-            submit_bid = EXCLUDED.submit_bid,
-            submit_ask = EXCLUDED.submit_ask,
-            submit_spread = EXCLUDED.submit_spread,
-            quote_source = EXCLUDED.quote_source,
-            quote_time = EXCLUDED.quote_time,
-            last_updated_at = EXCLUDED.last_updated_at
-        """,
-        (
-            row['signal_id'], row['pair'], row['direction'], row['signal_time'], row['detected_at'],
-            row['entry_price'], row['sl_price'], row['tp_price'], row['zone_upper'], row['zone_lower'],
-            row['zone_strength'], row['zone_type'], row['quality_score'], row['status'], row['transacted'],
-            row['execution_enabled'], row['planned_units'], row['risk_amount'], row['account_currency'],
-            row['notional_account'], row['order_id'], row['take_profit_order_id'],
-            row['stop_loss_order_id'], row['note'], row['executed_at'], row['opened_at'],
-            row['opened_price'], row['open_units'], row['remaining_units'], row['fill_count'],
-            row['last_fill_at'], row['broker_order_status'], row['exit_signal_at'], row['exit_signal_reason'],
-            row['exit_signal_price'], row['closed_at'], row['closed_price'], row['close_reason'],
-            row['close_source'], row['pnl_pips'], row['execution_mode'], row['ibkr_account'],
-            row['submitted_entry_price'], row['submitted_tp_price'], row['submitted_sl_price'],
-            row['submit_bid'], row['submit_ask'], row['submit_spread'], row['quote_source'], row['quote_time'],
-            row['last_updated_at'],
-        ),
-    )
-
-
-def _normalize_units(value) -> int:
-    """Normalize a broker quantity to a non-negative integer."""
-
-    try:
-        return int(abs(float(value or 0.0)))
-    except (TypeError, ValueError):
-        return 0
-
-
 def load_detected_signal_fills(
     signal_id: str,
     *,
@@ -1102,430 +778,62 @@ def load_detected_signal_fills(
         conn.close()
 
 
-def _record_signal_fill_conn(conn, signal_row: dict, fill: dict, *, recorded_at: str) -> bool:
-    """Insert one parent-order fill row if it has not been seen before."""
-
-    exec_id = (fill.get('exec_id') or '').strip()
-    if not exec_id:
-        return False
-
-    fill_units = _normalize_units(fill.get('shares'))
-    if fill_units <= 0:
-        return False
-
-    fill_time = fill.get('time')
-    normalized_fill_time = (
-        _normalize_ts(pd.Timestamp(fill_time))
-        if fill_time is not None
-        else None
-    )
-
-    conn.execute(
-        """
-        INSERT INTO detected_signal_fill (
-            exec_id, signal_id, pair, direction, order_id, fill_time,
-            fill_price, fill_units, cum_qty, avg_price, side, order_ref, recorded_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (exec_id) DO NOTHING
-        """,
-        (
-            exec_id,
-            signal_row['signal_id'],
-            signal_row['pair'],
-            signal_row['direction'],
-            int(fill['order_id']) if fill.get('order_id') is not None else None,
-            normalized_fill_time,
-            float(fill.get('price') or 0.0),
-            fill_units,
-            float(fill.get('cum_qty') or 0.0) if fill.get('cum_qty') is not None else None,
-            float(fill.get('avg_price') or 0.0) if fill.get('avg_price') is not None else None,
-            (fill.get('side') or '').upper() or None,
-            fill.get('order_ref') or None,
-            recorded_at,
-        ),
-    )
-    return conn.total_changes > 0
-
-
-def _signal_fill_summary_conn(conn, signal_id: str) -> dict:
-    """Return aggregated persisted fill statistics for one detected signal."""
-
-    row = conn.execute(
-        """
-        SELECT
-            COALESCE(SUM(fill_units), 0) AS total_units,
-            COALESCE(SUM(fill_price * fill_units), 0.0) AS weighted_sum,
-            COUNT(*) AS fill_count,
-            MIN(fill_time) AS first_fill_at,
-            MAX(fill_time) AS last_fill_at
-        FROM detected_signal_fill
-        WHERE signal_id=%s
-        """,
-        (signal_id,),
-    ).fetchone()
-    total_units = int(row[0] or 0)
-    weighted_sum = float(row[1] or 0.0)
-    fill_count = int(row[2] or 0)
-    average_price = weighted_sum / total_units if total_units > 0 else None
-    return {
-        'open_units': total_units,
-        'opened_price': average_price,
-        'fill_count': fill_count,
-        'opened_at': row[3],
-        'last_fill_at': row[4],
-    }
-
-
-def _derive_signal_execution_status(
-    existing: dict,
-    *,
-    open_units: int,
-    broker_order_status: str | None,
-    order_found: bool = True,
-) -> str:
-    """Derive the internal signal lifecycle from fills plus raw broker status."""
-
-    planned_units = _normalize_units(existing.get('planned_units'))
-    normalized_broker = _normalize_status(broker_order_status or existing.get('status') or 'SUBMITTED')
-
-    # Order vanished from IBKR with no fills in this session.
-    # Only mark CANCELLED if the signal was never filled — if we already
-    # have evidence of a fill (opened_price or prior open_units), the order
-    # DID execute and the fill data is just missing from this Gateway session.
-    previously_filled = (
-        existing.get('opened_price') is not None
-        or _normalize_units(existing.get('open_units')) > 0
-    )
-    if not order_found and open_units <= 0 and not previously_filled:
-        return 'CANCELLED'
-
-    if open_units <= 0 and not previously_filled:
-        return normalized_broker
-
-    # Previously filled but no fills visible in this Gateway session —
-    # preserve the existing status rather than downgrading based on
-    # stale fill data.
-    if open_units <= 0 and previously_filled:
-        existing_status = (existing.get('status') or '').upper()
-        if existing_status in ('OPEN', 'PARTIAL', 'EXIT_SIGNAL', 'FILLED'):
-            return existing_status
-        return 'OPEN'
-
-    if planned_units > 0 and open_units < planned_units:
-        return 'PARTIAL'
-    return 'OPEN'
-
-
 def reconcile_detected_signal_orders(
     *,
     signal_ids: Iterable[str] | None = None,
     db_path: str | None = None,
     live_position_keys: set[str] | None = None,
 ) -> list[dict]:
-    """Reconcile live detected signals with broker fills and parent order status.
+    """Reconcile detected signals from the broker ledger."""
 
-    *live_position_keys* is a set of ``"PAIR:DIRECTION"`` strings for
-    positions that currently exist at IBKR.  Signals matching a live
-    position are never marked closed — IBKR is the source of truth.
-    """
+    from .broker_ledger import reconcile_detected_signal_orders as _reconcile
 
-    from . import ibkr
+    return _reconcile(
+        signal_ids=signal_ids,
+        db_path=db_path,
+        live_position_keys=live_position_keys,
+    )
 
-    db_path = _ensure_table(db_path)
-    now = _normalize_ts(pd.Timestamp.now('UTC'))
-    conn = _connect(db_path)
-    try:
-        params: list[object] = []
-        query = """
-            SELECT *
-            FROM detected_signal
-            WHERE transacted=1
-              AND order_id IS NOT NULL
-              AND closed_at IS NULL
-              AND status IN ('SUBMITTED', 'PRESUBMITTED', 'FILLED', 'PARTIAL', 'OPEN', 'EXIT_SIGNAL')
-        """
-        if signal_ids is not None:
-            signal_ids = [str(signal_id) for signal_id in signal_ids if signal_id]
-            if not signal_ids:
-                return []
-            query += " AND signal_id IN ({})".format(",".join(["%s"] * len(signal_ids)))
-            params.extend(signal_ids)
 
-        cursor = conn.execute(query, params)
-        rows = [_row_to_dict(cursor, row) for row in cursor.fetchall()]
-        if not rows:
-            return []
+def reconcile_broker_ledger(
+    *,
+    signal_ids: Iterable[str] | None = None,
+    db_path: str | None = None,
+    live_position_keys: set[str] | None = None,
+) -> dict:
+    """Fetch IBKR state and upsert the local broker ledger."""
 
-        order_ids = {
-            int(row['order_id'])
-            for row in rows
-            if row.get('order_id') is not None
-        }
-        # Also collect bracket child order IDs (TP/SL) so we can detect
-        # closing fills that happened while the server was offline.
-        child_order_ids: set[int] = set()
-        for row in rows:
-            for key in ('take_profit_order_id', 'stop_loss_order_id'):
-                raw = row.get(key)
-                if raw is not None:
-                    child_order_ids.add(int(raw))
+    from .broker_ledger import reconcile_broker_ledger as _reconcile
 
-        all_fetch_ids = order_ids | child_order_ids
-        fills_by_order: dict[int, list[dict]] = {}
-        for fill in ibkr.fetch_fx_fills(order_ids=all_fetch_ids):
-            order_id = fill.get('order_id')
-            if order_id is None:
-                continue
-            fills_by_order.setdefault(int(order_id), []).append(fill)
+    return _reconcile(
+        signal_ids=signal_ids,
+        db_path=db_path,
+        live_position_keys=live_position_keys,
+    )
 
-        statuses_by_order = {
-            int(snapshot['order_id']): snapshot
-            for snapshot in ibkr.fetch_fx_order_statuses(order_ids=all_fetch_ids)
-            if snapshot.get('order_id') is not None
-        }
 
-        # Pre-fetch completed orders for bracket children so we can resolve
-        # close price/reason even when execution reports have been purged.
-        completed_by_order: dict[int, dict] = {}
-        if child_order_ids:
-            for completed in ibkr.fetch_completed_fx_orders(order_ids=child_order_ids):
-                oid = completed.get('order_id')
-                if oid is not None:
-                    completed_by_order[int(oid)] = completed
+def has_active_broker_activity_for_order_ref(
+    order_ref: str,
+    *,
+    db_path: str | None = None,
+    check_broker: bool = True,
+) -> bool:
+    """Return True if this strategy orderRef already exists locally or at IBKR."""
 
-        updated_rows: list[dict] = []
-        for existing in rows:
-            order_id = existing.get('order_id')
-            if order_id is None:
-                continue
-            for fill in fills_by_order.get(int(order_id), []):
-                _record_signal_fill_conn(conn, existing, fill, recorded_at=now)
+    from .broker_ledger import has_active_broker_activity_for_order_ref as _has_activity
 
-            fill_summary = _signal_fill_summary_conn(conn, existing['signal_id'])
-            broker_snapshot = statuses_by_order.get(int(order_id), {})
-            broker_order_status = broker_snapshot.get('status') or existing.get('broker_order_status')
-            open_units = max(
-                _normalize_units(fill_summary['open_units']),
-                _normalize_units(existing.get('open_units')),
-            )
-            planned_units = _normalize_units(existing.get('planned_units'))
-            if open_units <= 0:
-                open_units = _normalize_units(broker_snapshot.get('filled_units'))
+    return _has_activity(order_ref, db_path=db_path, check_broker=check_broker)
 
-            if planned_units > 0:
-                computed_remaining_units = max(planned_units - open_units, 0)
-            else:
-                computed_remaining_units = _normalize_units(broker_snapshot.get('remaining_units'))
 
-            if broker_snapshot.get('remaining_units') is not None:
-                broker_remaining_units = _normalize_units(broker_snapshot.get('remaining_units'))
-                if open_units > 0:
-                    remaining_units = min(computed_remaining_units, broker_remaining_units)
-                else:
-                    remaining_units = broker_remaining_units
-            else:
-                remaining_units = computed_remaining_units
+def load_open_broker_execution_positions(
+    *,
+    db_path: str | None = None,
+) -> list[dict]:
+    """Return net open exposure derived from linked broker executions."""
 
-            opened_price = fill_summary['opened_price']
-            if opened_price is None and existing.get('opened_price') is not None:
-                opened_price = float(existing['opened_price'])
-            opened_at = fill_summary['opened_at'] or existing.get('opened_at')
-            last_fill_at = fill_summary['last_fill_at'] or existing.get('last_fill_at')
-            fill_count = max(int(fill_summary['fill_count'] or 0), int(existing.get('fill_count') or 0))
-            order_found = int(order_id) in statuses_by_order
-            status = _derive_signal_execution_status(
-                existing,
-                open_units=open_units,
-                broker_order_status=broker_order_status,
-                order_found=order_found,
-            )
+    from .broker_ledger import load_open_broker_execution_positions as _load_positions
 
-            previously_filled = (
-                existing.get('opened_price') is not None
-                or _normalize_units(existing.get('open_units')) > 0
-            )
-            if open_units > 0 and planned_units > 0 and open_units < planned_units:
-                note = f"partial fill {open_units:,}/{planned_units:,}"
-            elif open_units > 0 and planned_units > 0:
-                note = f"filled {open_units:,}/{planned_units:,}"
-            elif not order_found and open_units <= 0 and not previously_filled:
-                note = 'order not found in broker (rejected/cancelled)'
-            elif broker_order_status:
-                note = f"broker status {broker_order_status}"
-            else:
-                note = existing.get('note')
-
-            # ----- Bracket fill resolution for offline closures -----
-            # When the signal was filled (open_units > 0) but the parent
-            # order has vanished from IBKR, the bracket SL/TP likely
-            # executed while the server was offline.  Check child order
-            # fills and completed orders to resolve the close properly
-            # instead of leaving it for sync_positions to mark as
-            # EXTERNAL_CLOSE with no price.
-            closed_at = existing.get('closed_at')
-            closed_price = existing.get('closed_price')
-            close_reason = existing.get('close_reason')
-            close_source = existing.get('close_source')
-            pnl_pips = existing.get('pnl_pips')
-
-            # Skip bracket-close resolution if the position still exists at IBKR.
-            # IBKR is the source of truth — a position that is still live should
-            # never be marked closed based on stale fill records.
-            _sig_pos_key = f"{existing['pair']}:{existing['direction']}"
-            _position_still_live = (
-                live_position_keys is not None and _sig_pos_key in live_position_keys
-            )
-
-            if (
-                open_units > 0
-                and not order_found
-                and closed_at is None
-                and status in ('OPEN', 'PARTIAL', 'EXIT_SIGNAL')
-                and not _position_still_live
-            ):
-                tp_order_id = (
-                    int(existing['take_profit_order_id'])
-                    if existing.get('take_profit_order_id') is not None
-                    else None
-                )
-                sl_order_id = (
-                    int(existing['stop_loss_order_id'])
-                    if existing.get('stop_loss_order_id') is not None
-                    else None
-                )
-
-                bracket_close_price = None
-                bracket_close_reason = None
-                bracket_close_source = None
-                bracket_close_time = None
-
-                # 1) Check execution reports (fills) for child orders
-                if tp_order_id is not None:
-                    tp_fills = fills_by_order.get(tp_order_id, [])
-                    if tp_fills:
-                        latest = tp_fills[-1]
-                        bracket_close_price = latest.get('avg_price') or latest.get('price')
-                        bracket_close_reason = 'TP'
-                        bracket_close_source = 'broker_tp'
-                        bracket_close_time = latest.get('time')
-
-                if bracket_close_price is None and sl_order_id is not None:
-                    sl_fills = fills_by_order.get(sl_order_id, [])
-                    if sl_fills:
-                        latest = sl_fills[-1]
-                        bracket_close_price = latest.get('avg_price') or latest.get('price')
-                        bracket_close_reason = 'SL'
-                        bracket_close_source = 'broker_sl'
-                        bracket_close_time = latest.get('time')
-
-                # 2) Fallback: check completed orders when fills are absent
-                if bracket_close_price is None and tp_order_id is not None:
-                    tp_completed = completed_by_order.get(tp_order_id)
-                    if tp_completed and (tp_completed.get('status') or '').upper() == 'FILLED':
-                        bracket_close_price = tp_completed.get('avg_fill_price') or None
-                        bracket_close_reason = 'TP'
-                        bracket_close_source = 'broker_tp'
-
-                if bracket_close_price is None and sl_order_id is not None:
-                    sl_completed = completed_by_order.get(sl_order_id)
-                    if sl_completed and (sl_completed.get('status') or '').upper() == 'FILLED':
-                        bracket_close_price = sl_completed.get('avg_fill_price') or None
-                        bracket_close_reason = 'SL'
-                        bracket_close_source = 'broker_sl'
-
-                # 3) Last resort: unmatched fills on the same pair in the
-                #    opposite direction (manual close while offline)
-                if bracket_close_price is None:
-                    expected_close_side = (
-                        'SELL' if existing['direction'] == 'LONG' else 'BUY'
-                    )
-                    opened_at_ts = existing.get('opened_at') or existing.get('executed_at') or existing.get('signal_time')
-                    pair_fills = ibkr.fetch_fx_fills(
-                        pair=existing['pair'],
-                        since=opened_at_ts,
-                    )
-                    known_ids = {
-                        oid
-                        for oid in (int(order_id), tp_order_id, sl_order_id)
-                        if oid is not None
-                    }
-                    manual_fills = [
-                        f for f in pair_fills
-                        if (f.get('side') or '').upper() == expected_close_side
-                        and f.get('order_id') not in known_ids
-                    ]
-                    if manual_fills:
-                        latest = manual_fills[-1]
-                        bracket_close_price = latest.get('avg_price') or latest.get('price')
-                        bracket_close_reason = 'MANUAL'
-                        bracket_close_source = 'broker_fill'
-                        bracket_close_time = latest.get('time')
-
-                # Apply the resolved bracket close
-                if bracket_close_price is not None:
-                    closed_price = float(bracket_close_price)
-                    close_reason = bracket_close_reason
-                    close_source = bracket_close_source
-                    closed_at = (
-                        _normalize_ts(pd.Timestamp(bracket_close_time))
-                        if bracket_close_time is not None
-                        else now
-                    )
-                    # Compute PnL
-                    resolved_opened_price = (
-                        float(opened_price)
-                        if opened_price is not None
-                        else (
-                            float(existing['opened_price'])
-                            if existing.get('opened_price') is not None
-                            else float(existing['entry_price'])
-                        )
-                    )
-                    pip = _pair_pip(existing['pair'])
-                    if existing['direction'] == 'LONG':
-                        pnl_pips = (closed_price - resolved_opened_price) / pip
-                    else:
-                        pnl_pips = (resolved_opened_price - closed_price) / pip
-                    status = 'CLOSED'
-                    note = f"bracket {close_reason} filled @ {closed_price:.5f}"
-                    _LOGGER.info(
-                        "Reconciled offline bracket close: %s %s %s → %s @ %.5f (%.1f pips)",
-                        existing['pair'], existing['direction'],
-                        existing['signal_id'][:12], close_reason,
-                        closed_price, pnl_pips,
-                    )
-
-            # Close out signals that reached a terminal state
-            if status in ('CANCELLED', 'REJECTED') and closed_at is None:
-                closed_at = now
-
-            merged = _merge_row(
-                existing,
-                status=status,
-                transacted=1,
-                opened_at=opened_at,
-                opened_price=float(opened_price) if opened_price is not None else existing.get('opened_price'),
-                open_units=open_units if open_units > 0 else existing.get('open_units'),
-                remaining_units=remaining_units,
-                fill_count=fill_count,
-                last_fill_at=last_fill_at,
-                broker_order_status=broker_order_status,
-                note=note,
-                closed_at=closed_at,
-                closed_price=closed_price,
-                close_reason=close_reason,
-                close_source=close_source,
-                pnl_pips=pnl_pips,
-                last_updated_at=now,
-            )
-            _replace_row_conn(conn, merged)
-            updated_rows.append(merged)
-
-        conn.commit()
-        return updated_rows
-    finally:
-        conn.close()
+    return _load_positions(db_path=db_path)
 
 
 def record_pair_scan_log(
@@ -1680,15 +988,6 @@ def _resolve_execution_mode(execute_orders: bool) -> str:
         return 'unknown'
 
 
-def _normalize_status(status: str) -> str:
-    """Normalize execution state labels for storage."""
-
-    normalized = (status or "").strip().upper()
-    if not normalized:
-        return "SUBMITTED"
-    return normalized
-
-
 def record_execution_results(
     signals: Iterable,
     size_plans: Optional[Iterable],
@@ -1771,8 +1070,22 @@ def record_execution_results(
                     last_updated_at=now,
                 )
 
-            status = _normalize_status(result.status)
-            transacted = 0 if status in {"SKIPPED", "FAILED"} else 1
+            incoming_status = _normalize_status(result.status)
+            preserve_existing_execution = (
+                incoming_status in _NON_TRANSACTIONAL_RESULT_STATUSES
+                and _existing_has_execution_evidence(existing)
+                and not _result_has_execution_evidence(result)
+            )
+            status = (
+                _status_from_existing_execution(existing)
+                if preserve_existing_execution
+                else incoming_status
+            )
+            transacted = (
+                int(existing.get("transacted") or 0) or 1
+                if preserve_existing_execution
+                else (0 if status in _NON_TRANSACTIONAL_RESULT_STATUSES else 1)
+            )
             merged = _merge_row(
                 existing,
                 status=status,
@@ -1792,8 +1105,12 @@ def record_execution_results(
                     if getattr(result, "stop_loss_order_id", None) is not None
                     else existing.get("stop_loss_order_id")
                 ),
-                note=result.note,
-                executed_at=now,
+                note=existing.get("note") if preserve_existing_execution else result.note,
+                executed_at=(
+                    existing.get("executed_at")
+                    if preserve_existing_execution
+                    else now
+                ),
                 opened_at=(
                     existing.get("opened_at")
                     if existing and existing.get("opened_at")

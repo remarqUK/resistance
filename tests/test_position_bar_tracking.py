@@ -185,8 +185,9 @@ class PositionBarTrackingTests(unittest.TestCase):
 
         conn = Mock()
 
-        with patch('fx_sr.positions.reconcile_detected_signal_orders', return_value=[]), \
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
                 patch('fx_sr.positions._load_trades', return_value={}), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_positions', return_value=[{
                     'pair': 'EURUSD',
                     'size': 10000.0,
@@ -202,6 +203,189 @@ class PositionBarTrackingTests(unittest.TestCase):
         self.assertEqual(saved_trade.entry_time, pd.Timestamp('2026-02-03 10:00:05+00:00'))
         self.assertAlmostEqual(saved_trade.risk, 0.0052)
         self.assertAlmostEqual(tracked['EURUSD:LONG']['trade'].entry_price, 1.1002)
+
+    def test_sync_positions_tracks_broker_execution_exposure_when_positions_empty(self):
+        signal_row = {
+            'signal_id': 'sig-usdjpy',
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'signal_time': '2026-02-03 10:00:00+00:00',
+            'opened_at': '2026-02-03 10:00:05+00:00',
+            'opened_price': 159.40,
+            'entry_price': 159.30,
+            'submitted_entry_price': 159.40,
+            'sl_price': 159.00,
+            'submitted_sl_price': 159.00,
+            'tp_price': 160.00,
+            'submitted_tp_price': 160.00,
+            'zone_upper': 159.45,
+            'zone_lower': 159.17,
+            'zone_strength': 'major',
+            'quality_score': 0.8,
+            'status': 'OPEN',
+        }
+        broker_position = {
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'size': 40000.0,
+            'avg_cost': 159.40,
+            'position_source': 'broker_execution',
+            'signal_id': 'sig-usdjpy',
+            'broker_fill_count': 2,
+        }
+        conn = Mock()
+
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
+                patch('fx_sr.positions._load_trades', return_value={}), \
+                patch('fx_sr.positions.ibkr.fetch_positions', return_value=[]), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[broker_position]), \
+                patch('fx_sr.positions.load_neutralization_positions', return_value=set()), \
+                patch('fx_sr.positions.ibkr.fetch_open_order_counts', return_value={}), \
+                patch('fx_sr.positions._resubmit_missing_brackets'), \
+                patch('fx_sr.positions._tracking_db_transaction', return_value=_tracking_transaction(conn)), \
+                patch('fx_sr.positions.claim_signal_for_position_conn', return_value=signal_row), \
+                patch('fx_sr.positions._save_trade_conn') as save_trade_mock:
+            tracked = sync_positions(StrategyParams())
+
+        self.assertIn('USDJPY:LONG', tracked)
+        self.assertAlmostEqual(tracked['USDJPY:LONG']['ibkr_size'], 40000.0)
+        self.assertAlmostEqual(tracked['USDJPY:LONG']['ibkr_avg_cost'], 159.40)
+        self.assertEqual(tracked['USDJPY:LONG']['position_source'], 'broker_execution')
+        save_trade_mock.assert_called_once()
+        saved_trade = save_trade_mock.call_args.args[2]
+        self.assertAlmostEqual(saved_trade.entry_price, 159.40)
+
+    def test_sync_positions_does_not_submit_brackets_for_broker_execution_only_position(self):
+        signal_row = {
+            'signal_id': 'sig-usdjpy',
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'signal_time': '2026-02-03 10:00:00+00:00',
+            'opened_at': '2026-02-03 10:00:05+00:00',
+            'opened_price': 159.40,
+            'entry_price': 159.30,
+            'submitted_entry_price': 159.40,
+            'sl_price': 159.00,
+            'submitted_sl_price': 159.00,
+            'tp_price': 160.00,
+            'submitted_tp_price': 160.00,
+            'zone_upper': 159.45,
+            'zone_lower': 159.17,
+            'zone_strength': 'major',
+            'quality_score': 0.8,
+            'status': 'OPEN',
+        }
+        broker_position = {
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'size': 20802.0,
+            'avg_cost': 159.39,
+            'position_source': 'broker_execution',
+            'signal_id': 'sig-usdjpy',
+            'broker_fill_count': 1,
+        }
+        conn = Mock()
+
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
+                patch('fx_sr.positions._load_trades', return_value={}), \
+                patch('fx_sr.positions.ibkr.fetch_positions', return_value=[]), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[broker_position]), \
+                patch('fx_sr.positions.load_neutralization_positions', return_value=set()), \
+                patch('fx_sr.positions.ibkr.fetch_open_order_counts', return_value={'USDJPY': 2}), \
+                patch('fx_sr.positions._resubmit_missing_brackets') as resubmit_mock, \
+                patch('fx_sr.positions._cancel_orders_for_pairs') as cancel_pairs_mock, \
+                patch('fx_sr.positions._tracking_db_transaction', return_value=_tracking_transaction(conn)), \
+                patch('fx_sr.positions.claim_signal_for_position_conn', return_value=signal_row), \
+                patch('fx_sr.positions._save_trade_conn'):
+            tracked = sync_positions(StrategyParams())
+
+        self.assertIn('USDJPY:LONG', tracked)
+        self.assertEqual(tracked['USDJPY:LONG']['position_source'], 'broker_execution')
+        resubmit_mock.assert_not_called()
+        cancel_pairs_mock.assert_not_called()
+
+    def test_resubmitted_brackets_keep_strategy_order_ref(self):
+        signal_row = {
+            'signal_id': 'sig-usdjpy',
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'signal_time': '2026-02-03 10:00:00+00:00',
+            'submitted_tp_price': 160.0,
+            'submitted_sl_price': 159.0,
+            'tp_price': 160.0,
+            'sl_price': 159.0,
+        }
+
+        with patch('fx_sr.positions.ibkr.fetch_open_order_counts', return_value={}), \
+                patch('fx_sr.positions.ibkr.submit_bracket_for_existing_position', return_value={
+                    'take_profit_order_id': 301,
+                    'stop_loss_order_id': 302,
+                }) as submit_mock, \
+                patch('fx_sr.positions._update_signal_bracket_ids'):
+            from fx_sr.positions import _resubmit_missing_brackets
+            _resubmit_missing_brackets(signal_row, 10000.0)
+
+        submit_mock.assert_called_once_with(
+            pair='USDJPY',
+            direction='LONG',
+            quantity=10000,
+            take_profit_price=160.0,
+            stop_loss_price=159.0,
+            order_ref='fxsr:USDJPY:LONG:20260203100000',
+        )
+
+    def test_sync_positions_prefers_live_net_position_over_opposing_broker_ledger(self):
+        signal_row = {
+            'signal_id': 'sig-usdjpy-short',
+            'pair': 'USDJPY',
+            'direction': 'SHORT',
+            'signal_time': '2026-02-03 10:00:00+00:00',
+            'opened_at': '2026-02-03 10:00:05+00:00',
+            'opened_price': 159.73,
+            'entry_price': 159.73,
+            'submitted_entry_price': 159.73,
+            'sl_price': 160.27,
+            'submitted_sl_price': 160.27,
+            'tp_price': 159.15,
+            'submitted_tp_price': 159.15,
+            'zone_upper': 160.00,
+            'zone_lower': 159.50,
+            'zone_strength': 'major',
+            'quality_score': 0.8,
+            'status': 'OPEN',
+        }
+        live_position = {
+            'pair': 'USDJPY',
+            'size': -416044.0,
+            'avg_cost': 159.73005,
+        }
+        stale_broker_position = {
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'size': 104011.0,
+            'avg_cost': 159.40598,
+            'position_source': 'broker_execution',
+            'signal_id': 'stale-long',
+            'broker_fill_count': 5,
+        }
+        conn = Mock()
+
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
+                patch('fx_sr.positions._load_trades', return_value={}), \
+                patch('fx_sr.positions.ibkr.fetch_positions', return_value=[live_position]), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[stale_broker_position]), \
+                patch('fx_sr.positions.load_neutralization_positions', return_value=set()), \
+                patch('fx_sr.positions.ibkr.fetch_open_order_counts', return_value={}), \
+                patch('fx_sr.positions._resubmit_missing_brackets'), \
+                patch('fx_sr.positions._tracking_db_transaction', return_value=_tracking_transaction(conn)), \
+                patch('fx_sr.positions.claim_signal_for_position_conn', return_value=signal_row), \
+                patch('fx_sr.positions._save_trade_conn') as save_trade_mock:
+            tracked = sync_positions(StrategyParams())
+
+        self.assertEqual(set(tracked.keys()), {'USDJPY:SHORT'})
+        self.assertAlmostEqual(tracked['USDJPY:SHORT']['ibkr_size'], -416044.0)
+        self.assertEqual(tracked['USDJPY:SHORT']['position_source'], 'ibkr_position')
+        save_trade_mock.assert_called_once()
 
     def test_sync_positions_marks_broker_take_profit_close(self):
         tracked = {
@@ -230,8 +414,9 @@ class PositionBarTrackingTests(unittest.TestCase):
 
         conn = Mock()
 
-        with patch('fx_sr.positions.reconcile_detected_signal_orders', return_value=[]), \
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
                 patch('fx_sr.positions._load_trades', return_value=tracked), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_positions', return_value=[]), \
                 patch('fx_sr.positions.load_detected_signal', return_value=signal_row), \
                 patch('fx_sr.positions.ibkr.fetch_fx_fills', return_value=[{
@@ -324,8 +509,9 @@ class PositionBarTrackingTests(unittest.TestCase):
         }
         conn = Mock()
 
-        with patch('fx_sr.positions.reconcile_detected_signal_orders', return_value=[]), \
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
                 patch('fx_sr.positions._load_trades', return_value=tracked), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_positions', return_value=[{
                     'pair': 'EURUSD',
                     'size': 10000.0,
@@ -369,8 +555,9 @@ class PositionBarTrackingTests(unittest.TestCase):
 
         conn = Mock()
 
-        with patch('fx_sr.positions.reconcile_detected_signal_orders', return_value=[]), \
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
                 patch('fx_sr.positions._load_trades', return_value=tracked), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_positions', return_value=[]), \
                 patch('fx_sr.positions._resolve_closed_position_details', return_value=('MANUAL', 1.1100, 'broker_fill')), \
                 patch('fx_sr.positions._tracking_db_transaction', return_value=_tracking_transaction(conn)), \
@@ -409,8 +596,9 @@ class PositionBarTrackingTests(unittest.TestCase):
 
         conn = Mock()
 
-        with patch('fx_sr.positions.reconcile_detected_signal_orders', return_value=[]), \
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
                 patch('fx_sr.positions._load_trades', return_value=tracked), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_positions', return_value=[]), \
                 patch('fx_sr.positions.load_detected_signal', return_value=signal_row), \
                 patch('fx_sr.positions.ibkr.fetch_fx_fills', return_value=[]), \
@@ -449,8 +637,9 @@ class PositionBarTrackingTests(unittest.TestCase):
         }
         conn = Mock()
 
-        with patch('fx_sr.positions.reconcile_detected_signal_orders', return_value=[]), \
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
                 patch('fx_sr.positions._load_trades', return_value={}), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[]), \
                 patch('fx_sr.positions.ibkr.fetch_positions', return_value=[{
                     'pair': 'EURUSD',
                     'size': 10000.0,

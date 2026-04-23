@@ -1,9 +1,10 @@
 import asyncio
 import json
 import contextlib
+from datetime import date
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pandas as pd
 from aiohttp import web
@@ -14,6 +15,7 @@ from fx_sr.live_history import (
     load_detected_signal,
     record_detected_signals,
     record_execution_results,
+    record_exit_signal,
     stop_background_writer,
 )
 from fx_sr.live_web import (
@@ -142,6 +144,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.hub._scan_executor.shutdown(wait=True)
 
     async def test_hourly_bar_complete_uses_finalized_bar_and_persists_tracking(self):
+        self.hub._backfill_done = True
         captured = {}
 
         def _capture_signal_eval(pair, tracked_positions=None, blocked_pairs=None, price=None, hourly_df=None):
@@ -199,7 +202,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             exit_price=1.0949,
         )
 
-    async def test_tick_exit_rejection_clears_persisted_exit_intent(self):
+    async def test_tick_exit_rejection_latches_exit_intent_without_retry_loop(self):
         db_ctx = temporary_test_database()
         db_path = db_ctx.__enter__()
         stop_background_writer()
@@ -244,22 +247,130 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
                 'exit_price': 1.1015,
             }
 
-            with patch('fx_sr.live_history.get_db_path', return_value=db_path), \
-                    patch.object(self.hub._scanner, 'check_tick_exits', return_value=[alert]), \
-                    patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
-                    patch('fx_sr.live_web.ibkr.submit_fx_market_order', return_value={'status': 'Inactive', 'order_id': 555}):
+            def _record_exit(signal_id_arg, *, exit_reason, exit_price):
+                record_exit_signal(
+                    signal_id_arg,
+                    exit_reason=exit_reason,
+                    exit_price=exit_price,
+                    db_path=db_path,
+                )
+
+            with patch.object(self.hub._scanner, 'check_tick_exits', return_value=[alert]), \
+                    patch('fx_sr.live_web.record_exit_signal', side_effect=_record_exit), \
+                    patch('fx_sr.live_web.cancel_bracket_children', return_value=set()) as cancel_mock, \
+                    patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={'status': 'FAILED', 'order_id': 555, 'error': 'inactive'}) as liquidate_mock:
                 await self.hub._handle_quote_update('EURUSD', 1.1016)
+                await self.hub._handle_quote_update('EURUSD', 1.1017)
 
             row = load_detected_signal(signal_id, db_path=db_path)
-            self.assertEqual(row['status'], 'OPEN')
-            self.assertIsNone(row['exit_signal_reason'])
-            self.assertIsNone(row['exit_signal_at'])
-            self.assertIsNone(row['exit_signal_price'])
-            self.assertNotIn('EURUSD:LONG', self.hub._tick_exit_alerted)
+            self.assertEqual(row['status'], 'EXIT_SIGNAL')
+            self.assertEqual(row['exit_signal_reason'], 'TIME')
+            self.assertIsNotNone(row['exit_signal_at'])
+            self.assertEqual(row['exit_signal_price'], 1.1015)
+            self.assertIn('EURUSD:LONG', self.hub._tick_exit_alerted)
             self.assertNotIn('EURUSD:LONG', self.hub._inflight_close_orders)
+            self.assertIn('EURUSD:LONG', self.hub._failed_close_orders)
+            cancel_mock.assert_not_called()
+            self.assertEqual(liquidate_mock.call_count, 1)
         finally:
             stop_background_writer()
             db_ctx.__exit__(None, None, None)
+
+    async def test_manual_close_uses_verified_live_ibkr_size(self):
+        self.hub._execution_available = True
+        self.hub._tracked['EURUSD:LONG']['ibkr_size'] = 25000
+
+        with patch('fx_sr.live_web.ibkr.fetch_positions', return_value=[{
+                'pair': 'EURUSD',
+                'size': 10000.0,
+                'avg_cost': 1.1002,
+            }]), \
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()) as cancel_mock, \
+                patch('fx_sr.live_web.ibkr.submit_fx_market_order', return_value={
+                    'status': 'Submitted',
+                    'order_id': 123,
+                    'avg_fill_price': None,
+                }) as submit_mock, \
+                patch('fx_sr.live_web.sync_positions', return_value=self.hub._tracked.copy()):
+            result = await self.hub.close_tracked_position(pair='EURUSD', direction='LONG')
+
+        cancel_mock.assert_called_once_with('sig-1')
+        submit_mock.assert_called_once_with(
+            pair='EURUSD',
+            direction='SHORT',
+            quantity=10000,
+            order_ref=ANY,
+        )
+        self.assertEqual(result['result']['status'], 'SUBMITTED')
+        self.assertEqual(result['result']['size'], 10000)
+
+    async def test_manual_close_refuses_conflicting_live_ibkr_direction(self):
+        self.hub._execution_available = True
+        self.hub._tracked['EURUSD:LONG']['ibkr_size'] = 10000
+
+        with patch('fx_sr.live_web.ibkr.fetch_positions', return_value=[{
+                'pair': 'EURUSD',
+                'size': -10000.0,
+                'avg_cost': 1.1002,
+            }]), \
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()) as cancel_mock, \
+                patch('fx_sr.live_web.ibkr.submit_fx_market_order') as submit_mock:
+            with self.assertRaises(RuntimeError) as ctx:
+                await self.hub.close_tracked_position(pair='EURUSD', direction='LONG')
+
+        self.assertIn('IBKR reports EURUSD SHORT 10,000 units', str(ctx.exception))
+        cancel_mock.assert_not_called()
+        submit_mock.assert_not_called()
+
+    async def test_liquidate_live_position_uses_live_ibkr_reduce_only_helper(self):
+        self.hub._execution_available = True
+        self.hub._execution_paused = True
+
+        with patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={
+                'pair': 'EURUSD',
+                'direction': 'SHORT',
+                'close_direction': 'LONG',
+                'quantity': 416044,
+                'order_id': 777,
+                'status': 'Submitted',
+                'avg_fill_price': None,
+                'cancelled_order_ids': [8725, 8726],
+                'remaining_open_orders': [],
+            }) as liquidate_mock, \
+                patch('fx_sr.live_web.sync_positions', return_value={}) as sync_mock, \
+                patch.object(self.hub, '_export_state', return_value={'state': 'ok'}):
+            result = await self.hub.liquidate_live_position(pair='EURUSD', direction='SHORT')
+
+        liquidate_mock.assert_called_once_with(
+            pair='EURUSD',
+            expected_direction='SHORT',
+            order_ref=ANY,
+        )
+        sync_mock.assert_called_once()
+        self.assertEqual(result['result']['status'], 'SUBMITTED')
+        self.assertEqual(result['result']['close_direction'], 'LONG')
+        self.assertEqual(result['result']['size'], 416044)
+        self.assertEqual(result['result']['cancelled_order_ids'], [8725, 8726])
+
+    async def test_liquidate_live_position_does_not_sync_after_remaining_orders_failure(self):
+        self.hub._execution_available = True
+
+        with patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={
+                'pair': 'EURUSD',
+                'direction': 'SHORT',
+                'size': -416044,
+                'status': 'FAILED',
+                'error': '2 working EURUSD order(s) are still visible after cancellation; retry once they are gone.',
+                'cancelled_order_ids': [8725, 8726],
+                'remaining_open_orders': [{'order_id': 8725, 'status': 'PendingCancel'}],
+            }), \
+                patch('fx_sr.live_web.sync_positions') as sync_mock, \
+                patch.object(self.hub, '_export_state', return_value={'state': 'ok'}):
+            result = await self.hub.liquidate_live_position(pair='EURUSD', direction='SHORT')
+
+        sync_mock.assert_not_called()
+        self.assertEqual(result['result']['status'], 'FAILED')
+        self.assertEqual(result['result']['remaining_open_orders'][0]['order_id'], 8725)
 
     async def test_startup_recovery_preserves_original_exit_reason(self):
         self.hub._accumulator.seeded_pairs.add('EURUSD')
@@ -282,14 +393,30 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         ), \
                 patch('fx_sr.positions.sync_positions', return_value=tracked), \
                 patch('fx_sr.live_web.ibkr.fetch_account_net_liquidation', return_value=(10000.0, 'USD')), \
-                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
-                patch('fx_sr.live_web.ibkr.submit_fx_market_order', return_value={'status': 'Submitted', 'order_id': 123}):
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()) as cancel_mock, \
+                patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={'status': 'Submitted', 'order_id': 123, 'quantity': 10000}):
             await self.hub._run_backfill()
 
-        self.assertEqual(
-            self.hub._inflight_close_orders['EURUSD:LONG'],
-            (123, 'TIME', 'sig-1', 1.1015),
-        )
+            cancel_mock.assert_not_called()
+            self.assertEqual(
+                self.hub._inflight_close_orders['EURUSD:LONG'],
+                (123, 'TIME', 'sig-1', 1.1015),
+            )
+
+    async def test_run_backfill_emits_completion_beep(self):
+        with patch.object(
+            self.hub,
+            '_backfill_data',
+            return_value=([], list(self.hub._pair_rows.values()), [], [], 0.0),
+        ), \
+                patch.object(self.hub, '_emit_backfill_complete_beep') as beep_mock, \
+                patch('fx_sr.positions.sync_positions', return_value={}), \
+                patch('fx_sr.live_web.ibkr.fetch_account_net_liquidation', return_value=(10000.0, 'USD')), \
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
+                patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={'status': 'Submitted', 'order_id': 123, 'quantity': 10000}):
+            await self.hub._run_backfill()
+
+        beep_mock.assert_called_once()
 
     async def test_alert_and_execution_buffers_are_bounded(self):
         for idx in range(ALERT_LIMIT + 5):
@@ -486,6 +613,245 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0].status, 'SKIPPED')
         self.assertEqual(results[0].note, 'execution paused')
 
+    async def test_replay_startup_bars_is_single_shot_and_flips_flag(self):
+        """Regression test for the livelock fix.
+
+        The old drain loop iterated ``while True`` until the buffer was
+        empty, but new bars arriving during each drain phase refilled the
+        buffer faster than it drained at production tick rates, so
+        ``_startup_bar_buffering`` never flipped and the persistence thread
+        never started. The fix is to snapshot the buffer and flip the flag
+        *inside the same lock* so new bars post-flip bypass the buffer and
+        go through the main ``_process_realtime_bar`` path.
+        """
+
+        # Arrange: buffer 50 synthetic startup bars and confirm initial state.
+        self.hub._startup_bar_buffering = True
+        self.hub._startup_bar_buffer = []
+        for minute in range(50):
+            ts = pd.Timestamp('2026-03-10 12:00:00', tz='UTC') + pd.Timedelta(seconds=5 * minute)
+            self.hub._startup_bar_buffer.append((
+                ts, minute, 'EURUSD',
+                _bar(ts, 1.1000, 1.1001, 1.0999, 1.1000, 1),
+            ))
+        self.assertTrue(self.hub._startup_bar_buffering)
+        self.assertEqual(len(self.hub._startup_bar_buffer), 50)
+
+        with patch.object(self.hub, '_ingest_realtime_bar', return_value=(1.1000, False)) as ingest_mock, \
+                patch.object(self.hub, '_run_post_ingest_work', new=AsyncMock()) as post_mock:
+            replayed = await self.hub._replay_startup_bars()
+
+            # Flag flipped, buffer empty, every bar processed exactly once.
+            self.assertEqual(replayed, 50)
+            self.assertFalse(
+                self.hub._startup_bar_buffering,
+                'flag must be False after replay, or persistence thread never starts',
+            )
+            self.assertEqual(self.hub._startup_bar_buffer, [])
+            self.assertEqual(ingest_mock.call_count, 50)
+            self.assertEqual(post_mock.await_count, 50)
+
+            # Contract check: bars arriving *after* replay must bypass the
+            # buffer. The main _handle_bar_update path reads
+            # _startup_bar_buffering; if it's False, it calls
+            # _process_realtime_bar directly.
+            post_replay_bar = _bar(
+                pd.Timestamp('2026-03-10 13:00:00', tz='UTC'),
+                1.2000, 1.2001, 1.1999, 1.2000, 1,
+            )
+            await self.hub._handle_bar_update('EURUSD', post_replay_bar)
+            self.assertEqual(
+                self.hub._startup_bar_buffer, [],
+                'bars arriving post-replay must not re-enter the startup buffer',
+            )
+            self.assertEqual(ingest_mock.call_count, 51)
+            self.assertEqual(post_mock.await_count, 51)
+
+    async def test_replay_startup_bars_orders_buffer_before_new_bars(self):
+        self.hub._startup_bar_buffering = True
+        self.hub._startup_bar_buffer = []
+        buffered_times = [
+            pd.Timestamp('2026-03-10 12:00:00', tz='UTC'),
+            pd.Timestamp('2026-03-10 12:00:05', tz='UTC'),
+            pd.Timestamp('2026-03-10 12:00:10', tz='UTC'),
+        ]
+        for idx, ts in enumerate(buffered_times):
+            self.hub._startup_bar_buffer.append((
+                ts, idx, 'EURUSD',
+                _bar(ts, 1.1000, 1.1001, 1.0999, 1.1000, 1),
+            ))
+
+        processed_times = []
+
+        def _capture_ingest(_pair, bar):
+            processed_times.append(pd.Timestamp(bar.time))
+            return float(getattr(bar, 'close', 0) or 0), False
+
+        async def _slow_post_work(_pair, _price, _minute_completed):
+            await asyncio.sleep(0.01)
+
+        with patch.object(self.hub, '_ingest_realtime_bar', side_effect=_capture_ingest), \
+                patch.object(self.hub, '_run_post_ingest_work', side_effect=_slow_post_work):
+            replay_task = asyncio.create_task(self.hub._replay_startup_bars())
+
+            fresh_time = pd.Timestamp('2026-03-10 12:00:15', tz='UTC')
+            fresh_task = asyncio.create_task(
+                self.hub._handle_bar_update(
+                    'EURUSD',
+                    _bar(fresh_time, 1.2000, 1.2001, 1.1999, 1.2000, 1),
+                )
+            )
+            await asyncio.wait_for(asyncio.gather(replay_task, fresh_task), timeout=1)
+
+        self.assertEqual(processed_times, buffered_times + [fresh_time])
+
+    async def test_quote_update_delay_does_not_block_accumulator_ingest(self):
+        self.hub._startup_bar_buffering = False
+        self.hub._realtime_bars_enabled = True
+        first_quote_started = asyncio.Event()
+        release_first_quote = asyncio.Event()
+        quote_calls = 0
+
+        async def _slow_first_quote(_pair, _price):
+            nonlocal quote_calls
+            quote_calls += 1
+            if quote_calls == 1:
+                first_quote_started.set()
+                await release_first_quote.wait()
+
+        with patch.object(self.hub, '_handle_quote_update', side_effect=_slow_first_quote), \
+                patch.object(self.hub, '_handle_minute_bar_complete', new=AsyncMock()):
+            first_task = asyncio.create_task(self.hub._handle_bar_update(
+                'EURUSD',
+                _bar(pd.Timestamp('2026-03-10 14:00:05', tz='UTC'), 1.10, 1.11, 1.09, 1.105, 1),
+            ))
+            await asyncio.wait_for(first_quote_started.wait(), timeout=1)
+
+            second_task = asyncio.create_task(self.hub._handle_bar_update(
+                'EURUSD',
+                _bar(pd.Timestamp('2026-03-10 14:01:05', tz='UTC'), 1.11, 1.12, 1.10, 1.115, 1),
+            ))
+            await asyncio.sleep(0.05)
+
+            completed = self.hub._accumulator._completed_minutes.get('EURUSD')
+            self.assertIsNotNone(completed)
+            self.assertIn(pd.Timestamp('2026-03-10 14:00:00', tz='UTC'), completed.index)
+
+            release_first_quote.set()
+            await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=1)
+
+    async def test_minute_scan_delay_does_not_block_accumulator_ingest(self):
+        self.hub._startup_bar_buffering = False
+        self.hub._realtime_bars_enabled = True
+        self.hub._backfill_done = True
+        first_scan_started = asyncio.Event()
+        release_first_scan = asyncio.Event()
+        scan_calls = 0
+
+        async def _slow_first_scan(_pair, _price):
+            nonlocal scan_calls
+            scan_calls += 1
+            if scan_calls == 1:
+                first_scan_started.set()
+                await release_first_scan.wait()
+
+        with patch.object(self.hub, '_handle_quote_update', new=AsyncMock()), \
+                patch.object(self.hub, '_handle_minute_bar_complete', side_effect=_slow_first_scan):
+            await self.hub._handle_bar_update(
+                'EURUSD',
+                _bar(pd.Timestamp('2026-03-10 14:00:05', tz='UTC'), 1.10, 1.11, 1.09, 1.105, 1),
+            )
+            second_task = asyncio.create_task(self.hub._handle_bar_update(
+                'EURUSD',
+                _bar(pd.Timestamp('2026-03-10 14:01:05', tz='UTC'), 1.11, 1.12, 1.10, 1.115, 1),
+            ))
+            await asyncio.wait_for(first_scan_started.wait(), timeout=1)
+
+            third_task = asyncio.create_task(self.hub._handle_bar_update(
+                'EURUSD',
+                _bar(pd.Timestamp('2026-03-10 14:02:05', tz='UTC'), 1.12, 1.13, 1.11, 1.125, 1),
+            ))
+            await asyncio.sleep(0.05)
+
+            completed = self.hub._accumulator._completed_minutes.get('EURUSD')
+            self.assertIsNotNone(completed)
+            self.assertIn(pd.Timestamp('2026-03-10 14:00:00', tz='UTC'), completed.index)
+            self.assertIn(pd.Timestamp('2026-03-10 14:01:00', tz='UTC'), completed.index)
+
+            release_first_scan.set()
+            await asyncio.wait_for(asyncio.gather(second_task, third_task), timeout=1)
+
+    async def test_missing_realtime_bar_timestamp_is_diagnosed_but_quote_still_updates(self):
+        self.hub._startup_bar_buffering = False
+        self.hub._realtime_bars_enabled = True
+        bar = SimpleNamespace(open_=1.10, high=1.11, low=1.09, close=1.105, volume=1)
+
+        with patch.object(self.hub, '_handle_quote_update', new=AsyncMock()) as quote_mock:
+            await self.hub._handle_bar_update('EURUSD', bar)
+
+        quote_mock.assert_awaited_once_with('EURUSD', 1.105)
+        self.assertEqual(
+            self.hub._realtime_bar_skip_counts['EURUSD']['missing_timestamp'],
+            1,
+        )
+        self.assertNotIn('EURUSD', self.hub._realtime_bar_ingest_count)
+
+    async def test_start_enables_persistence_before_startup_replay(self):
+        events: list[str] = []
+
+        async def _backfill():
+            events.append('backfill')
+
+        def _start_persistence(pair_ticker_map):
+            events.append('persist')
+            self.assertEqual(pair_ticker_map, {'EURUSD': 'EURUSD=X'})
+
+        def _hydrate_execution_activity():
+            events.append('hydrate')
+
+        async def _replay_startup_bars():
+            events.append('replay')
+            return 0
+
+        with patch.object(self.hub, '_ensure_quote_stream_started', return_value=False), \
+                patch('fx_sr.live_web.start_background_writer'), \
+                patch('fx_sr.live_history.record_system_event'), \
+                patch.object(self.hub, '_run_backfill', new=AsyncMock(side_effect=_backfill)), \
+                patch.object(self.hub._accumulator, 'start_persistence', side_effect=_start_persistence), \
+                patch.object(self.hub, '_compute_data_health', return_value={'overall': 'ok'}), \
+                patch.object(self.hub, '_data_health_loop', new=AsyncMock(return_value=None)), \
+                patch.object(self.hub, '_hydrate_execution_activity', side_effect=_hydrate_execution_activity), \
+                patch.object(self.hub, '_replay_startup_bars', new=AsyncMock(side_effect=_replay_startup_bars)), \
+                patch.object(self.hub, '_housekeeping_loop', new=AsyncMock(return_value=None)), \
+                patch.object(self.hub, '_export_state', return_value={}), \
+                patch.object(self.hub, '_broadcast_log', new=AsyncMock()), \
+                patch.object(self.hub, '_broadcast', new=AsyncMock()):
+            await self.hub.start()
+
+        self.assertEqual(events, ['backfill', 'persist', 'hydrate', 'replay'])
+
+    async def test_data_health_reports_dead_persistence_thread(self):
+        self.hub._backfill_done = True
+        self.hub._backfill_completed_at = pd.Timestamp.now(tz='UTC') - pd.Timedelta(minutes=10)
+        self.hub._accumulator._persist_enabled = True
+
+        stale_summary = pd.DataFrame([{
+            'ticker': 'EURUSD=X',
+            'interval': '1m',
+            'first_ts': pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=1),
+            'last_ts': pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=1),
+            'bars': 100,
+        }])
+
+        with patch('fx_sr.live_web.fx_market_is_open', return_value=True), \
+                patch('fx_sr.live_web.get_cache_summary', return_value=stale_summary):
+            health = self.hub._compute_data_health()
+
+        self.assertEqual(health['overall'], 'stale')
+        self.assertEqual(health['pipeline_status'], 'persistence_stopped')
+        self.assertFalse(health['persist_thread_alive'])
+        self.assertIn('persistence thread is not running', health['pipeline_message'])
+
 
 class AccountHistoryApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_account_history_api_refreshes_today_snapshot_and_exposes_equity(self):
@@ -511,8 +877,11 @@ class AccountHistoryApiTests(unittest.IsolatedAsyncioTestCase):
         ) as load_snapshots_mock, patch(
             'fx_sr.live_history.get_or_fetch_today_snapshot',
             return_value=today_snapshot,
-        ) as today_snapshot_mock:
-            response = await _account_history_api(SimpleNamespace())
+        ) as today_snapshot_mock, patch(
+            'fx_sr.live_web.fx_market_is_open',
+            return_value=True,
+        ):
+            response = await _account_history_api(SimpleNamespace(app={}, query={}))
 
         load_snapshots_mock.assert_called_once_with()
         today_snapshot_mock.assert_called_once_with(force_refresh=True)
@@ -522,6 +891,78 @@ class AccountHistoryApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['snapshots'][1]['date'], '2026-03-30')
         self.assertNotIn('equity', payload['snapshots'][0])
         self.assertEqual(payload['snapshots'][1]['equity'], 10123.45)
+
+    async def test_account_history_api_uses_cached_today_without_forced_refresh(self):
+        today = date.today().isoformat()
+        snapshots = [
+            {
+                'date': today,
+                'balance': 10000.0,
+                'daily_pnl_gbp': 12.0,
+                'currency': 'GBP',
+            },
+        ]
+
+        with patch(
+            'fx_sr.live_history.load_daily_snapshots',
+            return_value=snapshots,
+        ) as load_snapshots_mock, patch(
+            'fx_sr.live_history.get_or_fetch_today_snapshot',
+        ) as today_snapshot_mock, patch(
+            'fx_sr.live_web.fx_market_is_open',
+            return_value=False,
+        ):
+            response = await _account_history_api(SimpleNamespace(app={}, query={}))
+
+        load_snapshots_mock.assert_called_once_with()
+        today_snapshot_mock.assert_not_called()
+
+        payload = json.loads(response.text)
+        self.assertEqual(len(payload['snapshots']), 1)
+        self.assertEqual(payload['snapshots'][0]['date'], today)
+
+    async def test_account_history_api_falls_back_when_live_snapshot_fetch_times_out(self):
+        snapshots = [
+            {
+                'date': '2026-03-29',
+                'balance': 10000.0,
+                'daily_pnl_gbp': 12.0,
+                'currency': 'GBP',
+            },
+        ]
+
+        def slow_fetch(*, force_refresh: bool = False):
+            import time
+
+            time.sleep(0.2)
+            return {
+                'date': '2026-03-30',
+                'balance': 10123.45,
+                'daily_pnl_gbp': 5.0,
+                'currency': 'GBP',
+                'equity': 10123.45,
+            }
+
+        with patch(
+            'fx_sr.live_history.load_daily_snapshots',
+            return_value=snapshots,
+        ) as load_snapshots_mock, patch(
+            'fx_sr.live_history.get_or_fetch_today_snapshot',
+            side_effect=slow_fetch,
+        ) as today_snapshot_mock, patch(
+            'fx_sr.live_web.fx_market_is_open',
+            return_value=True,
+        ), patch(
+            'fx_sr.live_web._ACCOUNT_HISTORY_REFRESH_TIMEOUT',
+            0.05,
+        ):
+            response = await _account_history_api(SimpleNamespace(app={}, query={'refresh': '1'}))
+
+        load_snapshots_mock.assert_called_once_with()
+        today_snapshot_mock.assert_called_once()
+        payload = json.loads(response.text)
+        self.assertEqual(len(payload['snapshots']), 1)
+        self.assertEqual(payload['snapshots'][0]['date'], '2026-03-29')
 
 
 class WebsocketRequestValidationTests(unittest.TestCase):

@@ -415,6 +415,24 @@ class HourlyBarAccumulator:
 
         return result
 
+    def get_completed_minute_df(self, pair: str, tail_n: int = _MINUTE_TAIL) -> pd.DataFrame:
+        """Return closed minute bars only, excluding the in-progress minute.
+
+        Intrabar signal detection must operate on closed 1m bars — the
+        forming minute's Close flickers as 5s ticks arrive, so including it
+        would fire phantom signals that mutate before confirmation.
+        """
+
+        completed = self._completed_minutes.get(pair)
+        if completed is None:
+            return pd.DataFrame(
+                columns=['Open', 'High', 'Low', 'Close', 'Volume'],
+            )
+
+        if tail_n and len(completed) > tail_n:
+            return completed.iloc[-tail_n:]
+        return completed
+
     def get_latest_price(self, pair: str) -> Optional[float]:
         """Return the latest close price from the current or last completed bar."""
 

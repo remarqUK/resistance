@@ -126,6 +126,15 @@ TWS_CLIENT_ID = _get_env_int('IBKR_CLIENT_ID', DEFAULT_TWS_CLIENT_ID)
 # IBKR client ID without clobbering peers in other threads.
 _THREAD_STATE = threading.local()
 _IBKR_LOCK = threading.RLock()
+
+# Process-wide mirror of every live IB socket. Thread-local state alone is
+# not enough at shutdown because the disconnect path runs in whatever thread
+# raised SIGINT / returned from main, and it can only see its own thread's
+# _THREAD_STATE. Leaked sockets from daemon threads (quote stream, scan
+# workers, persistence) keep client IDs reserved inside TWS for ~60-90s,
+# which is exactly the "99 already in use" cascade on quick restarts.
+_PROCESS_CONNECTIONS: set = set()
+_PROCESS_CONNECTIONS_LOCK = threading.Lock()
 _HISTORICAL_FETCH_CONCURRENCY = max(1, _get_env_int('IBKR_HISTORICAL_FETCH_CONCURRENCY', 2))
 _HISTORICAL_FETCH_TIMEOUT_SECONDS = max(1.0, _get_env_float('IBKR_HISTORICAL_FETCH_TIMEOUT_SECONDS', 20.0))
 _HISTORICAL_FETCH_RETRIES = max(1, _get_env_int('IBKR_HISTORICAL_FETCH_RETRIES', 2))
@@ -134,6 +143,7 @@ _HISTORICAL_REQUEST_GAP_SECONDS = max(0.0, _get_env_int('IBKR_HISTORICAL_REQUEST
 _HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS = max(5.0, _get_env_int('IBKR_HISTORICAL_FETCH_SLOT_TIMEOUT_MS', 15000) / 1000.0)
 _ALLOW_CLIENT_ID_FALLBACK = True
 _LAST_FALLBACK_OFFSET = 0  # remember highest successful offset so new threads skip stale IDs
+_IBKR_KEEPALIVE_SECONDS = max(10, _get_env_int('IBKR_KEEPALIVE_SECONDS', 60))
 
 
 def log_order_event(
@@ -148,7 +158,7 @@ def log_order_event(
     order_ids: list[int] | None = None,
     duration_ms: float | None = None,
 ) -> None:
-    """Write one row to order_audit_log. Fire-and-forget — never raises."""
+    """Write one row to order_audit_log. Fire-and-forget â€” never raises."""
     try:
         db_path = get_db_path()
         init_db(db_path)
@@ -254,6 +264,8 @@ def _set_thread_connection_state(ib, connected: bool, client_id: Optional[int]) 
     """Persist the current thread's IBKR connection state.
 
     Disconnects any existing connection held by this thread before replacing it.
+    Also keeps the process-wide connection registry in sync so ``disconnect_all``
+    can reach sockets created on other threads at shutdown.
     """
     old_ib = getattr(_THREAD_STATE, 'ib', None)
     if old_ib is not None and old_ib is not ib:
@@ -262,9 +274,39 @@ def _set_thread_connection_state(ib, connected: bool, client_id: Optional[int]) 
                 old_ib.disconnect()
         except Exception:
             pass
+        with _PROCESS_CONNECTIONS_LOCK:
+            _PROCESS_CONNECTIONS.discard(old_ib)
     _THREAD_STATE.ib = ib
     _THREAD_STATE.connected = connected
     _THREAD_STATE.client_id = client_id
+    if connected and ib is not None:
+        _THREAD_STATE.last_keepalive = time.monotonic()
+        with _PROCESS_CONNECTIONS_LOCK:
+            _PROCESS_CONNECTIONS.add(ib)
+    else:
+        _THREAD_STATE.last_keepalive = 0.0
+        if ib is not None:
+            with _PROCESS_CONNECTIONS_LOCK:
+                _PROCESS_CONNECTIONS.discard(ib)
+
+
+def _is_connection_healthy(ib) -> bool:
+    """Verify the current IBKR connection is still alive and reachable."""
+    if not ib or not ib.isConnected():
+        return False
+
+    now = time.monotonic()
+    last_keepalive = getattr(_THREAD_STATE, 'last_keepalive', 0.0)
+    if now - last_keepalive < _IBKR_KEEPALIVE_SECONDS:
+        return True
+
+    try:
+        # A low-cost API call that exercises the socket; raises on stale/disconnected state.
+        ib.reqCurrentTime()
+        _THREAD_STATE.last_keepalive = time.monotonic()
+        return True
+    except Exception:
+        return False
 
 
 def configure_connection(
@@ -311,7 +353,7 @@ def _get_connection_legacy(client_id: Optional[int] = None, retries: int = 3):
             _set_thread_connection_state(ib, True, resolved_client_id)
             return ib, True
         except Exception as exc:
-            # Error 326 = client ID already in use — TWS hasn't released the old socket yet
+            # Error 326 = client ID already in use â€” TWS hasn't released the old socket yet
             if 'client id' in str(exc).lower() or '326' in str(exc):
                 if attempt < retries - 1:
                     time.sleep(2)
@@ -337,10 +379,16 @@ def _get_connection(client_id: Optional[int] = None, retries: int = 20):
 
     # Reuse any working connection on this thread.  When fallback is enabled
     # accept any client ID; otherwise require an exact match.  This prevents
-    # the cycle: connect on fallback ID 62 → next call resolves to 60 →
-    # mismatch → disconnect 62 → fail on 60 → walk back to 62 → repeat.
+    # the cycle: connect on fallback ID 62 â†’ next call resolves to 60 â†’
+    # mismatch â†’ disconnect 62 â†’ fail on 60 â†’ walk back to 62 â†’ repeat.
     if connected and ib and ib.isConnected():
-        if _ALLOW_CLIENT_ID_FALLBACK or active_client_id == resolved_client_id:
+        if not _is_connection_healthy(ib):
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
+            _set_thread_connection_state(None, False, resolved_client_id)
+        elif _ALLOW_CLIENT_ID_FALLBACK or active_client_id == resolved_client_id:
             return ib, True
 
     from ib_async import IB
@@ -348,6 +396,12 @@ def _get_connection(client_id: Optional[int] = None, retries: int = 20):
     # Start from the highest known-good offset so new threads skip stale IDs
     # left behind by previous threads that died without disconnecting.
     start_offset = _LAST_FALLBACK_OFFSET if _ALLOW_CLIENT_ID_FALLBACK else 0
+
+    # Short timeout for handshake — TWS responds to 326 in milliseconds, the
+    # rest is ib_async waiting for a server-initiated handshake that never
+    # arrives once TWS has closed the socket. Tighter cap makes the fallback
+    # walk much less noisy on restart.
+    connect_timeout = max(1, _get_env_int('IBKR_CONNECT_TIMEOUT_SECONDS', 3))
 
     for attempt in range(max_attempts):
         candidate_client_id = (
@@ -360,9 +414,11 @@ def _get_connection(client_id: Optional[int] = None, retries: int = 20):
             if ib and ib.isConnected():
                 ib.disconnect()
             ib = IB()
-            ib.connect(TWS_HOST, TWS_PORT, clientId=candidate_client_id, timeout=5)
+            ib.connect(TWS_HOST, TWS_PORT, clientId=candidate_client_id, timeout=connect_timeout)
             _set_thread_connection_state(ib, True, candidate_client_id)
-            _LAST_FALLBACK_OFFSET = max(_LAST_FALLBACK_OFFSET, start_offset + attempt)
+            # Bump past the ID we just claimed so the next thread doesn't try
+            # our active socket first and always eat a fallback collision.
+            _LAST_FALLBACK_OFFSET = max(_LAST_FALLBACK_OFFSET, start_offset + attempt + 1)
             if _ALLOW_CLIENT_ID_FALLBACK and candidate_client_id != resolved_client_id:
                 print(
                     f'  IBKR connected with fallback client ID {candidate_client_id} '
@@ -371,7 +427,11 @@ def _get_connection(client_id: Optional[int] = None, retries: int = 20):
             return ib, True
         except Exception as exc:
             if attempt < max_attempts - 1:
-                time.sleep(2)
+                # When fallback is enabled the next attempt uses a fresh
+                # client ID, so backing off here just wastes startup time.
+                # Only sleep when we'll retry the same ID (fallback disabled).
+                if not _ALLOW_CLIENT_ID_FALLBACK:
+                    time.sleep(2)
                 continue
             _set_thread_connection_state(None, False, candidate_client_id)
             return None, False
@@ -389,6 +449,40 @@ def disconnect():
     if ib and ib.isConnected():
         ib.disconnect()
     _set_thread_connection_state(None, False, None)
+
+
+def disconnect_all() -> int:
+    """Disconnect every IB socket opened in this process, across all threads.
+
+    Safe to call multiple times. Returns the number of sockets that were
+    still connected when we reached them. Exceptions from any individual
+    disconnect are swallowed — at shutdown we want best-effort cleanup, not
+    errors that mask the original exit path.
+    """
+
+    with _PROCESS_CONNECTIONS_LOCK:
+        victims = list(_PROCESS_CONNECTIONS)
+        _PROCESS_CONNECTIONS.clear()
+    closed = 0
+    for ib in victims:
+        try:
+            if ib.isConnected():
+                ib.disconnect()
+                closed += 1
+        except Exception:
+            pass
+    return closed
+
+
+import atexit as _atexit
+
+# Best-effort cleanup on interpreter shutdown. atexit fires on normal exit,
+# sys.exit(), and SIGINT that propagates to the top (Ctrl-C in the CLI,
+# which Python surfaces as KeyboardInterrupt). It does NOT fire on
+# os._exit() or SIGKILL — the _run_realtime_bar_stream hard-exit path in
+# live_web therefore still needs its own disconnect_all() call if we ever
+# want those cases to clean up.
+_atexit.register(disconnect_all)
 
 
 def is_available() -> bool:
@@ -430,7 +524,7 @@ def get_execution_mode() -> str:
         return 'paper'
     if TWS_PORT == 7496:
         return 'live'
-    # Non-standard port — check if port looks like a paper gateway
+    # Non-standard port â€” check if port looks like a paper gateway
     if TWS_PORT in (4002,):
         return 'paper'
     if TWS_PORT in (4001,):
@@ -1241,69 +1335,178 @@ def stream_realtime_bars(
     if not pairs:
         return
 
-    ib, connected = _get_connection(client_id=client_id)
-    if not connected or ib is None:
-        return
+    # Per-pair watchdog thresholds. A silent IBKR subscription (no error, no
+    # bars) would otherwise starve signal detection for that pair until the
+    # next full reconnect — which may never come if the connection socket
+    # itself stays healthy. Matches live_web's _DATA_HEALTH_WARN_SECONDS.
+    per_pair_stale_seconds = max(60, _get_env_int('IBKR_REALTIME_PAIR_STALE_SECONDS', 120))
+    per_pair_grace_seconds = max(30, _get_env_int('IBKR_REALTIME_PAIR_GRACE_SECONDS', 60))
+    per_pair_check_interval = max(10, _get_env_int('IBKR_REALTIME_PAIR_CHECK_SECONDS', 30))
 
-    subscriptions: list[tuple[object, object, str]] = []
+    from .data import fx_market_is_open  # local import avoids data<->ibkr import cycle
 
-    try:
-        for pair in pairs:
-            try:
-                contract = _make_contract(pair)
-                ib.qualifyContracts(contract)
-                bars = ib.reqRealTimeBars(
-                    contract,
-                    barSize=5,
-                    whatToShow='MIDPOINT',
-                    useRTH=False,
-                )
-                ib.sleep(0.1)
-            except Exception as exc:
-                # A failed subscription used to be silently swallowed, which
-                # meant the live process kept running with zero streaming
-                # data and no diagnostic trail. Fail loud instead — the
-                # startup cannot proceed without real-time bars for every
-                # pair, and the operator needs to see which pair + why.
+    reconnect_delay = 2.0
+    # Boot-phase failures must be fatal to the caller. Silently retrying a
+    # broken initial subscribe leaves the dashboard running with zero active
+    # realtime streams — the operator sees "quote thread started" but nothing
+    # ever flows. Only flip to infinite-reconnect after one full subscription
+    # set has been brought up and wired.
+    first_attempt = True
+    while not stop_event.is_set():
+        ib, connected = _get_connection(client_id=client_id)
+        if not connected or ib is None:
+            if first_attempt:
                 raise RuntimeError(
-                    f'Real-time bar subscription failed for {pair}: '
-                    f'{type(exc).__name__}: {exc}'
-                ) from exc
-            subscriptions.append((contract, bars, pair))
+                    'IBKR real-time stream could not open an initial TWS '
+                    'connection on startup. Check TWS/Gateway availability, '
+                    'port, and client-id allocation.'
+                )
+            time.sleep(reconnect_delay)
+            continue
 
-        if not subscriptions:
-            raise RuntimeError('No real-time bar subscriptions were created')
+        subscriptions: list[tuple[object, object, str]] = []
+        last_bar_at: dict[str, float] = {}
+        subscribed_at: dict[str, float] = {}
+        next_keepalive = time.monotonic() + _IBKR_KEEPALIVE_SECONDS
+        next_pair_check = time.monotonic() + per_pair_check_interval
 
-        # Wire up the barUpdateEvent for each subscription
+        def _subscribe_pair(pair_id: str):
+            """Qualify contract and issue a fresh reqRealTimeBars subscription."""
+
+            contract = _make_contract(pair_id)
+            ib.qualifyContracts(contract)
+            bars = ib.reqRealTimeBars(
+                contract,
+                barSize=5,
+                whatToShow='MIDPOINT',
+                useRTH=False,
+            )
+            ib.sleep(0.1)
+            return contract, bars
+
         def _make_handler(pair_id):
             def _handler(bars, has_new_bar):
                 if has_new_bar and bars:
+                    last_bar_at[pair_id] = time.monotonic()
                     try:
                         on_bar(pair_id, bars[-1])
                     except Exception:
                         pass
             return _handler
 
-        for _, bars, pair in subscriptions:
-            bars.updateEvent += _make_handler(pair)
+        try:
+            for pair in pairs:
+                try:
+                    contract, bars = _subscribe_pair(pair)
+                except Exception as exc:
+                    # A failed subscription used to be silently swallowed, which
+                    # meant the live process kept running with zero streaming
+                    # data and no diagnostic trail. Fail loud instead - the
+                    # startup cannot proceed without real-time bars for every
+                    # pair, and the operator needs to see which pair + why.
+                    raise RuntimeError(
+                        f'Real-time bar subscription failed for {pair}: '
+                        f'{type(exc).__name__}: {exc}'
+                    ) from exc
+                subscriptions.append((contract, bars, pair))
+                subscribed_at[pair] = time.monotonic()
 
-        while not stop_event.is_set():
-            try:
-                if hasattr(ib, 'waitOnUpdate'):
-                    ib.waitOnUpdate(timeout=1)
-                elif hasattr(ib, 'sleep'):
-                    ib.sleep(1)
-                else:
-                    time.sleep(1)
-            except Exception:
-                time.sleep(1)
-    finally:
-        for contract, bars, _ in subscriptions:
-            try:
-                ib.cancelRealTimeBars(bars)
-            except Exception:
-                continue
-        disconnect()
+            if not subscriptions:
+                raise RuntimeError('No real-time bar subscriptions were created')
+
+            for _, bars, pair in subscriptions:
+                bars.updateEvent += _make_handler(pair)
+
+            # First full subscription set is live — disarm fail-closed mode.
+            # Anything that kills the inner processing loop from here on is a
+            # mid-run failure, which is what the auto-reconnect loop is for.
+            first_attempt = False
+
+            while not stop_event.is_set():
+                try:
+                    if hasattr(ib, 'waitOnUpdate'):
+                        ib.waitOnUpdate(timeout=1)
+                    elif hasattr(ib, 'sleep'):
+                        ib.sleep(1)
+                    else:
+                        time.sleep(1)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f'IBKR real-time stream error: {type(exc).__name__}: {exc}'
+                    ) from exc
+
+                now_mono = time.monotonic()
+
+                if now_mono >= next_keepalive:
+                    if not _is_connection_healthy(ib):
+                        raise RuntimeError('IBKR real-time stream health-check failed')
+                    next_keepalive = now_mono + _IBKR_KEEPALIVE_SECONDS
+
+                if now_mono >= next_pair_check:
+                    next_pair_check = now_mono + per_pair_check_interval
+                    # Suppress the watchdog outside FX market hours so normal
+                    # weekend/maintenance closures don't trigger spurious
+                    # resubscribe storms.
+                    try:
+                        market_open = fx_market_is_open()
+                    except Exception:
+                        market_open = True
+                    if market_open:
+                        for idx, (contract, bars, pair) in enumerate(list(subscriptions)):
+                            last_ts = last_bar_at.get(pair)
+                            sub_ts = subscribed_at.get(pair, now_mono)
+                            if last_ts is None:
+                                age = now_mono - sub_ts
+                                threshold = per_pair_grace_seconds
+                            else:
+                                age = now_mono - last_ts
+                                threshold = per_pair_stale_seconds
+                            if age < threshold:
+                                continue
+                            print(
+                                f'    Resubscribing stale realtime stream for {pair} '
+                                f'(no bar for {age:.0f}s)'
+                            )
+                            try:
+                                ib.cancelRealTimeBars(bars)
+                            except Exception:
+                                pass
+                            try:
+                                new_contract, new_bars = _subscribe_pair(pair)
+                            except Exception as exc:
+                                # If a targeted resubscribe can't recover the
+                                # pair, escalate to a full reconnect rather
+                                # than running with a permanent hole.
+                                raise RuntimeError(
+                                    f'Resubscribe for {pair} failed after stall: '
+                                    f'{type(exc).__name__}: {exc}'
+                                ) from exc
+                            new_bars.updateEvent += _make_handler(pair)
+                            subscriptions[idx] = (new_contract, new_bars, pair)
+                            subscribed_at[pair] = time.monotonic()
+                            last_bar_at.pop(pair, None)
+
+        except Exception as exc:
+            if stop_event.is_set():
+                break
+            if first_attempt:
+                # Boot failure — surface to the caller so the operator sees
+                # exactly which pair / error blocked startup, instead of the
+                # process running blind with no active subscriptions.
+                raise
+            print(f'    Reconnecting real-time bars stream: {type(exc).__name__}: {exc}')
+            time.sleep(reconnect_delay)
+        finally:
+            for contract, bars, _ in subscriptions:
+                try:
+                    ib.cancelRealTimeBars(bars)
+                except Exception:
+                    continue
+            disconnect()
+
+            if stop_event.is_set():
+                break
+
 
 
 def fetch_account_net_liquidation() -> tuple[Optional[float], Optional[str]]:
@@ -1479,7 +1682,7 @@ def whatif_margin_check(
             if state is None:
                 return None
 
-            # Extract all margin fields — IBKR may return '' for some
+            # Extract all margin fields â€” IBKR may return '' for some
             raw = {
                 'initMarginChange': getattr(state, 'initMarginChange', None),
                 'maintMarginChange': getattr(state, 'maintMarginChange', None),
@@ -1541,7 +1744,7 @@ def whatif_margin_check(
 
 
 def fetch_open_order_counts() -> dict[str, int]:
-    """Return a dict of pair → count of active FX orders that are not terminal.
+    """Return a dict of pair â†’ count of active FX orders that are not terminal.
 
     Uses ``reqAllOpenOrders`` to see orders across all client sessions,
     not just the current one.  This is critical after a gateway restart
@@ -2258,7 +2461,7 @@ def neutralize_currency_balance(
             # Fall back to IDEALPRO + immediate close if FXCONV unavailable
             # (e.g. paper trading accounts).
             from ib_async import Forex
-            # Try both pair orderings — only one will be a valid IBKR symbol.
+            # Try both pair orderings â€” only one will be a valid IBKR symbol.
             # e.g. for EUR balance with GBP account: EURGBP (sell EUR) or GBPEUR (buy GBP).
             attempts = [
                 (f'{currency.upper()}{account_currency.upper()}', action),
@@ -2302,7 +2505,7 @@ def neutralize_currency_balance(
 
             # Submit the conversion order.  IDEALPRO creates a "Virtual FX
             # Position" but the underlying cash balances DO convert.  We do
-            # NOT close the virtual position — closing it would reverse the
+            # NOT close the virtual position â€” closing it would reverse the
             # cash conversion.  The virtual position is cosmetic.
             order = MarketOrder(action, 0, orderRef=order_ref, tif='IOC')
             order.cashQty = quantity
@@ -2330,7 +2533,7 @@ def neutralize_currency_balance(
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
             # Record IDEALPRO fills so sync_positions skips the virtual position.
-            # Only record when the order actually filled — unfilled/rejected
+            # Only record when the order actually filled â€” unfilled/rejected
             # orders don't create a virtual position.
             if (
                 contract is not None
@@ -2387,11 +2590,11 @@ def submit_fx_market_bracket_order(
     """Submit OCA bracket (TP + SL) first, then a market entry order.
 
     Brackets-first approach:
-      Phase 1 – verify TP/SL are safely away from market, then place them
+      Phase 1 â€“ verify TP/SL are safely away from market, then place them
                 as an OCA pair.
-      Phase 2 – place the market entry order.
-      Phase 3 – if partial fill, resize brackets to match filled quantity.
-      Cleanup – if entry fails or doesn't fill, cancel the brackets.
+      Phase 2 â€“ place the market entry order.
+      Phase 3 â€“ if partial fill, resize brackets to match filled quantity.
+      Cleanup â€“ if entry fails or doesn't fill, cancel the brackets.
 
     *submit_bid* / *submit_ask* are the caller's latest quote, used to
     verify that TP/SL prices are not immediately marketable before placing
@@ -2455,19 +2658,19 @@ def submit_fx_market_bracket_order(
                 contract=contract,
             )
 
-            # ── Guard: verify TP/SL are safely away from market ──────
+            # â”€â”€ Guard: verify TP/SL are safely away from market â”€â”€â”€â”€â”€â”€
             # The brackets are placed before any position exists.  If a
             # price is already marketable, IBKR would execute it and open
             # an unintended position.
             if submit_bid is not None and submit_ask is not None:
                 if direction == 'LONG':
-                    # TP is SELL LIMIT — must be above ask; SL is SELL STOP — must be below bid
+                    # TP is SELL LIMIT â€” must be above ask; SL is SELL STOP â€” must be below bid
                     if rounded_take_profit_price <= submit_ask:
                         log_order_event(
                             function_name='submit_fx_market_bracket_order',
                             pair=pair, direction=direction, action='submit',
                             request_data={'tp': float(rounded_take_profit_price), 'ask': submit_ask},
-                            error='TP price at or below ask — would fill immediately as naked exit',
+                            error='TP price at or below ask â€” would fill immediately as naked exit',
                             duration_ms=(time.monotonic() - _audit_start) * 1000,
                         )
                         return None
@@ -2476,18 +2679,18 @@ def submit_fx_market_bracket_order(
                             function_name='submit_fx_market_bracket_order',
                             pair=pair, direction=direction, action='submit',
                             request_data={'sl': float(rounded_stop_loss_price), 'bid': submit_bid},
-                            error='SL price at or above bid — would fill immediately as naked exit',
+                            error='SL price at or above bid â€” would fill immediately as naked exit',
                             duration_ms=(time.monotonic() - _audit_start) * 1000,
                         )
                         return None
                 else:
-                    # TP is BUY LIMIT — must be below bid; SL is BUY STOP — must be above ask
+                    # TP is BUY LIMIT â€” must be below bid; SL is BUY STOP â€” must be above ask
                     if rounded_take_profit_price >= submit_bid:
                         log_order_event(
                             function_name='submit_fx_market_bracket_order',
                             pair=pair, direction=direction, action='submit',
                             request_data={'tp': float(rounded_take_profit_price), 'bid': submit_bid},
-                            error='TP price at or above bid — would fill immediately as naked exit',
+                            error='TP price at or above bid â€” would fill immediately as naked exit',
                             duration_ms=(time.monotonic() - _audit_start) * 1000,
                         )
                         return None
@@ -2496,12 +2699,12 @@ def submit_fx_market_bracket_order(
                             function_name='submit_fx_market_bracket_order',
                             pair=pair, direction=direction, action='submit',
                             request_data={'sl': float(rounded_stop_loss_price), 'ask': submit_ask},
-                            error='SL price at or above ask — would fill immediately as naked exit',
+                            error='SL price at or above ask â€” would fill immediately as naked exit',
                             duration_ms=(time.monotonic() - _audit_start) * 1000,
                         )
                         return None
 
-            # ── Phase 1: place brackets (TP + SL) ─────────────────────
+            # â”€â”€ Phase 1: place brackets (TP + SL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             oca_result = _submit_oca_bracket(
                 ib, contract, pair, direction, int(quantity),
                 rounded_take_profit_price, rounded_stop_loss_price,
@@ -2546,7 +2749,7 @@ def submit_fx_market_bracket_order(
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
 
-            # ── Phase 2: place entry market order ──────────────────────
+            # â”€â”€ Phase 2: place entry market order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             action = 'BUY' if direction == 'LONG' else 'SELL'
 
             entry_order_id = ib.client.getReqId()
@@ -2575,7 +2778,7 @@ def submit_fx_market_bracket_order(
             status_str = getattr(entry_status, 'status', '') or ''
             filled = float(getattr(entry_status, 'filled', 0) or 0)
             if status_str not in ('Filled',) and filled <= 0:
-                # Entry failed — cancel the brackets we placed in phase 1
+                # Entry failed â€” cancel the brackets we placed in phase 1
                 print(f"    Warning: {pair} market order not filled after {fill_timeout}s "
                       f"(status={status_str}), cancelling brackets")
                 bracket_ids = {
@@ -2633,7 +2836,7 @@ def submit_fx_market_bracket_order(
                 duration_ms=(time.monotonic() - _audit_start) * 1000,
             )
 
-            # ── Phase 3: resize brackets on partial fill ───────────────
+            # â”€â”€ Phase 3: resize brackets on partial fill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             actual_filled = int(filled_units) if filled_units and filled_units > 0 else int(quantity)
             if actual_filled < int(quantity):
                 # Cancel oversized brackets and resubmit at filled quantity.
@@ -2668,7 +2871,7 @@ def submit_fx_market_bracket_order(
                         duration_ms=(time.monotonic() - _audit_start) * 1000,
                     )
                 else:
-                    # Resize failed — brackets are gone, position unprotected.
+                    # Resize failed â€” brackets are gone, position unprotected.
                     # Caller's _ensure_protection_orders_live will catch this.
                     tp_order_id = None
                     sl_order_id = None
@@ -2742,7 +2945,7 @@ def _submit_oca_bracket(
     """Submit OCA-linked TP limit + SL stop orders.
 
     Returns a dict with ``take_profit_order_id``, ``stop_loss_order_id``,
-    ``take_profit_price``, ``stop_loss_price``, and ``oca_group`` — or
+    ``take_profit_price``, ``stop_loss_price``, and ``oca_group`` â€” or
     ``None`` on failure.  The caller must already hold ``_IBKR_LOCK`` and
     have a live *ib* connection with a qualified *contract*.
     """
@@ -2804,7 +3007,7 @@ def _submit_oca_bracket(
         if tp_id is None or sl_id is None:
             return None
 
-        # Verify both orders survived — check for immediate cancellation
+        # Verify both orders survived â€” check for immediate cancellation
         tp_status = getattr(getattr(tp_trade, 'orderStatus', None), 'status', '') or ''
         sl_status = getattr(getattr(sl_trade, 'orderStatus', None), 'status', '') or ''
         terminal = {'Cancelled', 'ApiCancelled', 'Inactive'}
@@ -2853,7 +3056,7 @@ def submit_bracket_for_existing_position(
     Used to restore bracket protection after a gateway restart wipes
     working orders but preserves positions.  Unlike
     submit_fx_market_bracket_order this does NOT place a parent market
-    order — the position already exists.
+    order â€” the position already exists.
     """
     if quantity <= 0:
         return None
@@ -2963,7 +3166,7 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
     """Cancel one or more orders by ID. Returns the IDs that were successfully sent.
 
     When *suppress_not_found* is True, IBKR error 10147 (order not found) is
-    silently swallowed — useful for cleaning up bracket children that may
+    silently swallowed â€” useful for cleaning up bracket children that may
     have already been filled or cancelled.
     """
 
@@ -3061,7 +3264,7 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
 
 
 # ---------------------------------------------------------------------------
-# Flex Query — historical commission data
+# Flex Query â€” historical commission data
 # ---------------------------------------------------------------------------
 
 _FLEX_BASE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService"
@@ -3073,7 +3276,7 @@ _FLEX_DAILY_STATEMENT_QUERY_ID = 1454993
 def _fetch_flex_xml(token: str, query_id: int, max_wait: int = 30) -> ET.Element:
     """Execute IBKR Flex Query and return parsed XML root element.
 
-    Three-step process: SendRequest → poll GetStatement → return XML.
+    Three-step process: SendRequest â†’ poll GetStatement â†’ return XML.
     """
     # Step 1: request the report
     send_url = f"{_FLEX_BASE_URL}.SendRequest?t={token}&q={query_id}&v=3"
@@ -3083,7 +3286,7 @@ def _fetch_flex_xml(token: str, query_id: int, max_wait: int = 30) -> ET.Element
     status = send_xml.findtext("Status", "")
     if status != "Success":
         error_msg = send_xml.findtext("ErrorMessage", "unknown error")
-        raise RuntimeError(f"Flex SendRequest failed: {status} — {error_msg}")
+        raise RuntimeError(f"Flex SendRequest failed: {status} â€” {error_msg}")
 
     reference_code = send_xml.findtext("ReferenceCode", "")
     stmt_url = send_xml.findtext("Url", _FLEX_BASE_URL.replace("FlexStatementService", "FlexStatementService.GetStatement"))
@@ -3103,7 +3306,7 @@ def _fetch_flex_xml(token: str, query_id: int, max_wait: int = 30) -> ET.Element
                     raise TimeoutError("Flex statement not ready after %ds" % max_wait)
                 time.sleep(2)
                 continue
-            raise RuntimeError(f"Flex GetStatement failed: {poll_status} — {root.findtext('ErrorMessage', '')}")
+            raise RuntimeError(f"Flex GetStatement failed: {poll_status} â€” {root.findtext('ErrorMessage', '')}")
         break  # got the actual report
 
     return root
@@ -3127,7 +3330,7 @@ def fetch_flex_commissions(
     query_id = query_id or int(os.environ.get("IBKR_FLEX_QUERY_ID", _FLEX_QUERY_ID))
 
     if not token:
-        raise ValueError("IBKR Flex token required — pass token= or set IBKR_FLEX_TOKEN")
+        raise ValueError("IBKR Flex token required â€” pass token= or set IBKR_FLEX_TOKEN")
 
     root = _fetch_flex_xml(token, query_id, max_wait=max_wait)
 

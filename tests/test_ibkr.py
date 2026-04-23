@@ -264,6 +264,56 @@ class IbkrHistoricalFetchTests(unittest.TestCase):
         self.assertEqual(rows_by_id[201]['remaining_units'], 0.0)
 
 
+class StreamRealtimeBarsBootTests(unittest.TestCase):
+    """Boot-phase failures in stream_realtime_bars must fail closed.
+
+    Silently retrying a broken initial subscribe hides a degraded stream
+    behind a "quote thread started" banner — the dashboard renders normally
+    while nothing ever flows. Only after one full subscription set is
+    healthy should we enter the auto-reconnect loop.
+    """
+
+    def test_boot_connection_failure_raises(self):
+        import threading as _threading
+
+        stop_event = _threading.Event()
+        with patch.object(ibkr, '_get_connection', return_value=(None, False)):
+            with self.assertRaises(RuntimeError) as ctx:
+                ibkr.stream_realtime_bars(
+                    pairs=['EURUSD'],
+                    on_bar=lambda _p, _b: None,
+                    stop_event=stop_event,
+                    client_id=99,
+                )
+        self.assertIn('startup', str(ctx.exception).lower())
+
+    def test_boot_subscribe_failure_raises_with_offending_pair(self):
+        import threading as _threading
+
+        stop_event = _threading.Event()
+        mock_ib = MagicMock()
+        mock_ib.qualifyContracts = MagicMock()
+        mock_ib.reqRealTimeBars = MagicMock(
+            side_effect=RuntimeError('pair not found')
+        )
+        mock_ib.sleep = MagicMock()
+        mock_ib.isConnected = MagicMock(return_value=True)
+
+        with patch.object(ibkr, '_get_connection', return_value=(mock_ib, True)), \
+                patch.object(ibkr, '_make_contract', return_value=MagicMock()), \
+                patch.object(ibkr, 'disconnect'):
+            with self.assertRaises(RuntimeError) as ctx:
+                ibkr.stream_realtime_bars(
+                    pairs=['EURUSD'],
+                    on_bar=lambda _p, _b: None,
+                    stop_event=stop_event,
+                    client_id=99,
+                )
+        message = str(ctx.exception)
+        self.assertIn('EURUSD', message)
+        self.assertIn('pair not found', message)
+
+
 class LogOrderEventTests(unittest.TestCase):
     def setUp(self):
         self._db_ctx = temporary_test_database()

@@ -27,6 +27,7 @@ from fx_sr.live_web import (
     _set_execution_mode,
     _validate_websocket_request,
 )
+from fx_sr.positions import reconcile_flat_position
 from fx_sr.sizing import PositionSizePlan
 from fx_sr.strategy import Signal
 from fx_sr.strategy import StrategyParams, Trade
@@ -323,6 +324,43 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         cancel_mock.assert_not_called()
         submit_mock.assert_not_called()
 
+    async def test_close_tracked_position_reconciles_broker_flat_row(self):
+        db_ctx = temporary_test_database()
+        db_path = db_ctx.__enter__()
+        try:
+            signal_id = record_detected_signals(
+                [_signal('EURUSD', 'LONG')],
+                [_plan('EURUSD', 'LONG')],
+                execute_orders=False,
+                db_path=db_path,
+            )[0]
+            self.hub._execution_available = True
+            self.hub._tracked['EURUSD:LONG']['signal_id'] = signal_id
+            self.hub._tracked['EURUSD:LONG']['ibkr_size'] = 10000
+            self.hub._failed_close_orders['EURUSD:LONG'] = {
+                'pair': 'EURUSD',
+                'direction': 'LONG',
+                'exit_reason': 'TIME',
+            }
+
+            def _reconcile(pair, direction, **kwargs):
+                return reconcile_flat_position(pair, direction, db_path=db_path, **kwargs)
+
+            with patch('fx_sr.live_web.ibkr.fetch_positions', return_value=[]), \
+                    patch('fx_sr.live_web.reconcile_flat_position', side_effect=_reconcile):
+                result = await self.hub.close_tracked_position(pair='EURUSD', direction='LONG')
+
+            row = load_detected_signal(signal_id, db_path=db_path)
+            self.assertEqual(result['result']['status'], 'CLOSED')
+            self.assertEqual(result['message'], 'EURUSD was already flat at IBKR; local state reconciled.')
+            self.assertNotIn('EURUSD:LONG', self.hub._tracked)
+            self.assertNotIn('EURUSD:LONG', self.hub._failed_close_orders)
+            self.assertEqual(row['status'], 'CLOSED')
+            self.assertEqual(row['close_reason'], 'MANUAL')
+            self.assertEqual(row['close_source'], 'broker_flat_reconcile')
+        finally:
+            db_ctx.__exit__(None, None, None)
+
     async def test_liquidate_live_position_uses_live_ibkr_reduce_only_helper(self):
         self.hub._execution_available = True
         self.hub._execution_paused = True
@@ -404,6 +442,61 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
                 (123, 'TIME', 'sig-1', 1.1015),
             )
 
+    async def test_startup_recovery_reconciles_broker_flat_position(self):
+        db_ctx = temporary_test_database()
+        db_path = db_ctx.__enter__()
+        try:
+            signal_id = record_detected_signals(
+                [_signal('EURUSD', 'LONG')],
+                [_plan('EURUSD', 'LONG')],
+                execute_orders=False,
+                db_path=db_path,
+            )[0]
+            record_exit_signal(
+                signal_id,
+                exit_reason='TIME',
+                exit_price=1.1015,
+                db_path=db_path,
+            )
+
+            self.hub._accumulator.seeded_pairs.add('EURUSD')
+            tracked = {
+                'EURUSD:LONG': {
+                    'pair': 'EURUSD',
+                    'trade': _trade(),
+                    'bars_monitored': 3,
+                    'signal_id': signal_id,
+                    'ibkr_size': 10000,
+                    'pending_exit_reason': 'TIME',
+                    'pending_exit_price': 1.1015,
+                },
+            }
+
+            def _reconcile(pair, direction, **kwargs):
+                return reconcile_flat_position(pair, direction, db_path=db_path, **kwargs)
+
+            with patch.object(
+                self.hub,
+                '_backfill_data',
+                return_value=([], list(self.hub._pair_rows.values()), [], [], 0.0),
+            ), \
+                    patch('fx_sr.positions.sync_positions', return_value=tracked), \
+                    patch('fx_sr.live_web.ibkr.fetch_account_net_liquidation', return_value=(10000.0, 'USD')), \
+                    patch('fx_sr.live_web.reconcile_flat_position', side_effect=_reconcile), \
+                    patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
+                    patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={'status': 'FAILED', 'error': 'IBKR has no live EURUSD position.'}):
+                await self.hub._run_backfill()
+
+            row = load_detected_signal(signal_id, db_path=db_path)
+            self.assertNotIn('EURUSD:LONG', self.hub._tracked)
+            self.assertNotIn('EURUSD:LONG', self.hub._failed_close_orders)
+            self.assertEqual(row['status'], 'CLOSED')
+            self.assertEqual(row['close_reason'], 'TIME')
+            self.assertEqual(row['close_source'], 'broker_flat_reconcile')
+            self.assertAlmostEqual(row['closed_price'], 1.1015)
+        finally:
+            db_ctx.__exit__(None, None, None)
+
     async def test_run_backfill_emits_completion_beep(self):
         with patch.object(
             self.hub,
@@ -418,6 +511,29 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             await self.hub._run_backfill()
 
         beep_mock.assert_called_once()
+
+    async def test_run_backfill_persists_startup_wf_signals(self):
+        wf_signal = _signal('EURUSD', 'SHORT')
+
+        with patch.object(
+            self.hub,
+            '_backfill_data',
+            return_value=([], list(self.hub._pair_rows.values()), [], [wf_signal], 0.0),
+        ), \
+                patch('fx_sr.live_web.record_detected_signals') as persist_mock, \
+                patch.object(self.hub, '_emit_backfill_complete_beep'), \
+                patch('fx_sr.positions.sync_positions', return_value={}), \
+                patch('fx_sr.live_web.ibkr.fetch_account_net_liquidation', return_value=(10000.0, 'USD')), \
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
+                patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={'status': 'Submitted', 'order_id': 123, 'quantity': 10000}):
+            await self.hub._run_backfill()
+
+        persist_mock.assert_any_call(
+            [wf_signal],
+            execute_orders=False,
+            execution_mode=self.hub.execution_mode,
+            detection_source='startup_replay',
+        )
 
     async def test_alert_and_execution_buffers_are_bounded(self):
         for idx in range(ALERT_LIMIT + 5):

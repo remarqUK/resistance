@@ -963,6 +963,22 @@ class LiveHistoryTests(unittest.TestCase):
         self.assertEqual(row['execution_mode'], 'scan')
         self.assertIsNone(row['ibkr_account'])
 
+    def test_detection_source_marker_is_persisted(self):
+        signal = _signal('GBPJPY', 'SHORT')
+
+        signal_id = record_detected_signals(
+            [signal],
+            execute_orders=False,
+            execution_mode='intrabar',
+            detection_source='startup_replay',
+            db_path=self.db_path,
+        )[0]
+
+        row = load_detected_signal(signal_id, db_path=self.db_path)
+        self.assertEqual(row['quote_source'], 'startup_replay')
+        self.assertEqual(row['note'], 'detected via startup replay')
+        self.assertEqual(row['execution_mode'], 'intrabar')
+
 
 if __name__ == '__main__':
     unittest.main()

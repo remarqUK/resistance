@@ -42,6 +42,7 @@ from .live_history import (
     enqueue_write_async,
     load_detected_signal,
     load_execution_activity,
+    record_closed_signal,
     record_detected_signals,
     record_exit_signal,
     record_execution_results,
@@ -61,7 +62,14 @@ from .db import (
 )
 from .portfolio import build_portfolio_state, closed_trade_summary_from_row, get_entry_block
 from .live_stream import StreamingScanner
-from .positions import calc_pnl_pips, cancel_bracket_children, pair_pip, process_hourly_exit_bars, sync_positions
+from .positions import (
+    calc_pnl_pips,
+    cancel_bracket_children,
+    pair_pip,
+    process_hourly_exit_bars,
+    reconcile_flat_position,
+    sync_positions,
+)
 from .signal_store import signal_order_ref
 
 
@@ -2155,6 +2163,73 @@ class LiveDashboardHub:
             'automatic retry paused until the position changes or you close it manually.',
         )
 
+    @staticmethod
+    def _broker_reports_flat(order: dict | None) -> bool:
+        """Return True when the broker explicitly says this pair is already flat."""
+
+        if not order:
+            return False
+        detail = ' '.join(
+            str(order.get(key) or '')
+            for key in ('error', 'message')
+        ).lower()
+        return 'no live' in detail and 'position' in detail
+
+    async def _reconcile_flat_tracked_position(
+        self,
+        *,
+        alert_key: str,
+        pair: str,
+        direction: str,
+        signal_id: str | None,
+        close_reason: str | None,
+        close_price: float | None,
+        close_source: str,
+        log_message: str,
+    ) -> dict:
+        """Remove a stale tracked row and persist the signal as closed."""
+
+        closed_row = None
+        if self._loop is not None:
+            closed_row = await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda: reconcile_flat_position(
+                    pair,
+                    direction,
+                    signal_id=signal_id,
+                    close_reason=close_reason,
+                    close_price=close_price,
+                    close_source=close_source,
+                ),
+            )
+
+        closed_execution = self._build_closed_execution_result(closed_row) if closed_row is not None else None
+        closed_summary = closed_trade_summary_from_row(closed_row) if closed_row is not None else None
+
+        async with self._lock:
+            tracked_info = self._tracked.get(alert_key)
+            if tracked_info is not None:
+                tracked_info.pop('close_failure', None)
+            self._tracked.pop(alert_key, None)
+            self._position_snapshots.pop(alert_key, None)
+            self._failed_close_orders.pop(alert_key, None)
+            self._inflight_close_orders.pop(alert_key, None)
+            self._inflight_miss_counts.pop(alert_key, None)
+            self._tick_exit_alerted.discard(alert_key)
+            if closed_summary is not None:
+                self._portfolio_state.record_closed_trade(closed_summary)
+            if closed_execution is not None:
+                self._append_or_merge_execution_result(closed_execution)
+            self._append_log('warning', log_message)
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+            state = self._export_state()
+
+        await self._broadcast({'type': 'snapshot', 'state': state})
+        return {
+            'closed_row': closed_row,
+            'state': state,
+        }
+
     async def set_execution_paused(self, paused: bool) -> dict:
         """Pause or resume new order placement without restarting the dashboard."""
 
@@ -2257,10 +2332,27 @@ class LiveDashboardHub:
             )
         live_position = _live_ibkr_position_for_pair(live_positions, pair)
         if live_position is None:
-            raise RuntimeError(
-                f'IBKR has no live {pair} position; refusing to submit a market order '
-                'that could open new exposure.'
+            reconciled = await self._reconcile_flat_tracked_position(
+                alert_key=position_key,
+                pair=pair,
+                direction=direction,
+                signal_id=signal_id,
+                close_reason='MANUAL',
+                close_price=None,
+                close_source='broker_flat_reconcile',
+                log_message=f'Reconciled stale {pair} {direction}: IBKR already reports the pair flat.',
             )
+            return {
+                'result': {
+                    'status': 'CLOSED',
+                    'pair': pair,
+                    'direction': direction,
+                    'order_id': None,
+                    'size': tracked_size,
+                },
+                'state': reconciled['state'],
+                'message': f'{pair} was already flat at IBKR; local state reconciled.',
+            }
         live_direction = live_position['direction']
         if live_direction != direction:
             live_size = int(abs(float(live_position['size'])))
@@ -2474,6 +2566,37 @@ class LiveDashboardHub:
         close_direction = order.get('close_direction') or (
             'SHORT' if live_direction == 'LONG' else 'LONG' if live_direction == 'SHORT' else None
         )
+        reconcile_direction = direction
+        if status == 'FAILED' and self._broker_reports_flat(order):
+            if tracked_info is not None and not reconcile_direction:
+                tracked_trade = tracked_info.get('trade')
+                reconcile_direction = str(getattr(tracked_trade, 'direction', '') or '').upper() or None
+            if reconcile_direction:
+                alert_key = f'{pair}:{reconcile_direction}'
+                reconciled = await self._reconcile_flat_tracked_position(
+                    alert_key=alert_key,
+                    pair=pair,
+                    direction=reconcile_direction,
+                    signal_id=signal_id,
+                    close_reason='LIVE_LIQUIDATE',
+                    close_price=None,
+                    close_source='broker_flat_reconcile',
+                    log_message=f'Reconciled stale {pair} {reconcile_direction}: IBKR already reports the pair flat.',
+                )
+                return {
+                    'result': {
+                        'status': 'CLOSED',
+                        'pair': pair,
+                        'direction': reconcile_direction,
+                        'close_direction': close_direction,
+                        'order_id': order_id,
+                        'size': size,
+                        'cancelled_order_ids': order.get('cancelled_order_ids') or [],
+                        'remaining_open_orders': order.get('remaining_open_orders') or [],
+                    },
+                    'state': reconciled['state'],
+                    'message': f'{pair} is already flat at IBKR; local state reconciled.',
+                }
         if status == 'FAILED':
             note = str(error or f'Live liquidation rejected for {pair}.')
         elif status == 'CLOSED' and order_id is None:
@@ -2742,6 +2865,22 @@ class LiveDashboardHub:
                     )
                     positions_changed = True
             else:
+                if self._broker_reports_flat(order):
+                    await self._reconcile_flat_tracked_position(
+                        alert_key=alert_key,
+                        pair=close_pair,
+                        direction=close_dir,
+                        signal_id=signal_id,
+                        close_reason=None,
+                        close_price=exit_price,
+                        close_source='broker_flat_reconcile',
+                        log_message=(
+                            f'Reconciled stale {close_pair} {close_dir}: '
+                            'broker already flat after strategy close.'
+                        ),
+                    )
+                    positions_changed = True
+                    continue
                 async with self._lock:
                     self._append_log(
                         'error',
@@ -3348,6 +3487,21 @@ class LiveDashboardHub:
                     })
                     self._append_log('info', f'{exit_reason} close submitted: {close_pair} {close_dir} size={actual_size} order={order_id} status={order_status}')
             else:
+                if self._broker_reports_flat(order):
+                    await self._reconcile_flat_tracked_position(
+                        alert_key=alert_key,
+                        pair=close_pair,
+                        direction=close_dir,
+                        signal_id=sig_id,
+                        close_reason=None,
+                        close_price=exit_price,
+                        close_source='broker_flat_reconcile',
+                        log_message=(
+                            f'Reconciled stale {close_pair} {close_dir}: '
+                            'broker already flat after hourly strategy close.'
+                        ),
+                    )
+                    continue
                 async with self._lock:
                     self._append_log('error', f'{exit_reason} close REJECTED: {close_pair} {close_dir} status={order_status} - retry paused')
 
@@ -3962,6 +4116,17 @@ class LiveDashboardHub:
             f'Backfill data loaded for {len(self._accumulator.seeded_pairs)} pairs.',
         )
 
+        if wf_signals:
+            await self._loop.run_in_executor(
+                self._scan_executor,
+                lambda: record_detected_signals(
+                    wf_signals,
+                    execute_orders=False,
+                    execution_mode=self.execution_mode,
+                    detection_source='startup_replay',
+                ),
+            )
+
         # Position sync + balance refresh
         def _post_backfill():
             import os
@@ -4094,6 +4259,21 @@ class LiveDashboardHub:
                         f'Recovery close submitted: {close_pair} {close_dir} {exit_reason} size={actual_size} order={order_id}',
                     )
             else:
+                if self._broker_reports_flat(order):
+                    await self._reconcile_flat_tracked_position(
+                        alert_key=alert_key,
+                        pair=close_pair,
+                        direction=close_dir,
+                        signal_id=sig_id,
+                        close_reason=None,
+                        close_price=exit_price,
+                        close_source='broker_flat_reconcile',
+                        log_message=(
+                            f'Reconciled stale {close_pair} {close_dir}: '
+                            'broker already flat during startup recovery.'
+                        ),
+                    )
+                    continue
                 async with self._lock:
                     self._append_log(
                         'warning',
@@ -4374,8 +4554,10 @@ class LiveDashboardHub:
                 # Persist exit signals for confirmed fills outside the lock.
                 for reason, sig_id, price in confirmed_fills:
                     await enqueue_write_async(
-                        lambda s=sig_id, r=reason, p=price: record_exit_signal(
-                            s, exit_reason=r, exit_price=p,
+                        lambda s=sig_id, p=price: record_closed_signal(
+                            s,
+                            close_price=p,
+                            close_source='housekeeping',
                         )
                     )
 
@@ -5419,6 +5601,7 @@ def run_live_web_app(
         handle_backtest_diary_page,
         handle_trade_log_api,
     )
+    from .parity import handle_backtest_vs_live_api
 
     app.router.add_post('/api/rebuild-ui', _rebuild_ui)
     app.router.add_get('/', _index)
@@ -5447,6 +5630,7 @@ def run_live_web_app(
     app.router.add_get('/replay', _index)
     app.router.add_get('/backtest-trades', _index)
     app.router.add_get('/live-vs-backtest', _index)
+    app.router.add_get('/api/backtest-vs-live', handle_backtest_vs_live_api)
     app.router.add_get('/api/backtest/trades', handle_backtest_trades_api)
     app.router.add_get('/backtest-diary', _index)
     app.router.add_get('/api/backtest/diary', handle_backtest_diary_api)

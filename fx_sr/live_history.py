@@ -885,6 +885,7 @@ def record_detected_signals(
     execute_orders: bool,
     execution_mode: str | None = None,
     ibkr_account: str | None = None,
+    detection_source: str | None = None,
     db_path: str | None = None,
 ) -> list[str]:
     """Upsert the currently detected signals into the history table."""
@@ -896,6 +897,12 @@ def record_detected_signals(
         plans = [None] * len(signals)
 
     resolved_mode = execution_mode or _resolve_execution_mode(execute_orders)
+    source_marker = str(detection_source or '').strip() or None
+    source_note = (
+        f'detected via {source_marker.replace("_", " ")}'
+        if source_marker
+        else None
+    )
 
     now = _normalize_ts(pd.Timestamp.now('UTC'))
     signal_ids: list[str] = []
@@ -939,7 +946,7 @@ def record_detected_signals(
                 order_id=existing.get("order_id") if existing else None,
                 take_profit_order_id=existing.get("take_profit_order_id") if existing else None,
                 stop_loss_order_id=existing.get("stop_loss_order_id") if existing else None,
-                note=existing.get("note") if existing else None,
+                note=(existing.get("note") if existing else None) or source_note,
                 executed_at=existing.get("executed_at") if existing else None,
                 opened_at=existing.get("opened_at") if existing else None,
                 opened_price=existing.get("opened_price") if existing else None,
@@ -964,7 +971,7 @@ def record_detected_signals(
                 submit_bid=existing.get("submit_bid") if existing else None,
                 submit_ask=existing.get("submit_ask") if existing else None,
                 submit_spread=existing.get("submit_spread") if existing else None,
-                quote_source=existing.get("quote_source") if existing else None,
+                quote_source=(existing.get("quote_source") if existing else None) or source_marker,
                 quote_time=existing.get("quote_time") if existing else None,
                 last_updated_at=now,
             )

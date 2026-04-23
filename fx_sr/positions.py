@@ -494,6 +494,34 @@ def _remove_trade_conn(conn, pair: str, direction: str):
     )
 
 
+def reconcile_flat_position(
+    pair: str,
+    direction: str,
+    *,
+    signal_id: str | None = None,
+    close_reason: str | None = None,
+    close_price: float | None = None,
+    close_source: str = 'broker_flat_reconcile',
+    db_path: str | None = None,
+) -> dict | None:
+    """Close a stale local position row when IBKR is already flat."""
+
+    db_path = db_path or get_db_path()
+    _ensure_table(db_path)
+    with _tracking_db_transaction(db_path) as conn:
+        closed_row = None
+        if signal_id:
+            closed_row = record_closed_signal_conn(
+                conn,
+                signal_id,
+                close_reason=close_reason,
+                close_price=close_price,
+                close_source=close_source,
+            )
+        _remove_trade_conn(conn, pair, direction)
+        return closed_row
+
+
 def _save_bar_tracking(
     pair: str,
     direction: str,

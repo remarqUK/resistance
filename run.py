@@ -3,6 +3,7 @@
 
 import argparse
 from dataclasses import replace
+import json
 import os
 import threading
 import uuid
@@ -1440,6 +1441,105 @@ def cmd_viz(args):
         server.shutdown()
 
 
+def cmd_parity(args):
+    """Compare today's cached backtest signals against persisted live signals."""
+
+    from fx_sr.parity import (
+        build_llm_parity_report,
+        format_parity_markdown,
+        format_parity_table,
+        write_report_output,
+    )
+
+    window_seconds = getattr(args, 'window_seconds', None)
+    if window_seconds is None:
+        window_seconds = int(float(args.tolerance_minutes) * 60)
+
+    report = build_llm_parity_report(
+        selected_date=args.date,
+        pair=args.pair,
+        window_seconds=window_seconds,
+        backtest_key=args.backtest,
+        local_tz=args.timezone,
+        include_live_only=not args.no_live_only,
+        db_path=args.db_url,
+    )
+
+    if args.format == 'json':
+        rendered = json.dumps(report, indent=2, sort_keys=True)
+    elif args.format == 'markdown':
+        rendered = format_parity_markdown(report)
+    else:
+        rendered = format_parity_table(report)
+
+    print(rendered)
+    write_report_output(report, output=args.output, output_format=args.format)
+    if args.output:
+        print(f"\n  Wrote parity report to {args.output}")
+
+
+def _add_parity_args(parser, *, default_format: str) -> None:
+    parser.add_argument(
+        '--date',
+        type=str,
+        default=None,
+        help='Server-local date to inspect, YYYY-MM-DD (default: today)',
+    )
+    parser.add_argument(
+        '--pair',
+        type=str,
+        default=None,
+        help='Specific pair (e.g., USDJPY). Default: all configured pairs',
+    )
+    parser.add_argument(
+        '--tolerance-minutes',
+        type=float,
+        default=1.0,
+        help='Compatibility alias for --window-seconds (default: 1 minute)',
+    )
+    parser.add_argument(
+        '--window-seconds',
+        type=int,
+        default=None,
+        help='Equivalent live-trade match window around the backtest entry time (default: 60)',
+    )
+    parser.add_argument(
+        '--backtest',
+        type=str,
+        default=None,
+        help='Optional cached backtest key; default selects the newest cached run',
+    )
+    parser.add_argument(
+        '--format',
+        choices=('table', 'markdown', 'json'),
+        default=default_format,
+        help=f'Output format for LLM handoff (default: {default_format})',
+    )
+    parser.add_argument(
+        '--timezone',
+        type=str,
+        default='UTC',
+        help='Timezone used for day filtering and report timestamps (default: UTC)',
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        default=None,
+        help='Optional file path to write the rendered report',
+    )
+    parser.add_argument(
+        '--db-url',
+        type=str,
+        default=None,
+        help='Optional Postgres URL override (default: RESISTANCE_DATABASE_URL or configured default)',
+    )
+    parser.add_argument(
+        '--no-live-only',
+        action='store_true',
+        help='Exclude live signals that have no matching backtest signal',
+    )
+
+
 def cmd_run(args):
     """Unified engine: backfill → walk-forward → backtest or live."""
 
@@ -2013,6 +2113,18 @@ def main():
         help='Force regenerate viz_data.json (default: reuse if exists)',
     )
 
+    parity = subparsers.add_parser(
+        'parity',
+        help='Compare cached backtest trade signals with persisted live detected signals',
+    )
+    _add_parity_args(parity, default_format='json')
+
+    pretty_parity = subparsers.add_parser(
+        'pretty-parity',
+        help='Human-readable version of parity for terminal review',
+    )
+    _add_parity_args(pretty_parity, default_format='table')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -2035,6 +2147,10 @@ def main():
         cmd_run(args)
     elif args.command == 'viz':
         cmd_viz(args)
+    elif args.command == 'parity':
+        cmd_parity(args)
+    elif args.command == 'pretty-parity':
+        cmd_parity(args)
 
 
 if __name__ == '__main__':

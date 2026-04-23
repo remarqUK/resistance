@@ -681,8 +681,18 @@ class LiveDashboardHub:
         blocked_pairs: set[str],
         price: float,
         hourly_df,
+        minute_df=None,
     ) -> tuple[PairScanRow | None, object | None, list]:
         """Rebuild one pair row from authoritative scan inputs."""
+
+        ticker = self.pairs[pair]['ticker']
+        minute_data_cache = None
+        if minute_df is not None:
+            # Feed the in-memory accumulator snapshot straight into the scan
+            # so intrabar signal detection doesn't round-trip through the 1m
+            # PostgreSQL cache (which lags by one persistence flush and can
+            # stall further if a pair's 5s subscription goes silent).
+            minute_data_cache = {ticker: minute_df}
 
         signals, rows, wf_signals = collect_scan_rows(
             pairs={pair: self.pairs[pair]},
@@ -691,7 +701,8 @@ class LiveDashboardHub:
             tracked_positions=tracked_positions,
             blocked_pairs=blocked_pairs,
             price_cache={pair: price},
-            hourly_data_cache={self.pairs[pair]['ticker']: hourly_df},
+            hourly_data_cache={ticker: hourly_df},
+            minute_data_cache=minute_data_cache,
             execution_mode=self.execution_mode,
             portfolio_state=self._portfolio_state,
             hourly_days=self.hourly_days,
@@ -3141,6 +3152,7 @@ class LiveDashboardHub:
         hourly_df = self._accumulator.get_hourly_df(pair)
         if hourly_df is None or hourly_df.empty:
             return
+        minute_df = self._accumulator.get_completed_minute_df(pair)
 
         async with self._lock:
             tracked_copy = dict(self._tracked)
@@ -3155,6 +3167,7 @@ class LiveDashboardHub:
                 blocked_pairs=set(blocked),
                 price=price,
                 hourly_df=hourly_df,
+                minute_df=minute_df,
             ),
         )
 
@@ -3354,6 +3367,7 @@ class LiveDashboardHub:
         if bar_close_orders:
             self._housekeeping_nudge.set()
 
+        minute_df = self._accumulator.get_completed_minute_df(pair)
         updated_row, signal, wf_signals = await self._loop.run_in_executor(
             self._scan_executor,
             lambda: self._evaluate_pair_row(
@@ -3362,6 +3376,7 @@ class LiveDashboardHub:
                 blocked_pairs=set(blocked),
                 price=current_price,
                 hourly_df=hourly_df,
+                minute_df=minute_df,
             ),
         )
 
@@ -3440,6 +3455,13 @@ class LiveDashboardHub:
                 flush=True,
             )
             _traceback.print_exc()
+            # os._exit skips atexit, so we have to fire the process-wide IB
+            # disconnect ourselves here — otherwise other daemon threads'
+            # sockets stay reserved in TWS for another 60-90s on restart.
+            try:
+                ibkr.disconnect_all()
+            except Exception:
+                pass
             _os._exit(1)
 
     def _ensure_quote_stream_started(self) -> bool:
@@ -5254,6 +5276,10 @@ async def _shutdown(request: web.Request) -> web.Response:
             await hub.stop()
         except Exception:
             pass
+        try:
+            ibkr.disconnect_all()
+        except Exception:
+            pass
         os._exit(0)
 
     asyncio.ensure_future(_do_shutdown())
@@ -5273,6 +5299,10 @@ async def _restart(request: web.Request) -> web.Response:
         await asyncio.sleep(0.5)
         try:
             await hub.stop()
+        except Exception:
+            pass
+        try:
+            ibkr.disconnect_all()
         except Exception:
             pass
         # On Windows, os.execv spawns a new process rather than replacing,

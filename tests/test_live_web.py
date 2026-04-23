@@ -147,12 +147,13 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.hub._backfill_done = True
         captured = {}
 
-        def _capture_signal_eval(pair, tracked_positions=None, blocked_pairs=None, price=None, hourly_df=None):
+        def _capture_signal_eval(pair, tracked_positions=None, blocked_pairs=None, price=None, hourly_df=None, minute_df=None):
             captured['pair'] = pair
             captured['price'] = price
             captured['tracked_pairs'] = tracked_positions
             captured['blocked_pairs'] = blocked_pairs
             captured['hourly_df'] = hourly_df.copy()
+            captured['minute_df'] = minute_df.copy() if minute_df is not None else None
             return None, None, []
 
         with patch('fx_sr.positions.check_exit', return_value=None), \

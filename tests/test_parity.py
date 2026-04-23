@@ -216,6 +216,31 @@ class ParityReportTests(unittest.TestCase):
         self.assertEqual(report["live_only"][0]["reason"], "live_only_signal")
         self.assertEqual(report["audit_only_evidence"], [])
 
+    def test_llm_report_keeps_unplaced_live_only_row(self):
+        report = build_llm_parity_report_from_rows(
+            backtest_trades=[],
+            live_signals=[
+                _live(
+                    signal_id="skipped-live",
+                    status="SKIPPED",
+                    transacted=0,
+                    executed_at=None,
+                    note="risk filter skipped order",
+                )
+            ],
+            selected_date="2026-04-23",
+            window_seconds=60,
+            local_tz="Europe/London",
+        )
+
+        self.assertEqual(report["classification_counts"], {"LIVE_ONLY": 1})
+        self.assertEqual(len(report["live_only"]), 1)
+        item = report["live_only"][0]
+        self.assertEqual(item["classification"], "LIVE_ONLY")
+        self.assertEqual(item["live"]["signal_id"], "skipped-live")
+        self.assertEqual(item["live"]["status"], "SKIPPED")
+        self.assertIn("live detection evidence exists", item["llm_note"])
+
     def test_llm_report_emits_audit_only_evidence_separately(self):
         report = build_llm_parity_report_from_rows(
             backtest_trades=[],

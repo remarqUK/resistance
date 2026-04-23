@@ -2268,15 +2268,8 @@ def liquidate_fx_position(
                 return orders
 
             live_position = _live_fx_position_from_ib_positions(ib.positions(), pair)
-            if live_position is None:
-                return _finish({
-                    'pair': pair,
-                    'status': 'FAILED',
-                    'error': f'IBKR has no live {pair} position.',
-                }, error=f'IBKR has no live {pair} position.')
-
-            live_direction = live_position['direction']
-            if expected_direction is not None and live_direction != expected_direction:
+            live_direction = live_position['direction'] if live_position is not None else expected_direction
+            if live_position is not None and expected_direction is not None and live_direction != expected_direction:
                 return _finish({
                     'pair': pair,
                     'direction': live_direction,
@@ -2304,7 +2297,7 @@ def liquidate_fx_position(
                 return _finish({
                     'pair': pair,
                     'direction': live_direction,
-                    'size': live_position['size'],
+                    'size': live_position['size'] if live_position is not None else 0,
                     'status': 'FAILED',
                     'error': (
                         f'{len(remaining_orders)} working {pair} order(s) are still '
@@ -2313,6 +2306,17 @@ def liquidate_fx_position(
                     'cancelled_order_ids': cancelled_order_ids,
                     'remaining_open_orders': remaining_orders,
                 }, error='Working orders remain after cancellation.', order_ids=cancelled_order_ids)
+
+            if live_position is None:
+                return _finish({
+                    'pair': pair,
+                    'direction': live_direction,
+                    'quantity': 0,
+                    'status': 'FAILED',
+                    'error': f'IBKR has no live {pair} position.',
+                    'cancelled_order_ids': cancelled_order_ids,
+                    'remaining_open_orders': [],
+                }, error=f'IBKR has no live {pair} position.', order_ids=cancelled_order_ids)
 
             live_position = _live_fx_position_from_ib_positions(ib.positions(), pair)
             if live_position is None:

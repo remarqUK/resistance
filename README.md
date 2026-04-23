@@ -120,10 +120,16 @@ python run.py live --once
 python run.py live --preset aggressive --once
 python run.py live --once --balance 10000 --risk-pct 2
 python run.py live
+python run.py live --no-paper-trade
 python run.py live --zones
 python run.py live --pair EURUSD --interval 30
 python run.py live --no-positions
 ```
+
+By default, `run.py live` starts with `--paper-trade` enabled and submits
+sized orders when it is connected to a paper TWS/Gateway port. Use
+`--no-paper-trade` for scan-only monitoring. Do not point the process at live
+ports (`7496` or `4001`) unless you explicitly intend to route real orders.
 
 ### Live dashboard controls
 
@@ -250,9 +256,17 @@ viz_data.json --> chart.html
 3. Socket port: `7497` (TWS paper) or `7496` (TWS live); IB Gateway uses `4002` (paper) or `4001` (live)
 4. The system uses `clientId 60` for data and monitoring. Fill workers use a separate base client id offset (`2060+`) to avoid reusing that slot.
 
-Position tracking is read-only. The system monitors existing positions and alerts on exit conditions, but does not place orders.
-When position tracking is enabled, live scans suppress new entry signals on pairs that already have an open IBKR position so the monitor does not suggest stacking into an existing trade.
-Live scans now use the same risk-per-trade compounding helper as backtests to suggest FX unit size per signal. If `--balance` is omitted in `live`, the tool tries to use IBKR `NetLiquidation`; `--account-currency` can override the detected currency.
+Live mode is not read-only unless started with `--no-paper-trade`. With
+`--paper-trade` enabled, the system can submit market entries, TP/SL protection,
+and liquidation orders through IBKR. Position tracking also suppresses new entry
+signals on pairs that already have an open IBKR position so the monitor does not
+stack into an existing trade.
+Live scans use the same risk-per-trade compounding helper as backtests to size
+FX units per signal. If `--balance` is omitted in `live`, the tool tries to use
+IBKR `NetLiquidation`; `--account-currency` can override the detected currency.
+Before paper order execution, verify that TWS/IB Gateway is connected to a paper
+account, the dashboard shows the expected execution mode, and open orders in
+IBKR match the dashboard after each entry/close cycle.
 
 ## Dependencies
 

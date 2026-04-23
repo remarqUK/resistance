@@ -2189,8 +2189,14 @@ class LiveDashboardHub:
     ) -> dict:
         """Remove a stale tracked row and persist the signal as closed."""
 
+        cancelled_order_ids: set[int] = set()
         closed_row = None
         if self._loop is not None:
+            if signal_id:
+                cancelled_order_ids = await self._loop.run_in_executor(
+                    self._scan_executor,
+                    lambda: cancel_bracket_children(signal_id),
+                )
             closed_row = await self._loop.run_in_executor(
                 self._scan_executor,
                 lambda: reconcile_flat_position(
@@ -2227,6 +2233,7 @@ class LiveDashboardHub:
         await self._broadcast({'type': 'snapshot', 'state': state})
         return {
             'closed_row': closed_row,
+            'cancelled_order_ids': sorted(cancelled_order_ids),
             'state': state,
         }
 

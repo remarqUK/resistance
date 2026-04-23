@@ -676,6 +676,67 @@ class CancelOrdersAuditTests(unittest.TestCase):
         ib.cancelOrder.assert_not_called()
 
 
+class LiquidateFxPositionTests(unittest.TestCase):
+    def setUp(self):
+        self._db_ctx = temporary_test_database()
+        self.db_path = self._db_ctx.__enter__()
+        db_module.init_db(self.db_path)
+
+    def tearDown(self):
+        if self._db_ctx is not None:
+            self._db_ctx.__exit__(None, None, None)
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    def test_liquidate_cancels_pair_orders_when_broker_reports_flat(self, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        class FakeOrder:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        fake_ib_async = types.ModuleType('ib_async')
+        fake_ib_async.MarketOrder = FakeOrder
+        fake_ib_async.Order = FakeOrder
+
+        trade = types.SimpleNamespace(
+            contract=types.SimpleNamespace(
+                secType='CASH',
+                localSymbol='EUR.USD',
+                symbol='EUR',
+                currency='USD',
+            ),
+            order=types.SimpleNamespace(
+                orderId=900,
+                parentId=0,
+                permId=1,
+                orderRef='fxsr:test',
+                orderType='STP',
+                action='SELL',
+                totalQuantity=10000,
+            ),
+            orderStatus=types.SimpleNamespace(
+                status='Submitted',
+                avgFillPrice=0,
+                filled=0,
+                remaining=10000,
+            ),
+        )
+        ib = MagicMock()
+        ib.positions.return_value = []
+        ib.reqAllOpenOrders.side_effect = [[trade], []]
+        mock_conn.return_value = (ib, True)
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}):
+            result = ibkr.liquidate_fx_position('EURUSD', expected_direction='LONG')
+
+        self.assertEqual(result['status'], 'FAILED')
+        self.assertEqual(result['error'], 'IBKR has no live EURUSD position.')
+        self.assertEqual(result['cancelled_order_ids'], [900])
+        self.assertEqual(result['remaining_open_orders'], [])
+        ib.cancelOrder.assert_called_once()
+
+
 class SubmitMarketOrderAuditTests(unittest.TestCase):
     def setUp(self):
         self._db_ctx = temporary_test_database()

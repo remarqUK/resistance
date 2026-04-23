@@ -346,13 +346,26 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             def _reconcile(pair, direction, **kwargs):
                 return reconcile_flat_position(pair, direction, db_path=db_path, **kwargs)
 
+            events = []
+
+            def _cancel(signal_id_arg):
+                events.append(('cancel', signal_id_arg))
+                return {111, 112}
+
+            def _reconcile_after_cancel(pair, direction, **kwargs):
+                events.append(('reconcile', kwargs.get('signal_id')))
+                return _reconcile(pair, direction, **kwargs)
+
             with patch('fx_sr.live_web.ibkr.fetch_positions', return_value=[]), \
-                    patch('fx_sr.live_web.reconcile_flat_position', side_effect=_reconcile):
+                    patch('fx_sr.live_web.cancel_bracket_children', side_effect=_cancel) as cancel_mock, \
+                    patch('fx_sr.live_web.reconcile_flat_position', side_effect=_reconcile_after_cancel):
                 result = await self.hub.close_tracked_position(pair='EURUSD', direction='LONG')
 
             row = load_detected_signal(signal_id, db_path=db_path)
             self.assertEqual(result['result']['status'], 'CLOSED')
             self.assertEqual(result['message'], 'EURUSD was already flat at IBKR; local state reconciled.')
+            cancel_mock.assert_called_once_with(signal_id)
+            self.assertEqual(events, [('cancel', signal_id), ('reconcile', signal_id)])
             self.assertNotIn('EURUSD:LONG', self.hub._tracked)
             self.assertNotIn('EURUSD:LONG', self.hub._failed_close_orders)
             self.assertEqual(row['status'], 'CLOSED')

@@ -1275,14 +1275,14 @@ def build_llm_parity_report_from_rows(
                     + (
                         "entry-side audit evidence exists on "
                         if _is_audit_only_row(row)
-                        else "live order evidence exists on "
+                        else "live detection evidence exists on "
                     )
                     + f"{selected_date} but no backtest trade matched it within the configured window."
                 ),
             }
             if _is_audit_only_row(row):
                 audit_only_evidence.append(item)
-            elif _live_was_placed(row):
+            else:
                 live_only.append(item)
 
     startup_replay_items: list[dict] = []

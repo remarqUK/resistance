@@ -123,34 +123,78 @@ def _tracked_pair_state_for_scan(tracked_positions: Dict[str, dict] | None = Non
 
     now_utc = datetime.now(timezone.utc)
     for key, info in tracked_positions.items():
-        pair = info.get('pair')
-        trade = info.get('trade')
-        if not pair or not trade:
+        pair = None
+        trade = None
+        signal_status = None
+
+        # Primary shape (legacy): key -> dict with pair/trade metadata.
+        if isinstance(info, dict):
+            pair = info.get('pair')
+            trade = info.get('trade')
+            signal_status = info.get('signal_status')
+        elif isinstance(info, (set, list, tuple)):
+            # Optimized shape used by a few internal call sites:
+            # key -> {'LONG', 'SHORT'} (directions only).
+            pair = key
+            for direction in info:
+                if isinstance(direction, str):
+                    tracked_pairs.setdefault(pair, set()).add(direction)
+                    tracked_states.setdefault(pair, 'OPEN')
+            if pair in tracked_pairs:
+                continue
+        elif isinstance(key, str) and ':' in key:
+            # Recover from partially-corrupted shapes key->anything.
+            pair, direction = key.split(':', 1)
+            if direction in {'LONG', 'SHORT'}:
+                tracked_pairs.setdefault(pair, set()).add(direction)
+                tracked_states.setdefault(pair, 'OPEN')
             continue
-        if (
-            info.get('signal_status') == 'EXIT_SIGNAL'
-            and not _exit_signal_treated_as_active(info, now_utc=now_utc)
-        ):
+
+        direction = getattr(trade, 'direction', None) if trade is not None else None
+
+        if (pair is None or direction is None) and isinstance(key, str) and ':' in key:
+            parsed_pair, parsed_direction = key.split(':', 1)
+            if pair is None:
+                pair = parsed_pair
+            if direction is None and parsed_direction in {'LONG', 'SHORT'}:
+                direction = parsed_direction
+
+        if pair is None:
             continue
-        tracked_pairs.setdefault(pair, set()).add(trade.direction)
-        if info.get('signal_status') == 'PARTIAL':
+
+        if not direction:
+            continue
+
+        if signal_status == 'PARTIAL':
             tracked_states[pair] = 'PARTIAL'
+        elif signal_status == 'EXIT_SIGNAL' and not _exit_signal_treated_as_active(info, now_utc=now_utc):
+            # Ignore expired exit-signal rows for scan entrypoint.
+            continue
         else:
             tracked_states.setdefault(pair, 'OPEN')
+        tracked_pairs.setdefault(pair, set()).add(direction)
     return tracked_pairs, tracked_states
 
 
 def _tracked_pair_set_for_execution(tracked_positions: Dict[str, dict] | None = None) -> set[str]:
     if not tracked_positions:
         return set()
+    if not isinstance(tracked_positions, dict):
+        return set()
     now_utc = datetime.now(timezone.utc)
     blocked_pairs: set[str] = set()
-    for info in tracked_positions.values():
-        pair = info.get('pair')
-        if not pair:
-            continue
-        if _exit_signal_treated_as_active(info, now_utc=now_utc):
-            blocked_pairs.add(pair)
+    for key, info in tracked_positions.items():
+        if isinstance(info, dict):
+            pair = info.get('pair')
+            if not pair:
+                continue
+            if _exit_signal_treated_as_active(info, now_utc=now_utc):
+                blocked_pairs.add(pair)
+        elif isinstance(info, (set, list, tuple)):
+            if isinstance(key, str):
+                blocked_pairs.add(key)
+        elif isinstance(info, str) and ':' in info:
+            blocked_pairs.add(info.split(':', 1)[0])
     return blocked_pairs
 
 
@@ -2231,7 +2275,6 @@ def run_monitor_cycle(
 
         pending_pairs = ibkr.fetch_open_order_pairs()
         tracked = sync_positions(params, zone_history_days) if track_positions else {}
-        tracked_for_blocking = _tracked_pair_state_for_scan(tracked)[0]
         tracked_blocked_pairs = _tracked_pair_set_for_execution(tracked)
 
         market_prices: Dict[str, float] = {}
@@ -2260,7 +2303,7 @@ def run_monitor_cycle(
             pairs=pairs,
             params=params,
             zone_history_days=zone_history_days,
-            tracked_positions=tracked_for_blocking,
+            tracked_positions=tracked,
             blocked_pairs=pending_pairs,
             price_cache=market_prices,
             daily_data_cache=daily_data_cache,
@@ -2300,7 +2343,7 @@ def run_monitor_cycle(
             existing_pairs=tracked_blocked_pairs,
             pending_pairs=pending_pairs,
             params=params,
-            tracked_positions=tracked_for_blocking,
+            tracked_positions=tracked,
             balance=active_balance,
             risk_pct=risk_pct,
             account_currency=active_currency,

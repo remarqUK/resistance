@@ -204,6 +204,35 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             exit_price=1.0949,
         )
 
+    async def test_evaluate_pair_row_forwards_tracked_shape(self):
+        captured = {}
+
+        hourly_df = pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
+
+        def _collect_scan_rows(
+            *,
+            pairs,
+            tracked_positions,
+            blocked_pairs,
+            price_cache,
+            hourly_data_cache,
+            minute_data_cache,
+            **_,
+        ):
+            captured['tracked_positions'] = tracked_positions
+            return [], [], []
+
+        with patch('fx_sr.live_web.collect_scan_rows', side_effect=_collect_scan_rows):
+            self.hub._evaluate_pair_row(
+                'EURUSD',
+                tracked_positions=self.hub._tracked,
+                blocked_pairs=set(),
+                price=1.2000,
+                hourly_df=hourly_df,
+            )
+
+        self.assertEqual(captured['tracked_positions'], self.hub._tracked)
+
     async def test_tick_exit_rejection_latches_exit_intent_without_retry_loop(self):
         db_ctx = temporary_test_database()
         db_path = db_ctx.__enter__()

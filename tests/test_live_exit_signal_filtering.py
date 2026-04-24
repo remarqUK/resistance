@@ -137,6 +137,37 @@ class ExitSignalFilterTests(unittest.TestCase):
         self.assertEqual(rows[0].pair, 'AUDJPY')
         self.assertEqual(observed, [('AUDJPY', {}, {})])
 
+    def test_collect_scan_rows_accepts_precomputed_tracked_pairs_shape(self):
+        row = PairScanRow(
+            pair='AUDJPY',
+            name='AUD/JPY',
+            decimals=3,
+            price=100.0,
+            state='INSIDE',
+            note='No signal',
+            support_text='-',
+            resistance_text='-',
+        )
+        pairs = {'AUDJPY': {'ticker': 'AUDJPY=X', 'name': 'AUD/JPY', 'decimals': 3}}
+        tracked_positions = {'AUDJPY': {'LONG', 'SHORT'}}
+        observed: list[tuple[dict[str, set[str]], dict[str, str]]] = []
+
+        def _scan(pair_id, pair_info, params, zone_history_days, tracked_pairs, tracked_states, blocked_pairs, **_):
+            observed.append((dict(tracked_pairs), dict(tracked_states)))
+            return (replace(row, state='ok'), None, [])
+
+        with patch('fx_sr.live._scan_pair', side_effect=_scan):
+            _, rows, _ = live_module.collect_scan_rows(
+                pairs=pairs,
+                params=StrategyParams(use_pair_direction_filter=False),
+                zone_history_days=180,
+                tracked_positions=tracked_positions,
+                minute_data_cache={},
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(observed, [({'AUDJPY': {'LONG', 'SHORT'}}, {'AUDJPY': 'OPEN'})])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -704,12 +704,11 @@ class LiveDashboardHub:
             # stall further if a pair's 5s subscription goes silent).
             minute_data_cache = {ticker: minute_df}
 
-        tracked_for_scan, _ = _tracked_pair_state_for_scan(tracked_positions)
         signals, rows, wf_signals = collect_scan_rows(
             pairs={pair: self.pairs[pair]},
             params=self.params,
             zone_history_days=self.zone_history_days,
-            tracked_positions=tracked_for_scan,
+            tracked_positions=tracked_positions,
             blocked_pairs=blocked_pairs,
             price_cache={pair: price},
             hourly_data_cache={ticker: hourly_df},

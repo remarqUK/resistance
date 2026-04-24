@@ -264,6 +264,13 @@ stack into an existing trade.
 Live scans use the same risk-per-trade compounding helper as backtests to size
 FX units per signal. If `--balance` is omitted in `live`, the tool tries to use
 IBKR `NetLiquidation`; `--account-currency` can override the detected currency.
+
+Operational knobs not shown above:
+- `LIVE_EXIT_SIGNAL_BARRIER_SECONDS` (default `3600`): allow scan/execution to
+  wait before treating an old `EXIT_SIGNAL` as stale.
+- `IBKR_STALE_CANCEL_ORDER_TTL_SECONDS` (default `3600`): suppress repeated
+  cancel attempts for IDs that IBKR has already reported as missing (`Error 10147`).
+
 Before paper order execution, verify that TWS/IB Gateway is connected to a paper
 account, the dashboard shows the expected execution mode, and open orders in
 IBKR match the dashboard after each entry/close cycle.

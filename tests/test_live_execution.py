@@ -594,13 +594,14 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
         ) as update_mock:
             _resubmit_missing_brackets(signal_row, ibkr_size=10000)
 
-        submit_mock.assert_called_once_with(
-            pair='EURUSD',
-            direction='LONG',
-            quantity=10000,
-            take_profit_price=1.1050,
-            stop_loss_price=1.0950,
-        )
+        submit_mock.assert_called_once()
+        submit_call = submit_mock.call_args.kwargs
+        self.assertEqual(submit_call['pair'], 'EURUSD')
+        self.assertEqual(submit_call['direction'], 'LONG')
+        self.assertEqual(submit_call['quantity'], 10000)
+        self.assertEqual(submit_call['take_profit_price'], 1.1050)
+        self.assertEqual(submit_call['stop_loss_price'], 1.0950)
+        self.assertIsNone(submit_call['order_ref'])
         update_mock.assert_called_once_with(
             'EURUSD:LONG:abc123', 200, 201,
         )
@@ -693,13 +694,14 @@ class ResubmitMissingBracketsTests(unittest.TestCase):
                 trade=trade, pair='EURUSD', direction='LONG',
             )
 
-        submit_mock.assert_called_once_with(
-            pair='EURUSD',
-            direction='LONG',
-            quantity=10000,
-            take_profit_price=1.1050,
-            stop_loss_price=1.0950,
-        )
+        submit_mock.assert_called_once()
+        submit_call = submit_mock.call_args.kwargs
+        self.assertEqual(submit_call['pair'], 'EURUSD')
+        self.assertEqual(submit_call['direction'], 'LONG')
+        self.assertEqual(submit_call['quantity'], 10000)
+        self.assertEqual(submit_call['take_profit_price'], 1.1050)
+        self.assertEqual(submit_call['stop_loss_price'], 1.0950)
+        self.assertEqual(submit_call['order_ref'], '')
 
 
 if __name__ == '__main__':

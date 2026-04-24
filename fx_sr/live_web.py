@@ -28,6 +28,8 @@ from .live import (
     ExecutionResult,
     PairScanRow,
     _scan_pair,
+    _tracked_pair_set_for_execution,
+    _tracked_pair_state_for_scan,
     apply_startup_scan_artifacts,
     build_live_size_plans,
     collect_scan_rows,
@@ -702,11 +704,12 @@ class LiveDashboardHub:
             # stall further if a pair's 5s subscription goes silent).
             minute_data_cache = {ticker: minute_df}
 
+        tracked_for_scan, _ = _tracked_pair_state_for_scan(tracked_positions)
         signals, rows, wf_signals = collect_scan_rows(
             pairs={pair: self.pairs[pair]},
             params=self.params,
             zone_history_days=self.zone_history_days,
-            tracked_positions=tracked_positions,
+            tracked_positions=tracked_for_scan,
             blocked_pairs=blocked_pairs,
             price_cache={pair: price},
             hourly_data_cache={ticker: hourly_df},
@@ -2957,9 +2960,8 @@ class LiveDashboardHub:
                     signal=signal,
                 )
             price_cache = dict(self._last_quotes)
-            existing_pairs = {info['pair'] for info in self._tracked.values()}
+            existing_pairs = _tracked_pair_set_for_execution(self._tracked)
             pending_pairs = set(self._tick_pending_pairs)
-            tracked_copy = dict(self._tracked)
             execute_orders = self._execution_enabled()
             execution_available = self._execution_available
             execution_paused = self._execution_paused
@@ -3006,7 +3008,7 @@ class LiveDashboardHub:
                     existing_pairs=existing_pairs,
                     pending_pairs=pending_pairs,
                     params=params,
-                    tracked_positions=tracked_copy,
+                    tracked_positions=self._tracked,
                     balance=balance,
                     risk_pct=risk_pct,
                     account_currency=account_currency,

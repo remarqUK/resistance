@@ -32,9 +32,15 @@ Example shell setup:
 export IBKR_PORT=4002
 export IBKR_CLIENT_ID=60
 export IBKR_ACCOUNT_CURRENCY=GBP
+export LIVE_EXIT_SIGNAL_BARRIER_SECONDS=3600
+export IBKR_STALE_CANCEL_ORDER_TTL_SECONDS=3600
 ```
 
 `4002` is the safe default for IB Gateway paper trading. If you use TWS instead, set `IBKR_PORT=7497`. Live trading uses `4001` on IB Gateway or `7496` on TWS.
+
+`LIVE_EXIT_SIGNAL_BARRIER_SECONDS` controls how long an `EXIT_SIGNAL` position should still block new entries while it is being closed. Default is `3600` seconds (1 hour).
+
+`IBKR_STALE_CANCEL_ORDER_TTL_SECONDS` controls how long we suppress repeated cancel attempts for the same order ID after IBKR reports `Error 10147` (`order to be canceled was not found`). Default is `3600` seconds.
 
 For strict execution-parity backtests, backfill minute data separately:
 
@@ -288,6 +294,17 @@ No signals are being acted on:
 - the pair may already have an open position
 - there may already be a pending IBKR order
 - the signal may fail correlation or portfolio-risk checks
+- a recent `EXIT_SIGNAL` may still be considered active (`LIVE_EXIT_SIGNAL_BARRIER_SECONDS`, default 3600s)
+
+To check the exact reason, inspect recent rows:
+
+```sql
+SELECT pair, direction, signal_time, status, transacted,
+       exit_signal_reason, exit_signal_at
+FROM detected_signal
+ORDER BY detected_at DESC
+LIMIT 40;
+```
 
 Signals are recorded but no position is linked:
 

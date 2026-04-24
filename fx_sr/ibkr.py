@@ -8,6 +8,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from contextlib import contextmanager
 import json
+import logging
 import os
 import threading
 import time
@@ -144,6 +145,60 @@ _HISTORICAL_FETCH_SLOT_TIMEOUT_SECONDS = max(5.0, _get_env_int('IBKR_HISTORICAL_
 _ALLOW_CLIENT_ID_FALLBACK = True
 _LAST_FALLBACK_OFFSET = 0  # remember highest successful offset so new threads skip stale IDs
 _IBKR_KEEPALIVE_SECONDS = max(10, _get_env_int('IBKR_KEEPALIVE_SECONDS', 60))
+_STALE_CANCEL_ORDER_TTL_SECONDS = max(60, _get_env_int('IBKR_STALE_CANCEL_ORDER_TTL_SECONDS', 3600))
+_STALE_CANCEL_ORDER_IDS: dict[int, float] = {}
+
+
+def _prune_stale_cancel_order_ids(now: float | None = None) -> None:
+    """Forget cancel-not-found IDs after a short TTL so IDs cannot stay hidden forever."""
+
+    now = time.monotonic() if now is None else now
+    expired = [
+        oid for oid, seen_at in _STALE_CANCEL_ORDER_IDS.items()
+        if now - seen_at > _STALE_CANCEL_ORDER_TTL_SECONDS
+    ]
+    for oid in expired:
+        _STALE_CANCEL_ORDER_IDS.pop(oid, None)
+
+
+def _remember_stale_cancel_order_ids(order_ids: set[int]) -> None:
+    """Remember order IDs that IBKR explicitly reported as absent."""
+
+    if not order_ids:
+        return
+    now = time.monotonic()
+    _prune_stale_cancel_order_ids(now)
+    for oid in order_ids:
+        _STALE_CANCEL_ORDER_IDS[int(oid)] = now
+
+
+def _is_stale_cancel_order_id(order_id) -> bool:
+    """Return True when a recent cancel attempt proved this order ID is gone."""
+
+    if order_id is None:
+        return False
+    try:
+        oid = int(order_id)
+    except (TypeError, ValueError):
+        return False
+    seen_at = _STALE_CANCEL_ORDER_IDS.get(oid)
+    if seen_at is None:
+        return False
+    if time.monotonic() - seen_at > _STALE_CANCEL_ORDER_TTL_SECONDS:
+        _STALE_CANCEL_ORDER_IDS.pop(oid, None)
+        return False
+    return True
+
+
+class _SuppressCancelNotFoundFilter(logging.Filter):
+    """Mute ib_async's pre-errorEvent log for best-effort stale-order cancels."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            'Error 10147' in message
+            and 'needs to be cancelled is not found' in message
+        )
 
 
 def log_order_event(
@@ -1762,6 +1817,9 @@ def fetch_open_order_counts() -> dict[str, int]:
 
             counts: dict[str, int] = {}
             for trade in trades:
+                oid = getattr(getattr(trade, 'order', None), 'orderId', None)
+                if _is_stale_cancel_order_id(oid):
+                    continue
                 status = getattr(getattr(trade, 'orderStatus', None), 'status', '') or ''
                 if status in terminal_statuses:
                     continue
@@ -2076,6 +2134,8 @@ def fetch_open_fx_orders(pair: Optional[str] = None) -> list[dict]:
             for trade in ib.reqAllOpenOrders():
                 snapshot = _order_snapshot_from_trade(trade)
                 if snapshot is None:
+                    continue
+                if _is_stale_cancel_order_id(snapshot.get('order_id')):
                     continue
                 if pair is not None and snapshot.get('pair') != pair:
                     continue
@@ -3195,15 +3255,32 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
             )
             return []
 
-        # Temporarily swap ib_async's error handler to mute "order not found"
+        not_found_order_ids: set[int] = set()
+        ib_logger = logging.getLogger("ib_async.ib")
+        log_filter = _SuppressCancelNotFoundFilter() if suppress_not_found else None
+        _filtered = None
+        _orig = None
+
+        # Temporarily filter ib_async's logger and error handler to mute
+        # best-effort cancels for orders that IBKR says are already gone.
         if suppress_not_found:
             _orig = ib._onError
             def _filtered(reqId, errorCode, errorString, contract=None):
-                if errorCode == 10147:
+                if (
+                    errorCode == 10147
+                    and 'needs to be cancelled is not found' in str(errorString)
+                ):
+                    try:
+                        not_found_order_ids.add(int(reqId))
+                    except (TypeError, ValueError):
+                        for oid in order_ids:
+                            if str(oid) in str(errorString):
+                                not_found_order_ids.add(int(oid))
                     return
                 _orig(reqId, errorCode, errorString, contract)
             ib.errorEvent -= _orig
             ib.errorEvent += _filtered
+            ib_logger.addFilter(log_filter)
 
         cancelled: list[int] = []
         cancel_error = None
@@ -3230,26 +3307,37 @@ def cancel_orders(order_ids: set[int], *, suppress_not_found: bool = False) -> l
 
             for oid in order_ids:
                 try:
-                    status = known_status_by_id.get(int(oid), '')
-                    if suppress_not_found and open_orders_loaded and int(oid) not in known_status_by_id:
+                    oid_int = int(oid)
+                    status = known_status_by_id.get(oid_int, '')
+                    if _is_stale_cancel_order_id(oid_int):
+                        continue
+                    if suppress_not_found and open_orders_loaded and oid_int not in known_status_by_id:
                         continue
                     if status in skip_statuses:
                         continue
-                    order = known_order_by_id.get(int(oid)) or Order(orderId=int(oid))
+                    order = known_order_by_id.get(oid_int) or Order(orderId=oid_int)
                     ib.cancelOrder(order)
-                    cancelled.append(int(oid))
+                    cancelled.append(oid_int)
                 except Exception as e:
                     print(f"    Warning: failed to cancel order {oid}: {e}")
                     cancel_error = str(e)
             if cancelled and hasattr(ib, 'sleep'):
                 ib.sleep(1)
+            if not_found_order_ids:
+                _remember_stale_cancel_order_ids(not_found_order_ids)
+                cancelled = [
+                    oid for oid in cancelled
+                    if int(oid) not in not_found_order_ids
+                ]
         except Exception as e:
             print(f"    Warning: cancel_orders failed: {e}")
             cancel_error = str(e)
         finally:
-            if suppress_not_found:
+            if suppress_not_found and _filtered is not None and _orig is not None:
                 ib.errorEvent -= _filtered
                 ib.errorEvent += _orig
+            if log_filter is not None:
+                ib_logger.removeFilter(log_filter)
         log_order_event(
             function_name='cancel_orders',
             action='cancel',

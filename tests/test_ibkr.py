@@ -625,8 +625,10 @@ class CancelOrdersAuditTests(unittest.TestCase):
         self._db_ctx = temporary_test_database()
         self.db_path = self._db_ctx.__enter__()
         db_module.init_db(self.db_path)
+        ibkr._STALE_CANCEL_ORDER_IDS.clear()
 
     def tearDown(self):
+        ibkr._STALE_CANCEL_ORDER_IDS.clear()
         if self._db_ctx is not None:
             self._db_ctx.__exit__(None, None, None)
 
@@ -674,6 +676,76 @@ class CancelOrdersAuditTests(unittest.TestCase):
 
         self.assertEqual(cancelled, [])
         ib.cancelOrder.assert_not_called()
+
+    @patch('fx_sr.ibkr.get_db_path')
+    @patch('fx_sr.ibkr._get_connection')
+    def test_cancel_orders_remembers_10147_as_stale_not_cancelled(self, mock_conn, mock_db_path):
+        mock_db_path.return_value = self.db_path
+
+        class FakeEvent:
+            def __init__(self):
+                self.handlers = []
+
+            def __iadd__(self, handler):
+                self.handlers.append(handler)
+                return self
+
+            def __isub__(self, handler):
+                self.handlers = [h for h in self.handlers if h != handler]
+                return self
+
+            def emit(self, *args):
+                for handler in list(self.handlers):
+                    handler(*args)
+
+        class FakeOrder:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        fake_ib_async = types.ModuleType('ib_async')
+        fake_ib_async.Order = FakeOrder
+
+        trade = types.SimpleNamespace(
+            contract=types.SimpleNamespace(secType='CASH', localSymbol='EUR.USD', symbol='EUR', currency='USD'),
+            order=types.SimpleNamespace(orderId=777),
+            orderStatus=types.SimpleNamespace(status='Submitted'),
+        )
+        ib = MagicMock()
+        ib.errorEvent = FakeEvent()
+        ib._onError = MagicMock()
+        ib.reqAllOpenOrders.return_value = [trade]
+
+        def _cancel_order(_order):
+            ib.errorEvent.emit(
+                777,
+                10147,
+                'OrderId 777 that needs to be cancelled is not found.',
+                None,
+            )
+
+        ib.cancelOrder.side_effect = _cancel_order
+        mock_conn.return_value = (ib, True)
+
+        with patch.dict(sys.modules, {'ib_async': fake_ib_async}):
+            cancelled = ibkr.cancel_orders({777}, suppress_not_found=True)
+
+        self.assertEqual(cancelled, [])
+        self.assertTrue(ibkr._is_stale_cancel_order_id(777))
+        ib._onError.assert_not_called()
+
+    @patch('fx_sr.ibkr._get_connection')
+    def test_fetch_open_order_counts_ignores_recent_stale_cancel_ids(self, mock_conn):
+        trade = types.SimpleNamespace(
+            contract=types.SimpleNamespace(secType='CASH', localSymbol='EUR.USD', symbol='EUR', currency='USD'),
+            order=types.SimpleNamespace(orderId=777),
+            orderStatus=types.SimpleNamespace(status='Submitted'),
+        )
+        ib = MagicMock()
+        ib.reqAllOpenOrders.return_value = [trade]
+        mock_conn.return_value = (ib, True)
+        ibkr._remember_stale_cancel_order_ids({777})
+
+        self.assertEqual(ibkr.fetch_open_order_counts(), {})
 
 
 class LiquidateFxPositionTests(unittest.TestCase):

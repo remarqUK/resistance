@@ -65,6 +65,93 @@ from . import ibkr
 _ACCOUNT_REFRESH_INTERVAL = 300  # 5 minutes
 
 _PROTECTION_TERMINAL_STATUSES = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE'}
+_EXIT_SIGNAL_BARRIER_SECONDS = 60 * 60
+
+
+def _get_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+_EXIT_SIGNAL_BARRIER_SECONDS = max(
+    0,
+    _get_env_int('LIVE_EXIT_SIGNAL_BARRIER_SECONDS', _EXIT_SIGNAL_BARRIER_SECONDS),
+)
+
+
+def _to_utc_timestamp(value: object) -> Optional[pd.Timestamp]:
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        return ts.tz_localize('UTC')
+    return ts.tz_convert('UTC')
+
+
+def _exit_signal_treated_as_active(
+    info: dict,
+    *,
+    now_utc: datetime | None = None,
+) -> bool:
+    signal_status = str(info.get('signal_status') or '').upper()
+    if signal_status != 'EXIT_SIGNAL':
+        return False
+    if info.get('pending_exit_reason'):
+        return True
+
+    pending_exit_detected_at = _to_utc_timestamp(info.get('pending_exit_detected_at'))
+    if pending_exit_detected_at is None:
+        return True
+    now = now_utc or datetime.now(timezone.utc)
+    elapsed = now - pending_exit_detected_at.to_pydatetime()
+    return elapsed.total_seconds() <= _EXIT_SIGNAL_BARRIER_SECONDS
+
+
+def _tracked_pair_state_for_scan(tracked_positions: Dict[str, dict] | None = None):
+    tracked_pairs: Dict[str, Set[str]] = {}
+    tracked_states: Dict[str, str] = {}
+    if not tracked_positions:
+        return tracked_pairs, tracked_states
+
+    now_utc = datetime.now(timezone.utc)
+    for key, info in tracked_positions.items():
+        pair = info.get('pair')
+        trade = info.get('trade')
+        if not pair or not trade:
+            continue
+        if (
+            info.get('signal_status') == 'EXIT_SIGNAL'
+            and not _exit_signal_treated_as_active(info, now_utc=now_utc)
+        ):
+            continue
+        tracked_pairs.setdefault(pair, set()).add(trade.direction)
+        if info.get('signal_status') == 'PARTIAL':
+            tracked_states[pair] = 'PARTIAL'
+        else:
+            tracked_states.setdefault(pair, 'OPEN')
+    return tracked_pairs, tracked_states
+
+
+def _tracked_pair_set_for_execution(tracked_positions: Dict[str, dict] | None = None) -> set[str]:
+    if not tracked_positions:
+        return set()
+    now_utc = datetime.now(timezone.utc)
+    blocked_pairs: set[str] = set()
+    for info in tracked_positions.values():
+        pair = info.get('pair')
+        if not pair:
+            continue
+        if _exit_signal_treated_as_active(info, now_utc=now_utc):
+            blocked_pairs.add(pair)
+    return blocked_pairs
 
 
 def _per_slot_margin(balance: float, margin_cushion_pct: float, margin_slots: int) -> float:
@@ -1232,19 +1319,8 @@ def collect_scan_rows(
     if portfolio_state is None and closed_trades is not None:
         portfolio_state = build_portfolio_state(closed_trades, params=params)
 
-    tracked_pairs: Dict[str, Set[str]] = {}
-    tracked_states: Dict[str, str] = {}
+    tracked_pairs, tracked_states = _tracked_pair_state_for_scan(tracked_positions)
     blocked_pairs = blocked_pairs or set()
-    if tracked_positions:
-        for info in tracked_positions.values():
-            pair = info.get('pair')
-            trade = info.get('trade')
-            if pair and trade:
-                tracked_pairs.setdefault(pair, set()).add(trade.direction)
-                if info.get('signal_status') == 'PARTIAL':
-                    tracked_states[pair] = 'PARTIAL'
-                else:
-                    tracked_states.setdefault(pair, 'OPEN')
 
     import time as _time
     signals: List[Signal] = []
@@ -1727,6 +1803,8 @@ def execute_signal_plans(
             trade = info.get('trade')
             if not pair or pair in seen_nonreplaceable_pairs:
                 continue
+            if _exit_signal_treated_as_active(info, now_utc=datetime.now(timezone.utc)):
+                continue
             exposures.append(
                 CorrelationExposure(
                     pair=pair,
@@ -2153,6 +2231,8 @@ def run_monitor_cycle(
 
         pending_pairs = ibkr.fetch_open_order_pairs()
         tracked = sync_positions(params, zone_history_days) if track_positions else {}
+        tracked_for_blocking = _tracked_pair_state_for_scan(tracked)[0]
+        tracked_blocked_pairs = _tracked_pair_set_for_execution(tracked)
 
         market_prices: Dict[str, float] = {}
         daily_data_cache: Dict[tuple[str, int], object] = {}
@@ -2180,7 +2260,7 @@ def run_monitor_cycle(
             pairs=pairs,
             params=params,
             zone_history_days=zone_history_days,
-            tracked_positions=tracked,
+            tracked_positions=tracked_for_blocking,
             blocked_pairs=pending_pairs,
             price_cache=market_prices,
             daily_data_cache=daily_data_cache,
@@ -2217,10 +2297,10 @@ def run_monitor_cycle(
             signals,
             size_plans,
             execute_orders=execute_orders,
-            existing_pairs={info['pair'] for info in tracked.values()},
+            existing_pairs=tracked_blocked_pairs,
             pending_pairs=pending_pairs,
             params=params,
-            tracked_positions=tracked,
+            tracked_positions=tracked_for_blocking,
             balance=active_balance,
             risk_pct=risk_pct,
             account_currency=active_currency,

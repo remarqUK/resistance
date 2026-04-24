@@ -91,7 +91,7 @@ def _cancel_orders_for_pairs(pairs: set[str], *, exclude_order_ids: set[int] | N
             if cancel_ids:
                 cancelled = ibkr.cancel_orders(cancel_ids, suppress_not_found=True)
                 if cancelled:
-                    print(f"    Cancelled {len(cancelled)} orphaned orders")
+                    print(f"    Requested cancellation for {len(cancelled)} orphaned orders")
         except Exception as e:
             print(f"    Warning: failed to cancel orphaned orders: {e}")
 

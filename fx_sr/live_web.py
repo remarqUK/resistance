@@ -4157,7 +4157,10 @@ class LiveDashboardHub:
                 'error': None,
             }
 
-        seed_workers = max(1, min(4, total))
+        # _prepare_pair issues daily / hourly / minute loads against PostgreSQL
+        # for every pair. Same parallel-DB-fetch deadlock as Phase 2 / Phase 3 —
+        # run sequentially.
+        seed_workers = 1
         with ThreadPoolExecutor(max_workers=seed_workers, thread_name_prefix='startup-seed') as executor:
             futures = {
                 executor.submit(_prepare_pair, pair_id, pair_info): (idx, pair_id, pair_info)

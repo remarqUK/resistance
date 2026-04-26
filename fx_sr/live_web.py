@@ -85,8 +85,11 @@ _BACKTEST_PROGRESS_RE = re.compile(r'^\s*\[(\d+)\s*/\s*(\d+)\]\s+([A-Za-z0-9]+)'
 _STARTUP_WARM_CACHE_VERSION = 1
 _STARTUP_WARM_CACHE_ALIAS = 'live_startup_warm:latest'
 _HOLE_REFILL_MAX_AGE = pd.Timedelta(days=30)
-_PHASE2_SCAN_WORKERS_DEFAULT = 4
-_PHASE3_SCAN_WORKERS_DEFAULT = 8
+# Both phases issue PostgreSQL queries per pair (gap scan in Phase 2,
+# load_l2_snapshots + cache reads in Phase 3). Parallel PG fetches deadlock
+# the connection pool — a documented project rule. Run sequentially.
+_PHASE2_SCAN_WORKERS_DEFAULT = 1
+_PHASE3_SCAN_WORKERS_DEFAULT = 1
 _ACCOUNT_HISTORY_REFRESH_INTERVAL = timedelta(seconds=45)
 _ACCOUNT_HISTORY_REFRESH_TIMEOUT = 6.0
 _ACCOUNT_HISTORY_REFRESH_STATE_KEY = '_account_history_refresh'
@@ -103,6 +106,18 @@ class _BufferedRealtimeBar:
     low: float
     close: float
     volume: float
+
+
+@dataclass(slots=True)
+class _PairScanRequest:
+    """One coalescible pair scan request."""
+
+    pair: str
+    kind: str
+    generation: int
+    requested_at: pd.Timestamp
+    price: float | None = None
+    bar_time: object | None = None
 
 
 def _normalize_execution_mode(mode: str | None) -> str:
@@ -252,6 +267,21 @@ class LiveDashboardHub:
         self._scan_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='ibkr-scan',
         )
+        self._pair_scan_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='ibkr-pair-scan',
+        )
+        self._pair_scan_slot = asyncio.Lock()
+        self._scan_busy_pairs: set[str] = set()
+        self._scan_busy_meta: dict[str, dict] = {}
+        self._scan_pending_requests: dict[str, _PairScanRequest] = {}
+        self._scan_generations: dict[str, int] = {}
+        self._scan_submitted_count = 0
+        self._scan_completed_count = 0
+        self._scan_failed_count = 0
+        self._scan_skipped_count = 0
+        self._scan_coalesced_count = 0
+        self._scan_last_started_at: pd.Timestamp | None = None
+        self._scan_last_completed_at: pd.Timestamp | None = None
         self._housekeeping_nudge = asyncio.Event()
         self._quote_stop = threading.Event()
         self._quote_thread: Optional[threading.Thread] = None
@@ -299,6 +329,86 @@ class LiveDashboardHub:
 
         return self._execution_available and not self._execution_paused
 
+    @staticmethod
+    def _iso_or_none(value) -> str | None:
+        if value is None:
+            return None
+        try:
+            return pd.Timestamp(value).isoformat()
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _age_seconds(started_at, now_ts: pd.Timestamp) -> float | None:
+        if started_at is None:
+            return None
+        try:
+            ts = pd.Timestamp(started_at)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize('UTC')
+            else:
+                ts = ts.tz_convert('UTC')
+            return max(0.0, float((now_ts - ts).total_seconds()))
+        except Exception:
+            return None
+
+    def _scan_backlog_summary(self) -> dict:
+        """Return low-cost pair-scan scheduler telemetry for the dashboard."""
+
+        now_ts = pd.Timestamp.now(tz='UTC')
+        pending = sorted(
+            self._scan_pending_requests.values(),
+            key=lambda request: (request.requested_at, request.pair),
+        )
+        pending_pairs = [
+            {
+                'pair': request.pair,
+                'kind': request.kind,
+                'generation': request.generation,
+                'requested_at': request.requested_at.isoformat(),
+                'age_seconds': self._age_seconds(request.requested_at, now_ts),
+            }
+            for request in pending
+        ]
+        busy_pairs = []
+        for pair, meta in sorted(self._scan_busy_meta.items()):
+            busy_pairs.append({
+                'pair': pair,
+                'kind': meta.get('kind'),
+                'generation': meta.get('generation'),
+                'requested_at': self._iso_or_none(meta.get('requested_at')),
+                'started_at': self._iso_or_none(meta.get('started_at')),
+                'age_seconds': self._age_seconds(meta.get('started_at') or meta.get('requested_at'), now_ts),
+            })
+
+        oldest_pending_age = None
+        if pending:
+            oldest_pending_age = max(
+                self._age_seconds(request.requested_at, now_ts) or 0.0
+                for request in pending
+            )
+
+        return {
+            'pending_count': len(pending_pairs),
+            'busy_count': len(busy_pairs),
+            'oldest_pending_age_seconds': oldest_pending_age,
+            'coalesced_count': self._scan_coalesced_count,
+            'submitted_count': self._scan_submitted_count,
+            'completed_count': self._scan_completed_count,
+            'failed_count': self._scan_failed_count,
+            'skipped_count': self._scan_skipped_count,
+            'pending_pairs': pending_pairs,
+            'busy_pairs': busy_pairs,
+            'last_started_at': self._iso_or_none(self._scan_last_started_at),
+            'last_completed_at': self._iso_or_none(self._scan_last_completed_at),
+            'executor': {
+                'max_workers': 1,
+                'active_slots': 1 if self._pair_scan_slot.locked() else 0,
+                'tracked_async_tasks': len(self._pending_tasks),
+            },
+            'heartbeat_at': now_ts.isoformat(),
+        }
+
     def _build_summary(self, *, status: str) -> dict:
         """Build the summary payload consumed by the dashboard shell."""
 
@@ -314,11 +424,13 @@ class LiveDashboardHub:
             'execution_enabled': self._execution_enabled(),
             'execution_available': self._execution_available,
             'execution_paused': self._execution_paused,
+            'execution_heartbeat_at': pd.Timestamp.now(tz='UTC').isoformat(),
             'execution_mode': self.execution_mode,
             'execution_mode_label': _execution_mode_label(self.execution_mode),
             'strategy_label': self.strategy_label or 'Strategy',
             'mode': 'scanner + positions' if self.track_positions else 'scanner',
             'url': self._ws_url(),
+            'scan_backlog': self._scan_backlog_summary(),
             'backfill': dict(self._backfill_progress),
             'fill': dict(self._fill_progress),
             'backtest': dict(self._backtest_progress),
@@ -683,6 +795,15 @@ class LiveDashboardHub:
             if pair not in active_pairs:
                 self._clear_signal_tracking(pair)
 
+    @staticmethod
+    def _snapshot_portfolio_state(portfolio_state):
+        """Return a thread-safe shallow snapshot of live portfolio policy state."""
+
+        return replace(
+            portfolio_state,
+            latest_pair_closes=dict(portfolio_state.latest_pair_closes),
+        )
+
     def _evaluate_pair_row(
         self,
         pair: str,
@@ -692,6 +813,7 @@ class LiveDashboardHub:
         price: float,
         hourly_df,
         minute_df=None,
+        portfolio_state=None,
     ) -> tuple[PairScanRow | None, object | None, list]:
         """Rebuild one pair row from authoritative scan inputs."""
 
@@ -714,7 +836,7 @@ class LiveDashboardHub:
             hourly_data_cache={ticker: hourly_df},
             minute_data_cache=minute_data_cache,
             execution_mode=self.execution_mode,
-            portfolio_state=self._portfolio_state,
+            portfolio_state=portfolio_state if portfolio_state is not None else self._portfolio_state,
             hourly_days=self.hourly_days,
         )
         return (
@@ -722,6 +844,285 @@ class LiveDashboardHub:
             signals[0] if signals else None,
             wf_signals,
         )
+
+    def _new_pair_scan_request(
+        self,
+        pair: str,
+        *,
+        kind: str,
+        price: float | None = None,
+        bar_time=None,
+    ) -> _PairScanRequest:
+        pair = str(pair).upper()
+        generation = int(self._scan_generations.get(pair, 0)) + 1
+        self._scan_generations[pair] = generation
+        return _PairScanRequest(
+            pair=pair,
+            kind=kind,
+            generation=generation,
+            requested_at=pd.Timestamp.now(tz='UTC'),
+            price=price,
+            bar_time=bar_time,
+        )
+
+    def _claim_pair_scan_request(self, request: _PairScanRequest) -> bool:
+        """Claim a pair scan, or coalesce it behind the active pair scan."""
+
+        self._scan_submitted_count += 1
+        if request.pair in self._scan_busy_pairs:
+            self._scan_coalesced_count += 1
+            self._scan_pending_requests[request.pair] = request
+            return False
+
+        self._scan_busy_pairs.add(request.pair)
+        self._scan_busy_meta[request.pair] = {
+            'kind': request.kind,
+            'generation': request.generation,
+            'requested_at': request.requested_at,
+            'started_at': None,
+        }
+        return True
+
+    async def _broadcast_scan_status(self) -> None:
+        """Push a summary-only heartbeat with scan backlog and execution state."""
+
+        async with self._lock:
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+            summary = self._serialize_summary()
+        await self._broadcast({'type': 'scan_status', 'summary': summary})
+
+    async def _request_pair_scan(self, request: _PairScanRequest) -> None:
+        """Run or coalesce one pair scan request."""
+
+        if not self._claim_pair_scan_request(request):
+            await self._broadcast_scan_status()
+            return
+
+        await self._drain_pair_scan_requests(request)
+
+    async def _drain_pair_scan_requests(self, request: _PairScanRequest) -> None:
+        """Run the current request, then the latest coalesced request for the pair."""
+
+        current = request
+        pair = request.pair
+        try:
+            while current is not None:
+                latest = self._scan_pending_requests.pop(pair, None)
+                if latest is not None:
+                    self._scan_skipped_count += 1
+                    current = latest
+                    self._scan_busy_meta[pair] = {
+                        'kind': current.kind,
+                        'generation': current.generation,
+                        'requested_at': current.requested_at,
+                        'started_at': None,
+                    }
+                    continue
+
+                try:
+                    replacement = await self._run_pair_scan_request(current)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._scan_failed_count += 1
+                    self._scan_last_completed_at = pd.Timestamp.now(tz='UTC')
+                    await self._broadcast_log(
+                        'error',
+                        f'{current.kind.title()} scan failed: {current.pair} {exc}',
+                    )
+                else:
+                    if replacement is not None:
+                        current = replacement
+                        self._scan_busy_meta[pair] = {
+                            'kind': current.kind,
+                            'generation': current.generation,
+                            'requested_at': current.requested_at,
+                            'started_at': None,
+                        }
+                        continue
+                    self._scan_completed_count += 1
+                    self._scan_last_completed_at = pd.Timestamp.now(tz='UTC')
+
+                current = self._scan_pending_requests.pop(pair, None)
+                if current is not None:
+                    self._scan_busy_meta[pair] = {
+                        'kind': current.kind,
+                        'generation': current.generation,
+                        'requested_at': current.requested_at,
+                        'started_at': None,
+                    }
+        finally:
+            self._scan_busy_pairs.discard(pair)
+            self._scan_busy_meta.pop(pair, None)
+            self._scan_pending_requests.pop(pair, None)
+            await self._broadcast_scan_status()
+
+    async def _run_pair_scan_request(self, request: _PairScanRequest) -> _PairScanRequest | None:
+        """Run one coalesced pair scan through the bounded scan slot."""
+
+        async with self._pair_scan_slot:
+            latest = self._scan_pending_requests.pop(request.pair, None)
+            if latest is not None:
+                self._scan_skipped_count += 1
+                return latest
+
+            started_at = pd.Timestamp.now(tz='UTC')
+            self._scan_last_started_at = started_at
+            self._scan_busy_meta[request.pair] = {
+                'kind': request.kind,
+                'generation': request.generation,
+                'requested_at': request.requested_at,
+                'started_at': started_at,
+            }
+            if request.kind == 'hourly':
+                await self._run_hourly_pair_scan(request)
+            else:
+                await self._run_minute_pair_scan(request)
+            return None
+
+    async def _run_minute_pair_scan(self, request: _PairScanRequest) -> None:
+        """Intrabar mode: evaluate signal at each completed minute bar."""
+
+        if not self._backfill_done:
+            return
+
+        hourly_df = self._accumulator.get_hourly_df(request.pair)
+        if hourly_df is None or hourly_df.empty:
+            return
+        minute_df = self._accumulator.get_completed_minute_df(request.pair)
+        price = request.price
+        if price is None or price <= 0:
+            price = float(hourly_df.iloc[-1]['Close'])
+
+        async with self._lock:
+            tracked_copy = dict(self._tracked)
+            blocked = set(self._tick_pending_pairs)
+            current_signal_id = self._active_signal_meta.get(request.pair, {}).get('signal_id')
+            portfolio_state = self._snapshot_portfolio_state(self._portfolio_state)
+
+        updated_row, signal, wf_signals = await self._loop.run_in_executor(
+            self._pair_scan_executor,
+            lambda: self._evaluate_pair_row(
+                request.pair,
+                tracked_positions=tracked_copy,
+                blocked_pairs=set(blocked),
+                price=float(price),
+                hourly_df=hourly_df,
+                minute_df=minute_df,
+                portfolio_state=portfolio_state,
+            ),
+        )
+        await self._apply_pair_scan_result(
+            request,
+            updated_row=updated_row,
+            signal=signal,
+            wf_signals=wf_signals,
+            current_signal_id=current_signal_id,
+            source='intrabar',
+            broadcast_snapshot=False,
+        )
+
+    async def _run_hourly_pair_scan(self, request: _PairScanRequest) -> None:
+        """Evaluate pair state after hourly bar completion."""
+
+        if not self._backfill_done:
+            return
+
+        hourly_df = self._completed_hourly_df(request.pair, request.bar_time)
+        if hourly_df.empty:
+            return
+
+        completed_close = float(hourly_df.iloc[-1]['Close'])
+        minute_df = self._accumulator.get_completed_minute_df(request.pair)
+        async with self._lock:
+            tracked_copy = dict(self._tracked)
+            blocked = set(self._tick_pending_pairs)
+            current_signal_id = self._active_signal_meta.get(request.pair, {}).get('signal_id')
+            current_price = self._last_quotes.get(request.pair, completed_close)
+            portfolio_state = self._snapshot_portfolio_state(self._portfolio_state)
+
+        updated_row, signal, wf_signals = await self._loop.run_in_executor(
+            self._pair_scan_executor,
+            lambda: self._evaluate_pair_row(
+                request.pair,
+                tracked_positions=tracked_copy,
+                blocked_pairs=set(blocked),
+                price=float(current_price),
+                hourly_df=hourly_df,
+                minute_df=minute_df,
+                portfolio_state=portfolio_state,
+            ),
+        )
+        await self._apply_pair_scan_result(
+            request,
+            updated_row=updated_row,
+            signal=signal,
+            wf_signals=wf_signals,
+            current_signal_id=current_signal_id,
+            source='hourly',
+            broadcast_snapshot=True,
+        )
+
+    async def _apply_pair_scan_result(
+        self,
+        request: _PairScanRequest,
+        *,
+        updated_row,
+        signal,
+        wf_signals,
+        current_signal_id: str | None,
+        source: str,
+        broadcast_snapshot: bool,
+    ) -> None:
+        """Apply one pair-scan result without duplicating signal handling."""
+
+        if wf_signals:
+            async with self._lock:
+                for ws in wf_signals:
+                    exit_reason = getattr(ws, '_wf_exit_reason', '?')
+                    pnl_r = getattr(ws, '_wf_pnl_r', 0.0)
+                    pnl_label = f'{pnl_r:+.1f}R' if pnl_r else 'open'
+                    exit_label = f' exit={exit_reason} {pnl_label}' if exit_reason else ''
+                    self._append_log(
+                        'info',
+                        f'WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
+                        f'@ {ws.time}{exit_label}',
+                    )
+            cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=2)
+            for ws in wf_signals:
+                sig_time = pd.Timestamp(ws.time)
+                if sig_time.tzinfo is None:
+                    sig_time = sig_time.tz_localize('UTC')
+                else:
+                    sig_time = sig_time.tz_convert('UTC')
+                if sig_time >= cutoff:
+                    await self._handle_signal(ws, source='WF trade')
+
+        if signal is not None and self._signal_identity(signal) != current_signal_id:
+            await self._handle_signal(signal, source=source)
+            return
+
+        row_payload = None
+        summary = None
+        state = None
+        async with self._lock:
+            if updated_row is not None:
+                if signal is not None:
+                    self._mark_signal_valid(signal)
+                else:
+                    self._clear_signal_tracking(request.pair)
+                self._pair_rows[request.pair] = updated_row
+                row_payload = self._serialize_pair_row(updated_row)
+            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
+            if broadcast_snapshot:
+                state = self._export_state()
+            else:
+                summary = self._serialize_summary()
+
+        if state is not None:
+            await self._broadcast({'type': 'snapshot', 'state': state})
+        elif row_payload is not None:
+            await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
 
     async def _broadcast_log(self, level: str, message: str) -> None:
         """Append a log entry and push it to connected clients."""
@@ -1888,6 +2289,7 @@ class LiveDashboardHub:
     # warn/stale threshold within one cycle; long enough that the DB query
     # overhead is negligible.
     _DATA_HEALTH_LOOP_INTERVAL_SECONDS = 30
+    _SCAN_STATUS_LOOP_INTERVAL_SECONDS = 15
 
     def _serialize_summary(self) -> dict:
         """Return a copy of ``self.summary`` decorated with ``data_health``.
@@ -3290,67 +3692,12 @@ class LiveDashboardHub:
         await self._process_realtime_bar(pair, bar)
 
     async def _handle_minute_bar_complete(self, pair: str, price: float) -> None:
-        """Intrabar mode: evaluate signal at each minute bar close."""
+        """Queue intrabar signal evaluation for a completed minute bar."""
 
         if not self._backfill_done:
             return
-
-        # Build hourly df including the in-progress bar
-        hourly_df = self._accumulator.get_hourly_df(pair)
-        if hourly_df is None or hourly_df.empty:
-            return
-        minute_df = self._accumulator.get_completed_minute_df(pair)
-
-        async with self._lock:
-            tracked_copy = dict(self._tracked)
-            blocked = set(self._tick_pending_pairs)
-            current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
-
-        updated_row, signal, wf_signals = await self._loop.run_in_executor(
-            self._scan_executor,
-            lambda: self._evaluate_pair_row(
-                pair,
-                tracked_positions=tracked_copy,
-                blocked_pairs=set(blocked),
-                price=price,
-                hourly_df=hourly_df,
-                minute_df=minute_df,
-            ),
-        )
-
-        # Log and attempt execution for new WF trade signals
-        if wf_signals:
-            async with self._lock:
-                for ws in wf_signals:
-                    exit_reason = getattr(ws, '_wf_exit_reason', '?')
-                    pnl_r = getattr(ws, '_wf_pnl_r', 0.0)
-                    pnl_label = f'{pnl_r:+.1f}R' if pnl_r else 'open'
-                    exit_label = f' exit={exit_reason} {pnl_label}' if exit_reason else ''
-                    self._append_log(
-                        'info',
-                        f'WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
-                        f'@ {ws.time}{exit_label}',
-                    )
-            import datetime as _dt
-            _cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=2)
-            for ws in wf_signals:
-                sig_time = pd.Timestamp(ws.time)
-                if sig_time.tzinfo is None:
-                    sig_time = sig_time.tz_localize('UTC')
-                if sig_time >= _cutoff:
-                    await self._handle_signal(ws, source='WF trade')
-
-        if signal is not None and self._signal_identity(signal) != current_signal_id:
-            await self._handle_signal(signal, source='intrabar')
-            return
-
-        async with self._lock:
-            if updated_row is not None:
-                if signal is not None:
-                    self._mark_signal_valid(signal)
-                else:
-                    self._clear_signal_tracking(pair)
-                self._pair_rows[pair] = updated_row
+        request = self._new_pair_scan_request(pair, kind='minute', price=price)
+        await self._request_pair_scan(request)
 
     def _completed_hourly_df(self, pair: str, bar_time) -> pd.DataFrame:
         """Return completed hourly bars up to the finalized bar that triggered the callback."""
@@ -3392,7 +3739,6 @@ class LiveDashboardHub:
 
         completed_time = hourly_df.index[-1]
         last_bar = hourly_df.iloc[-1]
-        completed_close = float(last_bar['Close'])
 
         bar_close_orders: list[tuple[str, str, str, str, int, str | None, float | None]] = []
         bracket_exits_to_persist: list[tuple[str, str, float | None]] = []
@@ -3450,11 +3796,6 @@ class LiveDashboardHub:
                                     key, pair, alert['direction'],
                                     exit_reason, size, signal_id, exit_price,
                                 ))
-
-            tracked_copy = dict(self._tracked)
-            blocked = set(self._tick_pending_pairs)
-            current_signal_id = self._active_signal_meta.get(pair, {}).get('signal_id')
-            current_price = self._last_quotes.get(pair, completed_close)
 
         # Persist bracket (TP/SL) exits outside the lock.
         for sig_id, exit_reason, exit_price in bracket_exits_to_persist:
@@ -3529,56 +3870,8 @@ class LiveDashboardHub:
         if bar_close_orders:
             self._housekeeping_nudge.set()
 
-        minute_df = self._accumulator.get_completed_minute_df(pair)
-        updated_row, signal, wf_signals = await self._loop.run_in_executor(
-            self._scan_executor,
-            lambda: self._evaluate_pair_row(
-                pair,
-                tracked_positions=tracked_copy,
-                blocked_pairs=set(blocked),
-                price=current_price,
-                hourly_df=hourly_df,
-                minute_df=minute_df,
-            ),
-        )
-
-        # Log new walk-forward trade signals for this pair
-        if wf_signals:
-            async with self._lock:
-                for ws in wf_signals:
-                    exit_reason = getattr(ws, '_wf_exit_reason', '?')
-                    pnl_r = getattr(ws, '_wf_pnl_r', 0.0)
-                    pnl_label = f'{pnl_r:+.1f}R' if pnl_r else 'open'
-                    exit_label = f' exit={exit_reason} {pnl_label}' if exit_reason else ''
-                    self._append_log(
-                        'info',
-                        f'WF signal: {ws.pair} {ws.direction} entry={ws.entry_price:.5f} '
-                        f'@ {ws.time}{exit_label}',
-                    )
-            # Attempt execution for fresh WF signals (entered within last 2 hours)
-            import datetime as _dt
-            _cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(hours=2)
-            for ws in wf_signals:
-                sig_time = pd.Timestamp(ws.time)
-                if sig_time.tzinfo is None:
-                    sig_time = sig_time.tz_localize('UTC')
-                if sig_time >= _cutoff:
-                    await self._handle_signal(ws, source='WF trade')
-        if signal is not None and self._signal_identity(signal) != current_signal_id:
-            await self._handle_signal(signal, source='hourly')
-            return
-
-        async with self._lock:
-            if updated_row is not None:
-                if signal is not None:
-                    self._mark_signal_valid(signal)
-                else:
-                    self._clear_signal_tracking(pair)
-                self._pair_rows[pair] = updated_row
-            self.summary = self._build_summary(status=self.summary.get('status', 'live'))
-            state = self._export_state()
-
-        await self._broadcast({'type': 'snapshot', 'state': state})
+        request = self._new_pair_scan_request(pair, kind='hourly', bar_time=bar_time)
+        await self._request_pair_scan(request)
 
     def _run_realtime_bar_stream(self) -> None:
         """Run the blocking IBKR real-time bar subscription loop.
@@ -4349,6 +4642,22 @@ class LiveDashboardHub:
                     f'Data-health broadcast skipped: {exc}',
                 )
 
+    async def _scan_status_loop(self) -> None:
+        """Broadcast scan backlog and execution state even when scans are quiet."""
+
+        while True:
+            try:
+                await asyncio.sleep(self._SCAN_STATUS_LOOP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                return
+            try:
+                await self._broadcast_scan_status()
+            except Exception as exc:
+                await self._broadcast_log(
+                    'warning',
+                    f'Scan-status broadcast skipped: {exc}',
+                )
+
     async def _housekeeping_loop(self) -> None:
         """Low-frequency periodic tasks: position sync, zone refresh, balance."""
 
@@ -4610,6 +4919,8 @@ class LiveDashboardHub:
         self._last_data_health = self._compute_data_health()
         data_health_task = asyncio.create_task(self._data_health_loop())
         self._track_task(data_health_task, label='data-health')
+        scan_status_task = asyncio.create_task(self._scan_status_loop())
+        self._track_task(scan_status_task, label='scan-status')
 
         await self._broadcast_log('info', 'Loading recent execution activity...')
         await self._loop.run_in_executor(
@@ -4654,6 +4965,7 @@ class LiveDashboardHub:
         self._pending_tasks.clear()
 
         stop_background_writer()
+        self._pair_scan_executor.shutdown(wait=False)
         self._scan_executor.shutdown(wait=False)
 
     async def register(self, ws: web.WebSocketResponse) -> None:
@@ -5514,7 +5826,10 @@ async def _websocket(request: web.Request) -> web.StreamResponse:
     _validate_websocket_request(request)
     hub: LiveDashboardHub = request.app["hub"]
     ws = web.WebSocketResponse(heartbeat=20)
-    await ws.prepare(request)
+    try:
+        await ws.prepare(request)
+    except ConnectionError:
+        return web.Response(status=499, reason='Client Closed Request')
     try:
         await hub.register(ws)
         async for _ in ws:

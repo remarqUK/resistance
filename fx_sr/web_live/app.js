@@ -858,7 +858,7 @@ function renderWatchlist() {
     const rNear = row.resistance_dist_pct != null && row.resistance_dist_pct <= NEAR_THRESHOLD;
     return `
       <tr>
-        <td><a href="/live-trade?pair=${encodeURIComponent(row.pair)}" target="_blank" class="pair-main pair-link" title="Live chart ${escapeHtml(row.pair)}">${escapeHtml(row.pair)}</a></td>
+        <td><a href="/chart?pair=${encodeURIComponent(row.pair)}" target="_blank" class="pair-main pair-link" title="Live chart ${escapeHtml(row.pair)}">${escapeHtml(row.pair)}</a></td>
         <td>${renderBadge(row.state)}</td>
         <td class="price">${formatNumber(row.price, PRICE_DISPLAY_DECIMALS)}</td>
         <td class="price${sNear ? " zone-near" : ""}">${escapeHtml(row.support_text || "â€“")}</td>
@@ -947,7 +947,7 @@ function renderPositions() {
           <div><span class="value-label">P/L</span><span class="value ${pnlClass}">${formatSigned(position.pnl_pips, 1, " pips")}</span></div>
         </div>
         <div style="margin-top: 6px">
-          <a href="/live-trade?${chartQuery}" target="_blank" class="pair-link" title="Open trade chart">View chart</a>
+          <a href="/chart?${chartQuery}" target="_blank" class="pair-link" title="Open trade chart">View chart</a>
         </div>
       </article>
     `;

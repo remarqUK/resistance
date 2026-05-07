@@ -464,10 +464,6 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ohlc_lookup
-        ON ohlc (ticker, interval, ts)
-    """)
-    conn.execute("""
         CREATE TABLE IF NOT EXISTS l2_snapshot (
             id               BIGSERIAL PRIMARY KEY,
             ticker           SMALLINT NOT NULL CHECK (ticker > 0),
@@ -503,10 +499,6 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_l2_level_lookup
-        ON l2_level (snapshot_id, side, level_no)
-    """)
-    conn.execute("""
         CREATE TABLE IF NOT EXISTS backtest_result (
             pair               TEXT NOT NULL,
             run_id             TEXT NOT NULL DEFAULT '',
@@ -524,29 +516,6 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
             PRIMARY KEY (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
         )
     """)
-    existing_backtest_columns = _table_columns(conn, 'backtest_result')
-    if 'run_id' in existing_backtest_columns:
-        if 'execution_mode' in existing_backtest_columns:
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-                ON backtest_result (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
-            """)
-        else:
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-                ON backtest_result (pair, run_id, params_hash, hourly_days, zone_history_days)
-            """)
-    else:
-        if 'execution_mode' in existing_backtest_columns:
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-                ON backtest_result (pair, params_hash, execution_mode, hourly_days, zone_history_days)
-            """)
-        else:
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-                ON backtest_result (pair, params_hash, hourly_days, zone_history_days)
-            """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_backtest_pair_updated_at
         ON backtest_result (pair, updated_at DESC)
@@ -580,10 +549,6 @@ def _init_postgres_schema(conn: _CompatConnection) -> None:
             recorded_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (ticker, interval, gap_ts)
         )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_provider_gap_exception_lookup
-        ON provider_gap_exception (ticker, interval, gap_ts)
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS order_audit_log (
@@ -802,6 +767,10 @@ def _migrate_legacy_postgres_schema(conn: _CompatConnection) -> None:
         END
         $$;
     """)
+    conn.execute('DROP INDEX IF EXISTS idx_ohlc_lookup')
+    conn.execute('DROP INDEX IF EXISTS idx_l2_level_lookup')
+    conn.execute('DROP INDEX IF EXISTS idx_backtest_lookup')
+    conn.execute('DROP INDEX IF EXISTS idx_provider_gap_exception_lookup')
     conn.execute("""
         ALTER TABLE l2_snapshot
             DROP CONSTRAINT IF EXISTS l2_snapshot_pair_chk
@@ -923,10 +892,6 @@ def init_db(db_path: str | None = None, *, migrate_legacy: bool = True) -> None:
                         ADD PRIMARY KEY (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
                 """)
                 conn.execute('DROP INDEX IF EXISTS idx_backtest_lookup')
-                conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_backtest_lookup
-                    ON backtest_result (pair, run_id, params_hash, execution_mode, hourly_days, zone_history_days)
-                """)
             conn.commit()
             _DB_SCHEMA_READY.add(db_path)
         finally:

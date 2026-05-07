@@ -218,10 +218,7 @@ def _ensure_table(db_path: str = None):
                 'entry_time': ts_type,
             },
         )
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_open_trades_pair_direction
-            ON open_trades (pair, direction)
-        """)
+        conn.execute("DROP INDEX IF EXISTS idx_open_trades_pair_direction")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS neutralization_position (
                 pair       TEXT NOT NULL,
@@ -983,10 +980,6 @@ def sync_positions(
             continue
         if (pos['pair'], direction) in neutralization_keys:
             continue
-        print(
-            f"    Broker-ledger FX exposure detected: {pos['pair']} {direction} "
-            f"@ {pos['avg_cost']:.5f} (size: {abs(pos['size']):.0f})"
-        )
         ibkr_positions.append(pos)
         live_position_keys.add(key)
 
@@ -1063,14 +1056,21 @@ def sync_positions(
 
         existing_info = db_trades.get(key)
         is_new_position = existing_info is None
+        position_source = pos.get('position_source') or pos.get('source') or 'ibkr_position'
         size_changed = (
             is_new_position
             or abs(float(existing_info.get('ibkr_size') or 0.0) - float(pos['size'])) > 1e-9
             or abs(float(existing_info.get('ibkr_avg_cost') or 0.0) - float(pos['avg_cost'])) > 1e-9
         )
         if is_new_position:
-            print(f"    New position detected: {pos['pair']} {direction} "
-                  f"@ {pos['avg_cost']:.5f} (size: {pos['size']:.0f})")
+            if position_source == 'broker_execution':
+                print(
+                    f"    Broker-ledger FX exposure detected: {pos['pair']} {direction} "
+                    f"@ {pos['avg_cost']:.5f} (size: {abs(pos['size']):.0f})"
+                )
+            else:
+                print(f"    New position detected: {pos['pair']} {direction} "
+                      f"@ {pos['avg_cost']:.5f} (size: {pos['size']:.0f})")
 
         signal_row = None
         trade = existing_info['trade'] if existing_info is not None else None
@@ -1116,7 +1116,6 @@ def sync_positions(
         # Run for ALL positions (including newly detected ones after a crash/restart)
         # to ensure every live position has bracket protection.
         pair_close_ids = (exclude_close_order_ids_by_pair or {}).get(pos['pair'], set())
-        position_source = pos.get('position_source') or pos.get('source') or 'ibkr_position'
         if position_source != 'broker_execution':
             _resubmit_missing_brackets(
                 signal_row,

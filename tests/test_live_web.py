@@ -26,6 +26,7 @@ from fx_sr.live_web import (
     _account_history_api,
     _set_execution_mode,
     _validate_websocket_request,
+    _websocket,
 )
 from fx_sr.positions import reconcile_flat_position
 from fx_sr.sizing import PositionSizePlan
@@ -94,7 +95,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
                     'decimals': 5,
                 },
             },
-            params=StrategyParams(),
+            params=StrategyParams(max_live_signal_lag_seconds=9999999.0),
             interval=60,
             zone_history_days=30,
             track_positions=True,
@@ -142,13 +143,14 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def asyncTearDown(self):
+        self.hub._pair_scan_executor.shutdown(wait=True)
         self.hub._scan_executor.shutdown(wait=True)
 
     async def test_hourly_bar_complete_uses_finalized_bar_and_persists_tracking(self):
         self.hub._backfill_done = True
         captured = {}
 
-        def _capture_signal_eval(pair, tracked_positions=None, blocked_pairs=None, price=None, hourly_df=None, minute_df=None):
+        def _capture_signal_eval(pair, tracked_positions=None, blocked_pairs=None, price=None, hourly_df=None, minute_df=None, **_):
             captured['pair'] = pair
             captured['price'] = price
             captured['tracked_pairs'] = tracked_positions
@@ -577,6 +579,39 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
             detection_source='startup_replay',
         )
 
+    async def test_run_backfill_processes_startup_signals(self):
+        startup_signal = _signal('EURUSD', 'LONG')
+        startup_row = PairScanRow(
+            pair='EURUSD',
+            name='EUR/USD',
+            decimals=5,
+            price=1.1000,
+            state='LONG',
+            note='Support reversal',
+            support_text='1.0990-1.1010',
+            resistance_text='-',
+            signal=startup_signal,
+        )
+
+        with patch.object(
+            self.hub,
+            '_backfill_data',
+            return_value=([startup_signal], [startup_row], [], [], 0.0),
+        ), \
+                patch.object(self.hub, '_handle_signal', new=AsyncMock()) as handle_mock, \
+                patch.object(self.hub, '_emit_backfill_complete_beep'), \
+                patch('fx_sr.positions.sync_positions', return_value={}), \
+                patch('fx_sr.live_web.ibkr.fetch_account_net_liquidation', return_value=(10000.0, 'USD')), \
+                patch('fx_sr.live_web.cancel_bracket_children', return_value=set()), \
+                patch('fx_sr.live_web.ibkr.liquidate_fx_position', return_value={'status': 'Submitted', 'order_id': 123, 'quantity': 10000}):
+            await self.hub._run_backfill()
+
+        handle_mock.assert_awaited_once_with(
+            startup_signal,
+            source='startup',
+            enforce_lag_check=False,
+        )
+
     async def test_alert_and_execution_buffers_are_bounded(self):
         for idx in range(ALERT_LIMIT + 5):
             self.hub._alerts.append({'pair': 'EURUSD', 'direction': 'LONG', 'exit_reason': str(idx)})
@@ -679,7 +714,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
     async def test_set_execution_paused_updates_summary_and_broadcasts(self):
         tradable_hub = LiveDashboardHub(
             pairs=self.hub.pairs,
-            params=StrategyParams(),
+            params=StrategyParams(max_live_signal_lag_seconds=9999999.0),
             interval=60,
             zone_history_days=30,
             track_positions=True,
@@ -696,6 +731,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         try:
             state = await tradable_hub.set_execution_paused(True)
         finally:
+            tradable_hub._pair_scan_executor.shutdown(wait=True)
             tradable_hub._scan_executor.shutdown(wait=True)
 
         self.assertFalse(state['summary']['execution_enabled'])
@@ -709,6 +745,74 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('fill', summary)
         self.assertEqual(summary['fill']['status'], 'idle')
         self.assertEqual(summary['fill']['items_requested'], 0)
+        self.assertIn('scan_backlog', summary)
+        self.assertEqual(summary['scan_backlog']['pending_count'], 0)
+        self.assertEqual(summary['scan_backlog']['busy_count'], 0)
+        self.assertIn('execution_heartbeat_at', summary)
+
+    async def test_scan_scheduler_coalesces_busy_pair_to_latest_request(self):
+        self.hub._backfill_done = True
+        self.hub._last_data_health = {'overall': 'ok'}
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        calls = []
+
+        async def _run_scan(request):
+            calls.append((request.kind, request.generation, request.price))
+            if len(calls) == 1:
+                first_started.set()
+                await release_first.wait()
+
+        with patch.object(self.hub, '_run_minute_pair_scan', side_effect=_run_scan):
+            first_task = asyncio.create_task(
+                self.hub._handle_minute_bar_complete('EURUSD', 1.1000)
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            await self.hub._handle_minute_bar_complete('EURUSD', 1.2000)
+            await self.hub._handle_minute_bar_complete('EURUSD', 1.3000)
+
+            backlog = self.hub._scan_backlog_summary()
+            self.assertEqual(backlog['busy_count'], 1)
+            self.assertEqual(backlog['pending_count'], 1)
+            self.assertEqual(backlog['pending_pairs'][0]['generation'], 3)
+            self.assertEqual(backlog['coalesced_count'], 2)
+            self.assertEqual(backlog['coalesced_recent_count'], 2)
+            self.assertEqual(backlog['coalesced_total_count'], 2)
+            self.assertEqual(backlog['coalesced_window_seconds'], 60)
+            self.assertEqual(self.hub._scan_coalesced_count, 2)
+
+            release_first.set()
+            await asyncio.wait_for(first_task, timeout=1)
+
+        self.assertEqual(calls, [
+            ('minute', 1, 1.1000),
+            ('minute', 3, 1.3000),
+        ])
+        self.assertEqual(self.hub._scan_completed_count, 2)
+        self.assertEqual(self.hub._scan_skipped_count, 0)
+
+    def test_scan_backlog_reports_recent_coalesced_not_lifetime_total(self):
+        old_event = pd.Timestamp.now(tz='UTC') - pd.Timedelta(seconds=90)
+        self.hub._scan_coalesced_count = 5
+        self.hub._scan_coalesced_events.append(old_event)
+
+        backlog = self.hub._scan_backlog_summary()
+
+        self.assertEqual(backlog['coalesced_count'], 0)
+        self.assertEqual(backlog['coalesced_recent_count'], 0)
+        self.assertEqual(backlog['coalesced_total_count'], 5)
+        self.assertEqual(backlog['coalesced_window_seconds'], 60)
+
+    async def test_broadcast_scan_status_sends_summary_heartbeat(self):
+        self.hub._last_data_health = {'overall': 'ok'}
+
+        await self.hub._broadcast_scan_status()
+
+        payload = self.hub._broadcast.await_args.args[0]
+        self.assertEqual(payload['type'], 'scan_status')
+        self.assertIn('scan_backlog', payload['summary'])
+        self.assertIn('execution_heartbeat_at', payload['summary'])
 
     async def test_set_execution_paused_rejects_scan_only_mode(self):
         with self.assertRaisesRegex(RuntimeError, 'scan-only mode'):
@@ -717,7 +821,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_signal_skips_order_submission_when_execution_paused(self):
         tradable_hub = LiveDashboardHub(
             pairs=self.hub.pairs,
-            params=StrategyParams(),
+            params=StrategyParams(max_live_signal_lag_seconds=9999999.0),
             interval=60,
             zone_history_days=30,
             track_positions=True,
@@ -762,6 +866,7 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
                     patch('fx_sr.live_web.record_execution_results') as record_execution_mock:
                 await tradable_hub._handle_signal(signal, source='hourly')
         finally:
+            tradable_hub._pair_scan_executor.shutdown(wait=True)
             tradable_hub._scan_executor.shutdown(wait=True)
 
         execute_mock.assert_not_called()
@@ -771,6 +876,69 @@ class LiveDashboardHubTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, 'SKIPPED')
         self.assertEqual(results[0].note, 'execution paused')
+
+    async def test_handle_signal_skips_order_submission_when_signal_lag_exceeded(self):
+        tradable_hub = LiveDashboardHub(
+            pairs=self.hub.pairs,
+            params=StrategyParams(max_live_signal_lag_seconds=90.0),
+            interval=60,
+            zone_history_days=30,
+            track_positions=True,
+            balance=10000.0,
+            risk_pct=0.01,
+            account_currency='USD',
+            execute_orders=True,
+            strategy_label=None,
+            client_id=None,
+            port=8080,
+        )
+        tradable_hub._loop = asyncio.get_running_loop()
+        tradable_hub._broadcast = AsyncMock()
+        tradable_hub._pair_rows = dict(self.hub._pair_rows)
+        signal = _signal('EURUSD', 'LONG')
+        signal.time = pd.Timestamp.now(tz='UTC') - pd.Timedelta(minutes=10)
+
+        try:
+            with patch('fx_sr.live_web.get_entry_block', return_value=None), \
+                    patch('fx_sr.live_web.build_live_size_plans', return_value=[_plan('EURUSD')]), \
+                    patch('fx_sr.live_web.record_detected_signals') as record_detected_mock, \
+                    patch('fx_sr.live_web.execute_signal_plans') as execute_mock, \
+                    patch('fx_sr.live_web.record_execution_results') as record_execution_mock, \
+                    patch('fx_sr.live_web.sync_positions', return_value={}):
+                await tradable_hub._handle_signal(signal, source='startup')
+        finally:
+            tradable_hub._pair_scan_executor.shutdown(wait=True)
+            tradable_hub._scan_executor.shutdown(wait=True)
+
+        execute_mock.assert_not_called()
+        record_detected_mock.assert_called_once()
+        record_execution_mock.assert_called_once()
+        results = record_execution_mock.call_args.args[2]
+        self.assertEqual(results[0].status, 'SKIPPED')
+        self.assertIn('live signal lag exceeded', results[0].note)
+
+    async def test_handle_signal_does_not_replay_position_blocked_signal(self):
+        self.hub._execution_available = True
+        signal = _signal('EURUSD', 'LONG')
+        skipped = ExecutionResult(
+            pair='EURUSD',
+            direction='LONG',
+            units=10000,
+            status='SKIPPED',
+            note='position/order exists',
+        )
+
+        with patch('fx_sr.live_web.build_live_size_plans', return_value=[_plan('EURUSD')]) as size_mock, \
+                patch('fx_sr.live_web.record_detected_signals'), \
+                patch('fx_sr.live_web.execute_signal_plans', return_value=[skipped]) as execute_mock, \
+                patch('fx_sr.live_web.record_execution_results'), \
+                patch('fx_sr.live_web.sync_positions', return_value={}):
+            await self.hub._handle_signal(signal, source='minute')
+            self.hub._tracked = {}
+            await self.hub._handle_signal(signal, source='minute')
+
+        self.assertEqual(size_mock.call_count, 1)
+        self.assertEqual(execute_mock.call_count, 1)
 
     async def test_replay_startup_bars_is_single_shot_and_flips_flag(self):
         """Regression test for the livelock fix.
@@ -1149,6 +1317,25 @@ class WebsocketRequestValidationTests(unittest.TestCase):
             _validate_websocket_request(self._request(origin='http://10.0.0.1:8765'))
 
 
+class WebsocketEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_disconnect_returns_client_closed_response(self):
+        request = SimpleNamespace(
+            app={'hub': AsyncMock()},
+            query={},
+            headers={},
+            scheme='http',
+            host='127.0.0.1:8765',
+        )
+        ws = AsyncMock()
+        ws.prepare.side_effect = ConnectionResetError('socket closed')
+
+        with patch('fx_sr.live_web.web.WebSocketResponse', return_value=ws):
+            response = await _websocket(request)
+
+        self.assertEqual(response.status, 499)
+        request.app['hub'].register.assert_not_called()
+
+
 class ExecutionModeEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_execution_mode_endpoint_updates_hub_state(self):
         hub = LiveDashboardHub(
@@ -1184,6 +1371,7 @@ class ExecutionModeEndpointTests(unittest.IsolatedAsyncioTestCase):
         try:
             response = await _set_execution_mode(request)
         finally:
+            hub._pair_scan_executor.shutdown(wait=True)
             hub._scan_executor.shutdown(wait=True)
 
         payload = json.loads(response.text)
@@ -1217,6 +1405,7 @@ class BacktestRerunTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertEqual(hub._backtest_client_id_base(), 4060)
         finally:
+            hub._pair_scan_executor.shutdown(wait=True)
             hub._scan_executor.shutdown(wait=True)
 
     async def test_build_backtest_cli_args_include_dashboard_settings(self):
@@ -1261,6 +1450,7 @@ class BacktestRerunTests(unittest.IsolatedAsyncioTestCase):
             blocked_hours_idx = args.index('--blocked-hours')
             self.assertIn('2', args[blocked_hours_idx + 1 : blocked_hours_idx + 3])
         finally:
+            hub._pair_scan_executor.shutdown(wait=True)
             hub._scan_executor.shutdown(wait=True)
 
     async def test_run_backtest_rejects_concurrent_invocations(self):
@@ -1294,6 +1484,7 @@ class BacktestRerunTests(unittest.IsolatedAsyncioTestCase):
             running.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await running
+            hub._pair_scan_executor.shutdown(wait=True)
             hub._scan_executor.shutdown(wait=True)
 
 

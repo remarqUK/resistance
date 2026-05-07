@@ -66,6 +66,7 @@ _ACCOUNT_REFRESH_INTERVAL = 300  # 5 minutes
 
 _PROTECTION_TERMINAL_STATUSES = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE'}
 _EXIT_SIGNAL_BARRIER_SECONDS = 60 * 60
+_VALIDATION_WARNING_STATUS_KEYS = {'VALIDATIONERROR'}
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -76,6 +77,16 @@ def _get_env_int(name: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_validation_warning_status(raw_status: str | None) -> str:
+    """Preserve normal broker status strings, but downgrade validation warnings."""
+
+    status = (raw_status or '').strip()
+    normalized_key = status.upper().replace(" ", "").replace("-", "").replace("_", "")
+    if normalized_key in _VALIDATION_WARNING_STATUS_KEYS:
+        return 'SUBMITTED'
+    return status or 'SUBMITTED'
 
 
 _EXIT_SIGNAL_BARRIER_SECONDS = max(
@@ -997,6 +1008,39 @@ def refresh_pair_row_price(row: PairScanRow, price: float) -> PairScanRow:
         support_dist_pct=s_dist,
         resistance_dist_pct=r_dist,
     )
+
+
+def _signal_lag_note(
+    signal: Signal,
+    params: StrategyParams,
+    *,
+    reference_time=None,
+) -> str | None:
+    max_lag = float(getattr(params, 'max_live_signal_lag_seconds', 90.0) or 90.0)
+    if max_lag <= 0:
+        return None
+
+    signal_time = pd.Timestamp(signal.time)
+    if signal_time.tzinfo is None:
+        signal_time = signal_time.tz_localize('UTC')
+    else:
+        signal_time = signal_time.tz_convert('UTC')
+
+    ref_ts = pd.Timestamp.now(tz='UTC') if reference_time is None else pd.Timestamp(reference_time)
+    if ref_ts.tzinfo is None:
+        ref_ts = ref_ts.tz_localize('UTC')
+    else:
+        ref_ts = ref_ts.tz_convert('UTC')
+
+    lag_seconds = (ref_ts - signal_time).total_seconds()
+    if lag_seconds < 0:
+        return 'live signal timestamp is in the future'
+    if lag_seconds > max_lag + 1e-9:
+        return (
+            f'live signal lag exceeded ({lag_seconds:.0f}s > {max_lag:.0f}s; '
+            f'signal.time={signal_time.isoformat()})'
+        )
+    return None
 
 
 def _scan_pair(
@@ -2114,8 +2158,9 @@ def execute_signal_plans(
         tp_order_id = order.get('take_profit_order_id')
         sl_order_id = order.get('stop_loss_order_id')
         parent_order_id = order.get('order_id')
-        broker_status = order.get('broker_status') or order.get('status')
-        result_status = order.get('status') or 'SUBMITTED'
+        broker_status_raw = order.get('broker_status') or order.get('status')
+        broker_status = _normalize_validation_warning_status(broker_status_raw)
+        result_status = _normalize_validation_warning_status(order.get('status'))
         submitted_tp_price = float(order.get('take_profit_price', prepared.take_profit_price))
         submitted_sl_price = float(order.get('stop_loss_price', prepared.stop_price))
         protected, protection_note = _ensure_protection_orders_live(

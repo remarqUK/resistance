@@ -9,6 +9,8 @@ import hashlib
 import logging
 import queue
 import threading
+import os
+import time
 from datetime import date, datetime as dt_datetime
 from typing import Callable, Iterable, Optional
 
@@ -46,13 +48,42 @@ class _QueuedWrite:
 
     fn: Callable[[], None]
     future: Future | None = None
+    is_critical: bool = False
 
 
 _STOP_WRITER = object()
+_DEFAULT_WRITE_FLUSH_SECONDS = 60.0
+_DEFAULT_WRITE_BATCH_SIZE = 128
 _write_queue: queue.Queue | None = None
 _write_thread: threading.Thread | None = None
 _write_stop = threading.Event()
 _LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_write_flush_seconds() -> float:
+    """Resolve history write batch interval from environment."""
+
+    raw = os.getenv('FX_SR_HISTORY_WRITE_FLUSH_SECONDS')
+    if not raw:
+        return _DEFAULT_WRITE_FLUSH_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_WRITE_FLUSH_SECONDS
+    return max(1.0, value)
+
+
+def _resolve_write_batch_size() -> int:
+    """Resolve history write batch size from environment."""
+
+    raw = os.getenv('FX_SR_HISTORY_WRITE_BATCH_SIZE')
+    if not raw:
+        return _DEFAULT_WRITE_BATCH_SIZE
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_WRITE_BATCH_SIZE
+    return max(1, value)
 
 
 def _execute_write(item: _QueuedWrite) -> None:
@@ -69,14 +100,51 @@ def _execute_write(item: _QueuedWrite) -> None:
         item.future.set_result(None)
 
 
-def _writer_loop() -> None:
-    """Drain the write queue and execute each callable in a dedicated thread."""
+def _execute_batch(batch: list[_QueuedWrite]) -> None:
+    """Execute one batch of queued writes."""
+
+    for item in batch:
+        _execute_write(item)
+
+
+def _writer_loop(flush_interval_seconds: float, batch_size_limit: int) -> None:
+    """Drain write queue in batches, prioritizing critical writes."""
+
+    batch: list[_QueuedWrite] = []
+    flush_interval = max(0.1, float(flush_interval_seconds))
+    batch_limit = max(1, int(batch_size_limit))
+    next_flush_at = time.monotonic() + flush_interval
 
     while True:
-        item = _write_queue.get()
+        now = time.monotonic()
+        timeout = max(0.0, next_flush_at - now)
+        try:
+            item = _write_queue.get(timeout=timeout)
+        except queue.Empty:
+            if batch:
+                _execute_batch(batch)
+                batch = []
+            next_flush_at = time.monotonic() + flush_interval
+            continue
+
         if item is _STOP_WRITER:
+            if batch:
+                _execute_batch(batch)
             break
-        _execute_write(item)
+
+        if item.is_critical:
+            if batch:
+                _execute_batch(batch)
+                batch = []
+                next_flush_at = time.monotonic() + flush_interval
+            _execute_write(item)
+            continue
+
+        batch.append(item)
+        if len(batch) >= batch_limit:
+            _execute_batch(batch)
+            batch = []
+            next_flush_at = time.monotonic() + flush_interval
 
 
 def start_background_writer() -> None:
@@ -89,6 +157,10 @@ def start_background_writer() -> None:
     _write_queue = queue.Queue()
     _write_thread = threading.Thread(
         target=_writer_loop,
+        args=(
+            _resolve_write_flush_seconds(),
+            _resolve_write_batch_size(),
+        ),
         name='signal-db-writer',
         daemon=False,
     )
@@ -136,7 +208,7 @@ def enqueue_write(fn: Callable[[], None]) -> None:
         and _write_thread is not None
         and _write_thread.is_alive()
     ):
-        _write_queue.put(_QueuedWrite(fn))
+        _write_queue.put(_QueuedWrite(fn, is_critical=False))
     else:
         fn()
 
@@ -155,7 +227,7 @@ async def enqueue_write_async(
         and _write_thread.is_alive()
     ):
         future = Future()
-        _write_queue.put(_QueuedWrite(fn, future=future))
+        _write_queue.put(_QueuedWrite(fn, future=future, is_critical=True))
         await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
         return
     await asyncio.to_thread(fn)

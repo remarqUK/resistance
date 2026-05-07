@@ -126,16 +126,51 @@ export interface DataHealth {
   }>;
 }
 
+export interface ScanBacklogPair {
+  pair: string;
+  kind?: string;
+  generation?: number;
+  requested_at?: string | null;
+  started_at?: string | null;
+  age_seconds?: number | null;
+}
+
+export interface ScanBacklog {
+  pending_count?: number;
+  busy_count?: number;
+  oldest_pending_age_seconds?: number | null;
+  coalesced_count?: number;
+  coalesced_recent_count?: number;
+  coalesced_total_count?: number;
+  coalesced_window_seconds?: number;
+  submitted_count?: number;
+  completed_count?: number;
+  failed_count?: number;
+  skipped_count?: number;
+  pending_pairs?: ScanBacklogPair[];
+  busy_pairs?: ScanBacklogPair[];
+  last_started_at?: string | null;
+  last_completed_at?: string | null;
+  heartbeat_at?: string;
+  executor?: {
+    max_workers?: number;
+    active_slots?: number;
+    tracked_async_tasks?: number;
+  };
+}
+
 export interface SummaryState {
   status?: string;
   pairs_total?: number;
   pairs_completed?: number;
   signal_count?: number;
   pending_count?: number;
+  pending_pairs?: string[];
   position_count?: number;
   execution_enabled?: boolean;
   execution_available?: boolean;
   execution_paused?: boolean;
+  execution_heartbeat_at?: string;
   execution_mode?: string;
   execution_mode_label?: string;
   strategy_label?: string;
@@ -144,6 +179,8 @@ export interface SummaryState {
   balance?: number | null;
   account_currency?: string | null;
   risk_pct?: number | null;
+  daily_closed_pnl?: number | null;
+  scan_backlog?: ScanBacklog;
   backfill?: Record<string, any>;
   fill?: Record<string, any>;
   backtest?: Record<string, any>;

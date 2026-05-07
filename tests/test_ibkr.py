@@ -796,7 +796,7 @@ class LiquidateFxPositionTests(unittest.TestCase):
         )
         ib = MagicMock()
         ib.positions.return_value = []
-        ib.reqAllOpenOrders.side_effect = [[trade], []]
+        ib.reqAllOpenOrders.side_effect = [[trade], [trade], []]
         mock_conn.return_value = (ib, True)
 
         with patch.dict(sys.modules, {'ib_async': fake_ib_async}):

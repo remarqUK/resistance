@@ -199,6 +199,40 @@ class LiveExecutionTests(unittest.TestCase):
         self.assertEqual(results[0].avg_fill_price, 1.1001)
         self.assertEqual(results[0].note, 'partial fill 4,000/39,999')
 
+    def test_execute_signal_plans_treats_validation_warning_as_submitted(self):
+        signal = _signal('EURUSD')
+        plan = _plan('EURUSD')
+
+        with patch(
+            'fx_sr.live.ibkr.fetch_execution_quote',
+            return_value=_quote('EURUSD', bid=1.0998, ask=1.1000, source='l1'),
+        ), patch(
+            'fx_sr.live.ibkr.submit_fx_market_bracket_order',
+            return_value={
+                'order_id': 101,
+                'status': 'ValidationError',
+                'broker_status': 'ValidationError',
+                'take_profit_order_id': 102,
+                'stop_loss_order_id': 103,
+            },
+        ):
+            results = execute_signal_plans(
+                [signal],
+                [plan],
+                execute_orders=True,
+                existing_pairs=set(),
+                pending_pairs=set(),
+                params=StrategyParams(max_correlated_trades=2, margin_slots=1, margin_cushion_pct=0.0),
+                tracked_positions={},
+                balance=10000.0,
+                risk_pct=0.02,
+                account_currency='USD',
+            )
+
+        self.assertEqual(results[0].status, 'SUBMITTED')
+        self.assertEqual(results[0].broker_status, 'SUBMITTED')
+        self.assertEqual(results[0].note, 'risk USD 200.00; l1 quote @ 1.10000; order submitted')
+
     def test_execute_signal_plans_enforces_correlation_cap(self):
         signals = [_signal('EURUSD'), _signal('GBPUSD')]
         plans = [_plan('EURUSD'), _plan('GBPUSD')]

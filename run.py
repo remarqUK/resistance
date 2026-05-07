@@ -584,6 +584,20 @@ def _build_strategy_params(args) -> StrategyParams:
         overrides['blocked_days'] = args.blocked_days
     if getattr(args, 'max_sl_pct', None) is not None:
         overrides['max_sl_pct'] = args.max_sl_pct
+    if getattr(args, 'partial_close_enabled', None) is not None:
+        overrides['partial_close_enabled'] = args.partial_close_enabled
+    if getattr(args, 'partial_close_fraction', None) is not None:
+        overrides['partial_close_fraction'] = args.partial_close_fraction
+    if getattr(args, 'partial_close_target_r', None) is not None:
+        overrides['partial_close_target_r'] = args.partial_close_target_r
+    if getattr(args, 'trailing_mode', None) is not None:
+        overrides['trailing_mode'] = args.trailing_mode
+    if getattr(args, 'trailing_fixed_r', None) is not None:
+        overrides['trailing_fixed_r'] = args.trailing_fixed_r
+    if getattr(args, 'trailing_activate_r', None) is not None:
+        overrides['trailing_activate_r'] = args.trailing_activate_r
+    if getattr(args, 'trailing_requires_partial', None) is not None:
+        overrides['trailing_requires_partial'] = args.trailing_requires_partial
     if getattr(args, 'no_margin', False):
         overrides['enforce_margin'] = False
     if getattr(args, 'no_l2', False):
@@ -711,6 +725,64 @@ def _add_strategy_args(parser):
         type=float,
         default=None,
         help='Skip signals where SL distance exceeds this %% of entry price (0 = disabled)',
+    )
+    partial_group = parser.add_mutually_exclusive_group()
+    partial_group.add_argument(
+        '--partial-close',
+        dest='partial_close_enabled',
+        action='store_true',
+        default=None,
+        help='Enable partial close handling for this run',
+    )
+    partial_group.add_argument(
+        '--no-partial-close',
+        dest='partial_close_enabled',
+        action='store_false',
+        help='Disable partial close handling for this run',
+    )
+    parser.add_argument(
+        '--partial-close-fraction',
+        type=float,
+        default=None,
+        help='Override fraction closed at the partial target (e.g. 0.8)',
+    )
+    parser.add_argument(
+        '--partial-close-target-r',
+        type=float,
+        default=None,
+        help='Override partial close trigger in R multiples (e.g. 0.8)',
+    )
+    parser.add_argument(
+        '--trailing-mode',
+        choices=('none', 'breakeven', 'fixed_r', 'atr'),
+        default=None,
+        help='Override trailing stop mode',
+    )
+    parser.add_argument(
+        '--trailing-fixed-r',
+        type=float,
+        default=None,
+        help='Override fixed-R trailing stop distance',
+    )
+    parser.add_argument(
+        '--trailing-activate-r',
+        type=float,
+        default=None,
+        help='Override R multiple where trailing activates',
+    )
+    trailing_group = parser.add_mutually_exclusive_group()
+    trailing_group.add_argument(
+        '--trailing-requires-partial',
+        dest='trailing_requires_partial',
+        action='store_true',
+        default=None,
+        help='Only allow trailing after a partial close',
+    )
+    trailing_group.add_argument(
+        '--no-trailing-requires-partial',
+        dest='trailing_requires_partial',
+        action='store_false',
+        help='Allow trailing before a partial close',
     )
 
 

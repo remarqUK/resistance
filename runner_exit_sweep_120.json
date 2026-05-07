@@ -1,0 +1,2923 @@
+{
+  "baseline": {
+    "final_balance": 72.78205474506458,
+    "max_dd": 92.72179452549354,
+    "overrides": {},
+    "raw_trades": 4191,
+    "raw_wr": 75.90073968026724,
+    "return_pct": -92.72179452549354,
+    "skip_counts": {
+      "BELOW_MIN_SIZE": 3542,
+      "COOLDOWN": 64,
+      "MARGIN_INSUFFICIENT": 128,
+      "SIZE_UNAVAILABLE": 180
+    },
+    "status": "ok",
+    "trades": 477,
+    "wr": 68.55345911949685
+  },
+  "best": {
+    "final_balance": 301512.41272005497,
+    "max_dd": 14.217309624635336,
+    "overrides": {
+      "partial_close_enabled": true,
+      "trailing_activate_r": 1.0,
+      "trailing_mode": "fixed_r"
+    },
+    "raw_trades": 3665,
+    "raw_wr": 64.91132332878581,
+    "return_pct": 30051.241272005496,
+    "score": -191.48543465090214,
+    "skip_counts": {
+      "COOLDOWN": 469,
+      "CORRELATION_CAP": 19,
+      "MARGIN_INSUFFICIENT": 485,
+      "SIZE_UNAVAILABLE": 120
+    },
+    "status": "ok",
+    "trades": 3548,
+    "variant_idx": 13,
+    "wr": 72.63246899661782
+  },
+  "dd_wr_sorted": [
+    {
+      "final_balance": 301512.41272005497,
+      "max_dd": 14.217309624635336,
+      "overrides": {
+        "partial_close_enabled": true,
+        "trailing_activate_r": 1.0,
+        "trailing_mode": "fixed_r"
+      },
+      "raw_trades": 3665,
+      "raw_wr": 64.91132332878581,
+      "return_pct": 30051.241272005496,
+      "score": -191.48543465090214,
+      "skip_counts": {
+        "COOLDOWN": 469,
+        "CORRELATION_CAP": 19,
+        "MARGIN_INSUFFICIENT": 485,
+        "SIZE_UNAVAILABLE": 120
+      },
+      "status": "ok",
+      "trades": 3548,
+      "variant_idx": 13,
+      "wr": 72.63246899661782
+    },
+    {
+      "final_balance": 2486964.4696022402,
+      "max_dd": 8.143145189974694,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3668,
+      "raw_wr": 64.8854961832061,
+      "return_pct": 248596.446960224,
+      "score": -1605.7034690919443,
+      "skip_counts": {
+        "COOLDOWN": 447,
+        "CORRELATION_CAP": 17,
+        "MARGIN_INSUFFICIENT": 363,
+        "RISK_BUDGET_FULL": 1,
+        "SIZE_UNAVAILABLE": 60
+      },
+      "status": "ok",
+      "trades": 3526,
+      "variant_idx": 51,
+      "wr": 71.86613726602383
+    },
+    {
+      "final_balance": 19059050.343527235,
+      "max_dd": 6.475056283963242,
+      "overrides": {
+        "partial_close_enabled": true,
+        "trailing_activate_r": 1.1,
+        "trailing_mode": "fixed_r"
+      },
+      "raw_trades": 3595,
+      "raw_wr": 65.0904033379694,
+      "return_pct": 1905805.0343527237,
+      "score": -12328.78641309922,
+      "skip_counts": {
+        "COOLDOWN": 581,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 200,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 91
+      },
+      "status": "ok",
+      "trades": 4319,
+      "variant_idx": 14,
+      "wr": 74.41537392915026
+    },
+    {
+      "final_balance": 22136092.49552737,
+      "max_dd": 8.476871446207548,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3561,
+      "raw_wr": 62.79135074417298,
+      "return_pct": 2213509.2495527375,
+      "score": -14319.701552677287,
+      "skip_counts": {
+        "COOLDOWN": 584,
+        "CORRELATION_CAP": 33,
+        "MARGIN_INSUFFICIENT": 179,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 84
+      },
+      "status": "ok",
+      "trades": 4593,
+      "variant_idx": 52,
+      "wr": 76.61659046374918
+    },
+    {
+      "final_balance": 26446014.29041153,
+      "max_dd": 8.5145294244206,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 2644501.429041153,
+      "score": -17108.535262214733,
+      "skip_counts": {
+        "COOLDOWN": 597,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 175,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 90
+      },
+      "status": "ok",
+      "trades": 4717,
+      "variant_idx": 38,
+      "wr": 77.16769132923467
+    },
+    {
+      "final_balance": 30362659.50375276,
+      "max_dd": 8.531305353875375,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3036165.950375276,
+      "score": -19642.97393652482,
+      "skip_counts": {
+        "COOLDOWN": 596,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 169,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 85
+      },
+      "status": "ok",
+      "trades": 4730,
+      "variant_idx": 67,
+      "wr": 77.25158562367864
+    },
+    {
+      "final_balance": 30362659.50375276,
+      "max_dd": 8.531305353875375,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3036165.950375276,
+      "score": -19642.97393652482,
+      "skip_counts": {
+        "COOLDOWN": 596,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 169,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 85
+      },
+      "status": "ok",
+      "trades": 4730,
+      "variant_idx": 103,
+      "wr": 77.25158562367864
+    },
+    {
+      "final_balance": 34116703.89554209,
+      "max_dd": 8.561447511165719,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 3411570.3895542095,
+      "score": -22072.20416126238,
+      "skip_counts": {
+        "COOLDOWN": 601,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 162,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 84
+      },
+      "status": "ok",
+      "trades": 4731,
+      "variant_idx": 109,
+      "wr": 77.12957091523991
+    },
+    {
+      "final_balance": 140148494.3022205,
+      "max_dd": 7.891158226443007,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3666,
+      "raw_wr": 64.8936170212766,
+      "return_pct": 14014749.43022205,
+      "score": -90685.42973040626,
+      "skip_counts": {
+        "COOLDOWN": 551,
+        "CORRELATION_CAP": 23,
+        "MARGIN_INSUFFICIENT": 168,
+        "RISK_BUDGET_FULL": 2,
+        "SIZE_UNAVAILABLE": 53
+      },
+      "status": "ok",
+      "trades": 4294,
+      "variant_idx": 82,
+      "wr": 75.5239869585468
+    },
+    {
+      "final_balance": 370878527.1895347,
+      "max_dd": 7.2543309471393504,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 37087752.718953475,
+      "score": -239990.60859176336,
+      "skip_counts": {
+        "COOLDOWN": 476,
+        "CORRELATION_CAP": 33,
+        "MARGIN_INSUFFICIENT": 132,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 19
+      },
+      "status": "ok",
+      "trades": 3752,
+      "variant_idx": 114,
+      "wr": 71.02878464818764
+    },
+    {
+      "final_balance": 1451535824.5237055,
+      "max_dd": 6.889569603297479,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 145153482.45237055,
+      "score": -939279.549419065,
+      "skip_counts": {
+        "COOLDOWN": 769,
+        "CORRELATION_CAP": 43,
+        "MARGIN_INSUFFICIENT": 69,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 38
+      },
+      "status": "ok",
+      "trades": 5197,
+      "variant_idx": 31,
+      "wr": 75.56282470656149
+    },
+    {
+      "final_balance": 1470097537.795429,
+      "max_dd": 6.8723842453626744,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 147009653.7795429,
+      "score": -951290.9470934516,
+      "skip_counts": {
+        "COOLDOWN": 749,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 72,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 37
+      },
+      "status": "ok",
+      "trades": 4997,
+      "variant_idx": 44,
+      "wr": 74.54472683610166
+    },
+    {
+      "final_balance": 1653344632.2256486,
+      "max_dd": 6.952213257464157,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 165334363.22256488,
+      "score": -1069869.5314568472,
+      "skip_counts": {
+        "COOLDOWN": 758,
+        "CORRELATION_CAP": 43,
+        "MARGIN_INSUFFICIENT": 67,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 35
+      },
+      "status": "ok",
+      "trades": 5081,
+      "variant_idx": 60,
+      "wr": 74.94587679590632
+    },
+    {
+      "final_balance": 2377390975.9078937,
+      "max_dd": 6.968627937338232,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 237738997.59078938,
+      "score": -1538397.6299824726,
+      "skip_counts": {
+        "COOLDOWN": 774,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 65,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 38
+      },
+      "status": "ok",
+      "trades": 5268,
+      "variant_idx": 101,
+      "wr": 75.87319665907366
+    },
+    {
+      "final_balance": 2413595581.96598,
+      "max_dd": 8.019384114991464,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 241359458.19659802,
+      "score": -1561826.09661936,
+      "skip_counts": {
+        "COOLDOWN": 586,
+        "CORRELATION_CAP": 42,
+        "MARGIN_INSUFFICIENT": 93,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 39
+      },
+      "status": "ok",
+      "trades": 4585,
+      "variant_idx": 93,
+      "wr": 75.8124318429662
+    },
+    {
+      "final_balance": 2651156123.705028,
+      "max_dd": 6.890347955672449,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 265115512.3705028,
+      "score": -1715550.2486993545,
+      "skip_counts": {
+        "COOLDOWN": 774,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 64,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 37
+      },
+      "status": "ok",
+      "trades": 5270,
+      "variant_idx": 49,
+      "wr": 75.86337760910816
+    },
+    {
+      "final_balance": 2742398012.3236694,
+      "max_dd": 6.1031222750311445,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3594,
+      "raw_wr": 65.08069003895382,
+      "return_pct": 274239701.232367,
+      "score": -1774593.0906441119,
+      "skip_counts": {
+        "COOLDOWN": 630,
+        "CORRELATION_CAP": 47,
+        "MARGIN_INSUFFICIENT": 68,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 27
+      },
+      "status": "ok",
+      "trades": 4692,
+      "variant_idx": 22,
+      "wr": 75.57544757033247
+    },
+    {
+      "final_balance": 2897811043.6558747,
+      "max_dd": 6.5600538000012465,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3661,
+      "raw_wr": 64.87298552308113,
+      "return_pct": 289781004.3655875,
+      "score": -1875160.2626822584,
+      "skip_counts": {
+        "COOLDOWN": 633,
+        "CORRELATION_CAP": 36,
+        "MARGIN_INSUFFICIENT": 70,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 28
+      },
+      "status": "ok",
+      "trades": 4862,
+      "variant_idx": 23,
+      "wr": 77.70464829288358
+    },
+    {
+      "final_balance": 6311675248.886686,
+      "max_dd": 5.796217545893314,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3657,
+      "raw_wr": 64.94394312277824,
+      "return_pct": 631167424.8886687,
+      "score": -4084261.6383284256,
+      "skip_counts": {
+        "COOLDOWN": 662,
+        "CORRELATION_CAP": 38,
+        "MARGIN_INSUFFICIENT": 65,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 30
+      },
+      "status": "ok",
+      "trades": 4971,
+      "variant_idx": 69,
+      "wr": 78.25387246026956
+    },
+    {
+      "final_balance": 8002040007.316125,
+      "max_dd": 7.675804193193993,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3878,
+      "raw_wr": 69.36565239814337,
+      "return_pct": 800203900.7316124,
+      "score": -5178092.150952804,
+      "skip_counts": {
+        "COOLDOWN": 599,
+        "CORRELATION_CAP": 20,
+        "MARGIN_INSUFFICIENT": 104,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 8,
+        "SIZE_UNAVAILABLE": 24
+      },
+      "status": "ok",
+      "trades": 4424,
+      "variant_idx": 59,
+      "wr": 77.37341772151899
+    },
+    {
+      "final_balance": 13225110871.96243,
+      "max_dd": 6.051714481404559,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3662,
+      "raw_wr": 64.85527034407428,
+      "return_pct": 1322510987.196243,
+      "score": -8557925.320458442,
+      "skip_counts": {
+        "COOLDOWN": 646,
+        "CORRELATION_CAP": 45,
+        "MARGIN_INSUFFICIENT": 51,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 24
+      },
+      "status": "ok",
+      "trades": 5134,
+      "variant_idx": 115,
+      "wr": 78.7884690299961
+    },
+    {
+      "final_balance": 13428944550.122261,
+      "max_dd": 7.232109401861046,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 1342894355.012226,
+      "score": -8689825.724374436,
+      "skip_counts": {
+        "COOLDOWN": 615,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 64,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 31
+      },
+      "status": "ok",
+      "trades": 4858,
+      "variant_idx": 99,
+      "wr": 77.04816797035818
+    },
+    {
+      "final_balance": 14235554753.089687,
+      "max_dd": 6.6388329523177605,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 1423555375.3089688,
+      "score": -9211781.397594081,
+      "skip_counts": {
+        "COOLDOWN": 521,
+        "CORRELATION_CAP": 40,
+        "MARGIN_INSUFFICIENT": 78,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 20
+      },
+      "status": "ok",
+      "trades": 4157,
+      "variant_idx": 78,
+      "wr": 73.29805147943227
+    },
+    {
+      "final_balance": 15259113040.487833,
+      "max_dd": 7.112720628658566,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 1525911204.0487833,
+      "score": -9874122.35789921,
+      "skip_counts": {
+        "COOLDOWN": 612,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 64,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 31
+      },
+      "status": "ok",
+      "trades": 4862,
+      "variant_idx": 27,
+      "wr": 77.06705059646237
+    },
+    {
+      "final_balance": 15763440485.169024,
+      "max_dd": 6.051169815152367,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3665,
+      "raw_wr": 64.91132332878581,
+      "return_pct": 1576343948.5169024,
+      "score": -10200470.929727307,
+      "skip_counts": {
+        "COOLDOWN": 636,
+        "CORRELATION_CAP": 45,
+        "MARGIN_INSUFFICIENT": 59,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 28
+      },
+      "status": "ok",
+      "trades": 5138,
+      "variant_idx": 66,
+      "wr": 78.8049824834566
+    },
+    {
+      "final_balance": 17252626618.58309,
+      "max_dd": 7.1545884700722455,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 1725262561.858309,
+      "score": -11164119.118855717,
+      "skip_counts": {
+        "COOLDOWN": 610,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 66,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 31
+      },
+      "status": "ok",
+      "trades": 4863,
+      "variant_idx": 118,
+      "wr": 77.13345671396257
+    },
+    {
+      "final_balance": 25975789152.56172,
+      "max_dd": 5.968000160245039,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3664,
+      "raw_wr": 64.90174672489083,
+      "return_pct": 2597578815.256172,
+      "score": -16808852.27194896,
+      "skip_counts": {
+        "COOLDOWN": 558,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 60,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 19
+      },
+      "status": "ok",
+      "trades": 4406,
+      "variant_idx": 63,
+      "wr": 75.44257830231503
+    },
+    {
+      "final_balance": 40064771670.06256,
+      "max_dd": 6.7084627163359976,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3666,
+      "raw_wr": 64.8936170212766,
+      "return_pct": 4006477067.0062566,
+      "score": -25925791.34170976,
+      "skip_counts": {
+        "COOLDOWN": 564,
+        "CORRELATION_CAP": 35,
+        "MARGIN_INSUFFICIENT": 63,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 21
+      },
+      "status": "ok",
+      "trades": 4405,
+      "variant_idx": 102,
+      "wr": 75.18728717366628
+    },
+    {
+      "final_balance": 2405278133794.2583,
+      "max_dd": 5.826417211376087,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3842,
+      "raw_wr": 69.31285788651745,
+      "return_pct": 240527813279.4258,
+      "score": -1556448387.1695738,
+      "skip_counts": {
+        "COOLDOWN": 794,
+        "CORRELATION_CAP": 35,
+        "MARGIN_INSUFFICIENT": 26,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 9,
+        "SIZE_UNAVAILABLE": 14
+      },
+      "status": "ok",
+      "trades": 5440,
+      "variant_idx": 94,
+      "wr": 81.43382352941177
+    },
+    {
+      "final_balance": 4563340161505.14,
+      "max_dd": 9.483011585417477,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4190,
+      "raw_wr": 75.91885441527447,
+      "return_pct": 456334016050.5139,
+      "score": -2952923966.6310487,
+      "skip_counts": {
+        "COOLDOWN": 524,
+        "CORRELATION_CAP": 10,
+        "MARGIN_INSUFFICIENT": 84,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 8,
+        "SIZE_UNAVAILABLE": 13
+      },
+      "status": "ok",
+      "trades": 4462,
+      "variant_idx": 106,
+      "wr": 80.32272523532048
+    },
+    {
+      "final_balance": 5365058432270.997,
+      "max_dd": 5.12700726467326,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3668,
+      "raw_wr": 64.8854961832061,
+      "return_pct": 536505843127.09973,
+      "score": -3471713497.638231,
+      "skip_counts": {
+        "COOLDOWN": 483,
+        "CORRELATION_CAP": 31,
+        "MARGIN_INSUFFICIENT": 69,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 8
+      },
+      "status": "ok",
+      "trades": 3818,
+      "variant_idx": 20,
+      "wr": 71.634363541121
+    },
+    {
+      "final_balance": 7811295290416.799,
+      "max_dd": 4.6636305847744985,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3592,
+      "raw_wr": 64.75501113585747,
+      "return_pct": 781129528941.6798,
+      "score": -5054666158.905272,
+      "skip_counts": {
+        "COOLDOWN": 658,
+        "CORRELATION_CAP": 49,
+        "MARGIN_INSUFFICIENT": 26,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 16
+      },
+      "status": "ok",
+      "trades": 4939,
+      "variant_idx": 54,
+      "wr": 76.45272322332455
+    },
+    {
+      "final_balance": 15618432834612.191,
+      "max_dd": 5.022139120834778,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4136,
+      "raw_wr": 76.06382978723404,
+      "return_pct": 1561843283361.2192,
+      "score": -10106641857.5619,
+      "skip_counts": {
+        "COOLDOWN": 649,
+        "CORRELATION_CAP": 15,
+        "MARGIN_INSUFFICIENT": 51,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 8
+      },
+      "status": "ok",
+      "trades": 4593,
+      "variant_idx": 55,
+      "wr": 81.40648813411714
+    },
+    {
+      "final_balance": 20355780034960.336,
+      "max_dd": 5.8089757525656305,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 2035578003396.0334,
+      "score": -13172165270.377338,
+      "skip_counts": {
+        "COOLDOWN": 619,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 23,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4911,
+      "variant_idx": 70,
+      "wr": 77.05151700264712
+    },
+    {
+      "final_balance": 23944972999529.047,
+      "max_dd": 4.875449437919937,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3594,
+      "raw_wr": 64.74680022259321,
+      "return_pct": 2394497299852.9043,
+      "score": -15494721460.816996,
+      "skip_counts": {
+        "COOLDOWN": 668,
+        "CORRELATION_CAP": 51,
+        "MARGIN_INSUFFICIENT": 21,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 14
+      },
+      "status": "ok",
+      "trades": 5043,
+      "variant_idx": 111,
+      "wr": 76.93833035891335
+    },
+    {
+      "final_balance": 24068623885563.566,
+      "max_dd": 5.666539497113329,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 2406862388456.357,
+      "score": -15574735584.896358,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 23,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4915,
+      "variant_idx": 37,
+      "wr": 77.07019328585962
+    },
+    {
+      "final_balance": 24068623885563.566,
+      "max_dd": 5.666539497113329,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 2406862388456.357,
+      "score": -15574735584.896358,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 23,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4915,
+      "variant_idx": 117,
+      "wr": 77.07019328585962
+    },
+    {
+      "final_balance": 26562555058804.67,
+      "max_dd": 4.802987828274501,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3594,
+      "raw_wr": 64.74680022259321,
+      "return_pct": 2656255505780.4673,
+      "score": -17188551097.746162,
+      "skip_counts": {
+        "COOLDOWN": 668,
+        "CORRELATION_CAP": 51,
+        "MARGIN_INSUFFICIENT": 21,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 14
+      },
+      "status": "ok",
+      "trades": 5043,
+      "variant_idx": 32,
+      "wr": 76.93833035891335
+    },
+    {
+      "final_balance": 33386759820554.824,
+      "max_dd": 5.667720118523808,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3338675981955.4824,
+      "score": -21604473889.255863,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 22,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4917,
+      "variant_idx": 61,
+      "wr": 77.07952003254017
+    },
+    {
+      "final_balance": 33386759820554.824,
+      "max_dd": 5.667720118523808,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3338675981955.4824,
+      "score": -21604473889.255863,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 22,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4917,
+      "variant_idx": 88,
+      "wr": 77.07952003254017
+    },
+    {
+      "final_balance": 189627195050708.8,
+      "max_dd": 5.11425036101743,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3664,
+      "raw_wr": 64.90174672489083,
+      "return_pct": 18962719504970.88,
+      "score": -122707199109.57831,
+      "skip_counts": {
+        "COOLDOWN": 562,
+        "CORRELATION_CAP": 42,
+        "MARGIN_INSUFFICIENT": 28,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 7
+      },
+      "status": "ok",
+      "trades": 4442,
+      "variant_idx": 21,
+      "wr": 75.32642953624493
+    },
+    {
+      "final_balance": 1650036223784671.5,
+      "max_dd": 7.570177826310472,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4181,
+      "raw_wr": 75.81918201387228,
+      "return_pct": 165003622378367.12,
+      "score": -1067733577993.3057,
+      "skip_counts": {
+        "COOLDOWN": 610,
+        "CORRELATION_CAP": 16,
+        "MARGIN_INSUFFICIENT": 49,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 8
+      },
+      "status": "ok",
+      "trades": 4565,
+      "variant_idx": 33,
+      "wr": 80.94194961664842
+    },
+    {
+      "final_balance": 1.7984616644845866e+17,
+      "max_dd": 3.876814272480046,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3752,
+      "raw_wr": 67.96375266524521,
+      "return_pct": 1.7984616644845766e+16,
+      "score": -116377924328677.31,
+      "skip_counts": {
+        "COOLDOWN": 737,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 11,
+        "SIZE_UNAVAILABLE": 1
+      },
+      "status": "ok",
+      "trades": 5242,
+      "variant_idx": 25,
+      "wr": 76.53567340709652
+    },
+    {
+      "final_balance": 6.739678709108957e+17,
+      "max_dd": 4.091363794616522,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3752,
+      "raw_wr": 67.96375266524521,
+      "return_pct": 6.739678709108947e+16,
+      "score": -436122623182567.56,
+      "skip_counts": {
+        "COOLDOWN": 758,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 4,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 12,
+        "SIZE_UNAVAILABLE": 1
+      },
+      "status": "ok",
+      "trades": 5318,
+      "variant_idx": 91,
+      "wr": 76.87100413689357
+    },
+    {
+      "final_balance": 2.295641654984838e+18,
+      "max_dd": 3.167193732665579,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 67.58957654723126,
+      "return_pct": 2.295641654984837e+17,
+      "score": -1485502950023460.5,
+      "skip_counts": {
+        "COOLDOWN": 779,
+        "CORRELATION_CAP": 48,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 13,
+        "SIZE_UNAVAILABLE": 2
+      },
+      "status": "ok",
+      "trades": 5274,
+      "variant_idx": 110,
+      "wr": 75.4835039817975
+    },
+    {
+      "final_balance": 4.427821144270387e+18,
+      "max_dd": 4.22170476921316,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4170,
+      "raw_wr": 75.85131894484412,
+      "return_pct": 4.427821144270386e+17,
+      "score": -2865230014321799.0,
+      "skip_counts": {
+        "COOLDOWN": 709,
+        "CORRELATION_CAP": 19,
+        "MARGIN_INSUFFICIENT": 22,
+        "REPLACED_BY_HIGHER_QUALITY": 3,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 6
+      },
+      "status": "ok",
+      "trades": 5147,
+      "variant_idx": 29,
+      "wr": 83.13580726636876
+    },
+    {
+      "final_balance": 7.836746077004077e+18,
+      "max_dd": 3.7669955955969496,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3871,
+      "raw_wr": 69.28442262981142,
+      "return_pct": 7.836746077004076e+17,
+      "score": -5071135292694997.0,
+      "skip_counts": {
+        "COOLDOWN": 775,
+        "CORRELATION_CAP": 32,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 10,
+        "SIZE_UNAVAILABLE": 3
+      },
+      "status": "ok",
+      "trades": 5669,
+      "variant_idx": 96,
+      "wr": 81.84865055565356
+    },
+    {
+      "final_balance": 7.874151048384211e+18,
+      "max_dd": 3.895398300212062,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3684,
+      "raw_wr": 67.58957654723126,
+      "return_pct": 7.87415104838421e+17,
+      "score": -5095339939448152.0,
+      "skip_counts": {
+        "COOLDOWN": 785,
+        "CORRELATION_CAP": 49,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 14,
+        "SIZE_UNAVAILABLE": 2
+      },
+      "status": "ok",
+      "trades": 5340,
+      "variant_idx": 74,
+      "wr": 75.78651685393258
+    },
+    {
+      "final_balance": 1.1143048799337069e+19,
+      "max_dd": 3.8087183441259205,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3880,
+      "raw_wr": 69.22680412371133,
+      "return_pct": 1.1143048799337068e+18,
+      "score": -7210634041130416.0,
+      "skip_counts": {
+        "COOLDOWN": 727,
+        "CORRELATION_CAP": 30,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 10,
+        "SIZE_UNAVAILABLE": 3
+      },
+      "status": "ok",
+      "trades": 5732,
+      "variant_idx": 98,
+      "wr": 81.82135380321004
+    },
+    {
+      "final_balance": 1.4202220655579832e+19,
+      "max_dd": 3.7230531074394433,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3755,
+      "raw_wr": 68.01597869507323,
+      "return_pct": 1.4202220655579832e+18,
+      "score": -9190215134377046.0,
+      "skip_counts": {
+        "COOLDOWN": 757,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 4,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 12,
+        "SIZE_UNAVAILABLE": 1
+      },
+      "status": "ok",
+      "trades": 5493,
+      "variant_idx": 79,
+      "wr": 77.58965956672128
+    }
+  ],
+  "evaluated_variants": 120,
+  "execution_mode": "intrabar",
+  "generated_variants": 120,
+  "profile": "high_volume_runner",
+  "profile_overrides": {
+    "hourly_days": 365,
+    "risk_pct": 6.0,
+    "starting_balance": 1000.0,
+    "zone_history_days": 180
+  },
+  "search": {
+    "max_variants": 120,
+    "max_workers": 16,
+    "runner_exit_sweep": true,
+    "seed": 42,
+    "target_dd": 16.0,
+    "target_trades": 3500,
+    "target_wr": 70.0
+  },
+  "valid_sorted": [
+    {
+      "final_balance": 301512.41272005497,
+      "max_dd": 14.217309624635336,
+      "overrides": {
+        "partial_close_enabled": true,
+        "trailing_activate_r": 1.0,
+        "trailing_mode": "fixed_r"
+      },
+      "raw_trades": 3665,
+      "raw_wr": 64.91132332878581,
+      "return_pct": 30051.241272005496,
+      "score": -191.48543465090214,
+      "skip_counts": {
+        "COOLDOWN": 469,
+        "CORRELATION_CAP": 19,
+        "MARGIN_INSUFFICIENT": 485,
+        "SIZE_UNAVAILABLE": 120
+      },
+      "status": "ok",
+      "trades": 3548,
+      "variant_idx": 13,
+      "wr": 72.63246899661782
+    },
+    {
+      "final_balance": 2486964.4696022402,
+      "max_dd": 8.143145189974694,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3668,
+      "raw_wr": 64.8854961832061,
+      "return_pct": 248596.446960224,
+      "score": -1605.7034690919443,
+      "skip_counts": {
+        "COOLDOWN": 447,
+        "CORRELATION_CAP": 17,
+        "MARGIN_INSUFFICIENT": 363,
+        "RISK_BUDGET_FULL": 1,
+        "SIZE_UNAVAILABLE": 60
+      },
+      "status": "ok",
+      "trades": 3526,
+      "variant_idx": 51,
+      "wr": 71.86613726602383
+    },
+    {
+      "final_balance": 19059050.343527235,
+      "max_dd": 6.475056283963242,
+      "overrides": {
+        "partial_close_enabled": true,
+        "trailing_activate_r": 1.1,
+        "trailing_mode": "fixed_r"
+      },
+      "raw_trades": 3595,
+      "raw_wr": 65.0904033379694,
+      "return_pct": 1905805.0343527237,
+      "score": -12328.78641309922,
+      "skip_counts": {
+        "COOLDOWN": 581,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 200,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 91
+      },
+      "status": "ok",
+      "trades": 4319,
+      "variant_idx": 14,
+      "wr": 74.41537392915026
+    },
+    {
+      "final_balance": 22136092.49552737,
+      "max_dd": 8.476871446207548,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3561,
+      "raw_wr": 62.79135074417298,
+      "return_pct": 2213509.2495527375,
+      "score": -14319.701552677287,
+      "skip_counts": {
+        "COOLDOWN": 584,
+        "CORRELATION_CAP": 33,
+        "MARGIN_INSUFFICIENT": 179,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 84
+      },
+      "status": "ok",
+      "trades": 4593,
+      "variant_idx": 52,
+      "wr": 76.61659046374918
+    },
+    {
+      "final_balance": 26446014.29041153,
+      "max_dd": 8.5145294244206,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 2644501.429041153,
+      "score": -17108.535262214733,
+      "skip_counts": {
+        "COOLDOWN": 597,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 175,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 90
+      },
+      "status": "ok",
+      "trades": 4717,
+      "variant_idx": 38,
+      "wr": 77.16769132923467
+    },
+    {
+      "final_balance": 30362659.50375276,
+      "max_dd": 8.531305353875375,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3036165.950375276,
+      "score": -19642.97393652482,
+      "skip_counts": {
+        "COOLDOWN": 596,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 169,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 85
+      },
+      "status": "ok",
+      "trades": 4730,
+      "variant_idx": 67,
+      "wr": 77.25158562367864
+    },
+    {
+      "final_balance": 30362659.50375276,
+      "max_dd": 8.531305353875375,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3036165.950375276,
+      "score": -19642.97393652482,
+      "skip_counts": {
+        "COOLDOWN": 596,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 169,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 85
+      },
+      "status": "ok",
+      "trades": 4730,
+      "variant_idx": 103,
+      "wr": 77.25158562367864
+    },
+    {
+      "final_balance": 34116703.89554209,
+      "max_dd": 8.561447511165719,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.98,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 3411570.3895542095,
+      "score": -22072.20416126238,
+      "skip_counts": {
+        "COOLDOWN": 601,
+        "CORRELATION_CAP": 34,
+        "MARGIN_INSUFFICIENT": 162,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 84
+      },
+      "status": "ok",
+      "trades": 4731,
+      "variant_idx": 109,
+      "wr": 77.12957091523991
+    },
+    {
+      "final_balance": 140148494.3022205,
+      "max_dd": 7.891158226443007,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3666,
+      "raw_wr": 64.8936170212766,
+      "return_pct": 14014749.43022205,
+      "score": -90685.42973040626,
+      "skip_counts": {
+        "COOLDOWN": 551,
+        "CORRELATION_CAP": 23,
+        "MARGIN_INSUFFICIENT": 168,
+        "RISK_BUDGET_FULL": 2,
+        "SIZE_UNAVAILABLE": 53
+      },
+      "status": "ok",
+      "trades": 4294,
+      "variant_idx": 82,
+      "wr": 75.5239869585468
+    },
+    {
+      "final_balance": 370878527.1895347,
+      "max_dd": 7.2543309471393504,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 37087752.718953475,
+      "score": -239990.60859176336,
+      "skip_counts": {
+        "COOLDOWN": 476,
+        "CORRELATION_CAP": 33,
+        "MARGIN_INSUFFICIENT": 132,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 19
+      },
+      "status": "ok",
+      "trades": 3752,
+      "variant_idx": 114,
+      "wr": 71.02878464818764
+    },
+    {
+      "final_balance": 1451535824.5237055,
+      "max_dd": 6.889569603297479,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 145153482.45237055,
+      "score": -939279.549419065,
+      "skip_counts": {
+        "COOLDOWN": 769,
+        "CORRELATION_CAP": 43,
+        "MARGIN_INSUFFICIENT": 69,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 38
+      },
+      "status": "ok",
+      "trades": 5197,
+      "variant_idx": 31,
+      "wr": 75.56282470656149
+    },
+    {
+      "final_balance": 1470097537.795429,
+      "max_dd": 6.8723842453626744,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 147009653.7795429,
+      "score": -951290.9470934516,
+      "skip_counts": {
+        "COOLDOWN": 749,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 72,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 37
+      },
+      "status": "ok",
+      "trades": 4997,
+      "variant_idx": 44,
+      "wr": 74.54472683610166
+    },
+    {
+      "final_balance": 1653344632.2256486,
+      "max_dd": 6.952213257464157,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 165334363.22256488,
+      "score": -1069869.5314568472,
+      "skip_counts": {
+        "COOLDOWN": 758,
+        "CORRELATION_CAP": 43,
+        "MARGIN_INSUFFICIENT": 67,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 35
+      },
+      "status": "ok",
+      "trades": 5081,
+      "variant_idx": 60,
+      "wr": 74.94587679590632
+    },
+    {
+      "final_balance": 2377390975.9078937,
+      "max_dd": 6.968627937338232,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 237738997.59078938,
+      "score": -1538397.6299824726,
+      "skip_counts": {
+        "COOLDOWN": 774,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 65,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 38
+      },
+      "status": "ok",
+      "trades": 5268,
+      "variant_idx": 101,
+      "wr": 75.87319665907366
+    },
+    {
+      "final_balance": 2413595581.96598,
+      "max_dd": 8.019384114991464,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 241359458.19659802,
+      "score": -1561826.09661936,
+      "skip_counts": {
+        "COOLDOWN": 586,
+        "CORRELATION_CAP": 42,
+        "MARGIN_INSUFFICIENT": 93,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 39
+      },
+      "status": "ok",
+      "trades": 4585,
+      "variant_idx": 93,
+      "wr": 75.8124318429662
+    },
+    {
+      "final_balance": 2651156123.705028,
+      "max_dd": 6.890347955672449,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3684,
+      "raw_wr": 69.19109663409337,
+      "return_pct": 265115512.3705028,
+      "score": -1715550.2486993545,
+      "skip_counts": {
+        "COOLDOWN": 774,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 64,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 37
+      },
+      "status": "ok",
+      "trades": 5270,
+      "variant_idx": 49,
+      "wr": 75.86337760910816
+    },
+    {
+      "final_balance": 2742398012.3236694,
+      "max_dd": 6.1031222750311445,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3594,
+      "raw_wr": 65.08069003895382,
+      "return_pct": 274239701.232367,
+      "score": -1774593.0906441119,
+      "skip_counts": {
+        "COOLDOWN": 630,
+        "CORRELATION_CAP": 47,
+        "MARGIN_INSUFFICIENT": 68,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 27
+      },
+      "status": "ok",
+      "trades": 4692,
+      "variant_idx": 22,
+      "wr": 75.57544757033247
+    },
+    {
+      "final_balance": 2897811043.6558747,
+      "max_dd": 6.5600538000012465,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3661,
+      "raw_wr": 64.87298552308113,
+      "return_pct": 289781004.3655875,
+      "score": -1875160.2626822584,
+      "skip_counts": {
+        "COOLDOWN": 633,
+        "CORRELATION_CAP": 36,
+        "MARGIN_INSUFFICIENT": 70,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 28
+      },
+      "status": "ok",
+      "trades": 4862,
+      "variant_idx": 23,
+      "wr": 77.70464829288358
+    },
+    {
+      "final_balance": 6311675248.886686,
+      "max_dd": 5.796217545893314,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3657,
+      "raw_wr": 64.94394312277824,
+      "return_pct": 631167424.8886687,
+      "score": -4084261.6383284256,
+      "skip_counts": {
+        "COOLDOWN": 662,
+        "CORRELATION_CAP": 38,
+        "MARGIN_INSUFFICIENT": 65,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 30
+      },
+      "status": "ok",
+      "trades": 4971,
+      "variant_idx": 69,
+      "wr": 78.25387246026956
+    },
+    {
+      "final_balance": 8002040007.316125,
+      "max_dd": 7.675804193193993,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3878,
+      "raw_wr": 69.36565239814337,
+      "return_pct": 800203900.7316124,
+      "score": -5178092.150952804,
+      "skip_counts": {
+        "COOLDOWN": 599,
+        "CORRELATION_CAP": 20,
+        "MARGIN_INSUFFICIENT": 104,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 8,
+        "SIZE_UNAVAILABLE": 24
+      },
+      "status": "ok",
+      "trades": 4424,
+      "variant_idx": 59,
+      "wr": 77.37341772151899
+    },
+    {
+      "final_balance": 13225110871.96243,
+      "max_dd": 6.051714481404559,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3662,
+      "raw_wr": 64.85527034407428,
+      "return_pct": 1322510987.196243,
+      "score": -8557925.320458442,
+      "skip_counts": {
+        "COOLDOWN": 646,
+        "CORRELATION_CAP": 45,
+        "MARGIN_INSUFFICIENT": 51,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 24
+      },
+      "status": "ok",
+      "trades": 5134,
+      "variant_idx": 115,
+      "wr": 78.7884690299961
+    },
+    {
+      "final_balance": 13428944550.122261,
+      "max_dd": 7.232109401861046,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 1342894355.012226,
+      "score": -8689825.724374436,
+      "skip_counts": {
+        "COOLDOWN": 615,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 64,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 31
+      },
+      "status": "ok",
+      "trades": 4858,
+      "variant_idx": 99,
+      "wr": 77.04816797035818
+    },
+    {
+      "final_balance": 14235554753.089687,
+      "max_dd": 6.6388329523177605,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 1423555375.3089688,
+      "score": -9211781.397594081,
+      "skip_counts": {
+        "COOLDOWN": 521,
+        "CORRELATION_CAP": 40,
+        "MARGIN_INSUFFICIENT": 78,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 20
+      },
+      "status": "ok",
+      "trades": 4157,
+      "variant_idx": 78,
+      "wr": 73.29805147943227
+    },
+    {
+      "final_balance": 15259113040.487833,
+      "max_dd": 7.112720628658566,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 1525911204.0487833,
+      "score": -9874122.35789921,
+      "skip_counts": {
+        "COOLDOWN": 612,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 64,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 31
+      },
+      "status": "ok",
+      "trades": 4862,
+      "variant_idx": 27,
+      "wr": 77.06705059646237
+    },
+    {
+      "final_balance": 15763440485.169024,
+      "max_dd": 6.051169815152367,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3665,
+      "raw_wr": 64.91132332878581,
+      "return_pct": 1576343948.5169024,
+      "score": -10200470.929727307,
+      "skip_counts": {
+        "COOLDOWN": 636,
+        "CORRELATION_CAP": 45,
+        "MARGIN_INSUFFICIENT": 59,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 28
+      },
+      "status": "ok",
+      "trades": 5138,
+      "variant_idx": 66,
+      "wr": 78.8049824834566
+    },
+    {
+      "final_balance": 17252626618.58309,
+      "max_dd": 7.1545884700722455,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.95,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 1725262561.858309,
+      "score": -11164119.118855717,
+      "skip_counts": {
+        "COOLDOWN": 610,
+        "CORRELATION_CAP": 44,
+        "MARGIN_INSUFFICIENT": 66,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 31
+      },
+      "status": "ok",
+      "trades": 4863,
+      "variant_idx": 118,
+      "wr": 77.13345671396257
+    },
+    {
+      "final_balance": 25975789152.56172,
+      "max_dd": 5.968000160245039,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3664,
+      "raw_wr": 64.90174672489083,
+      "return_pct": 2597578815.256172,
+      "score": -16808852.27194896,
+      "skip_counts": {
+        "COOLDOWN": 558,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 60,
+        "RISK_BUDGET_FULL": 4,
+        "SIZE_UNAVAILABLE": 19
+      },
+      "status": "ok",
+      "trades": 4406,
+      "variant_idx": 63,
+      "wr": 75.44257830231503
+    },
+    {
+      "final_balance": 40064771670.06256,
+      "max_dd": 6.7084627163359976,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3666,
+      "raw_wr": 64.8936170212766,
+      "return_pct": 4006477067.0062566,
+      "score": -25925791.34170976,
+      "skip_counts": {
+        "COOLDOWN": 564,
+        "CORRELATION_CAP": 35,
+        "MARGIN_INSUFFICIENT": 63,
+        "RISK_BUDGET_FULL": 3,
+        "SIZE_UNAVAILABLE": 21
+      },
+      "status": "ok",
+      "trades": 4405,
+      "variant_idx": 102,
+      "wr": 75.18728717366628
+    },
+    {
+      "final_balance": 2405278133794.2583,
+      "max_dd": 5.826417211376087,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3842,
+      "raw_wr": 69.31285788651745,
+      "return_pct": 240527813279.4258,
+      "score": -1556448387.1695738,
+      "skip_counts": {
+        "COOLDOWN": 794,
+        "CORRELATION_CAP": 35,
+        "MARGIN_INSUFFICIENT": 26,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 9,
+        "SIZE_UNAVAILABLE": 14
+      },
+      "status": "ok",
+      "trades": 5440,
+      "variant_idx": 94,
+      "wr": 81.43382352941177
+    },
+    {
+      "final_balance": 4563340161505.14,
+      "max_dd": 9.483011585417477,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4190,
+      "raw_wr": 75.91885441527447,
+      "return_pct": 456334016050.5139,
+      "score": -2952923966.6310487,
+      "skip_counts": {
+        "COOLDOWN": 524,
+        "CORRELATION_CAP": 10,
+        "MARGIN_INSUFFICIENT": 84,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 8,
+        "SIZE_UNAVAILABLE": 13
+      },
+      "status": "ok",
+      "trades": 4462,
+      "variant_idx": 106,
+      "wr": 80.32272523532048
+    },
+    {
+      "final_balance": 5365058432270.997,
+      "max_dd": 5.12700726467326,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3668,
+      "raw_wr": 64.8854961832061,
+      "return_pct": 536505843127.09973,
+      "score": -3471713497.638231,
+      "skip_counts": {
+        "COOLDOWN": 483,
+        "CORRELATION_CAP": 31,
+        "MARGIN_INSUFFICIENT": 69,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 8
+      },
+      "status": "ok",
+      "trades": 3818,
+      "variant_idx": 20,
+      "wr": 71.634363541121
+    },
+    {
+      "final_balance": 7811295290416.799,
+      "max_dd": 4.6636305847744985,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3592,
+      "raw_wr": 64.75501113585747,
+      "return_pct": 781129528941.6798,
+      "score": -5054666158.905272,
+      "skip_counts": {
+        "COOLDOWN": 658,
+        "CORRELATION_CAP": 49,
+        "MARGIN_INSUFFICIENT": 26,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 16
+      },
+      "status": "ok",
+      "trades": 4939,
+      "variant_idx": 54,
+      "wr": 76.45272322332455
+    },
+    {
+      "final_balance": 15618432834612.191,
+      "max_dd": 5.022139120834778,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4136,
+      "raw_wr": 76.06382978723404,
+      "return_pct": 1561843283361.2192,
+      "score": -10106641857.5619,
+      "skip_counts": {
+        "COOLDOWN": 649,
+        "CORRELATION_CAP": 15,
+        "MARGIN_INSUFFICIENT": 51,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 8
+      },
+      "status": "ok",
+      "trades": 4593,
+      "variant_idx": 55,
+      "wr": 81.40648813411714
+    },
+    {
+      "final_balance": 20355780034960.336,
+      "max_dd": 5.8089757525656305,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3562,
+      "raw_wr": 62.80179674340258,
+      "return_pct": 2035578003396.0334,
+      "score": -13172165270.377338,
+      "skip_counts": {
+        "COOLDOWN": 619,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 23,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4911,
+      "variant_idx": 70,
+      "wr": 77.05151700264712
+    },
+    {
+      "final_balance": 23944972999529.047,
+      "max_dd": 4.875449437919937,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3594,
+      "raw_wr": 64.74680022259321,
+      "return_pct": 2394497299852.9043,
+      "score": -15494721460.816996,
+      "skip_counts": {
+        "COOLDOWN": 668,
+        "CORRELATION_CAP": 51,
+        "MARGIN_INSUFFICIENT": 21,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 14
+      },
+      "status": "ok",
+      "trades": 5043,
+      "variant_idx": 111,
+      "wr": 76.93833035891335
+    },
+    {
+      "final_balance": 24068623885563.566,
+      "max_dd": 5.666539497113329,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 2406862388456.357,
+      "score": -15574735584.896358,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 23,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4915,
+      "variant_idx": 37,
+      "wr": 77.07019328585962
+    },
+    {
+      "final_balance": 24068623885563.566,
+      "max_dd": 5.666539497113329,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.8,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3563,
+      "raw_wr": 62.78417064271681,
+      "return_pct": 2406862388456.357,
+      "score": -15574735584.896358,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 23,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4915,
+      "variant_idx": 117,
+      "wr": 77.07019328585962
+    },
+    {
+      "final_balance": 26562555058804.67,
+      "max_dd": 4.802987828274501,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3594,
+      "raw_wr": 64.74680022259321,
+      "return_pct": 2656255505780.4673,
+      "score": -17188551097.746162,
+      "skip_counts": {
+        "COOLDOWN": 668,
+        "CORRELATION_CAP": 51,
+        "MARGIN_INSUFFICIENT": 21,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 14
+      },
+      "status": "ok",
+      "trades": 5043,
+      "variant_idx": 32,
+      "wr": 76.93833035891335
+    },
+    {
+      "final_balance": 33386759820554.824,
+      "max_dd": 5.667720118523808,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3338675981955.4824,
+      "score": -21604473889.255863,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 22,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4917,
+      "variant_idx": 61,
+      "wr": 77.07952003254017
+    },
+    {
+      "final_balance": 33386759820554.824,
+      "max_dd": 5.667720118523808,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.9,
+        "partial_close_target_r": 1.1,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.15,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3564,
+      "raw_wr": 62.7665544332211,
+      "return_pct": 3338675981955.4824,
+      "score": -21604473889.255863,
+      "skip_counts": {
+        "COOLDOWN": 616,
+        "CORRELATION_CAP": 46,
+        "MARGIN_INSUFFICIENT": 22,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 5,
+        "SIZE_UNAVAILABLE": 11
+      },
+      "status": "ok",
+      "trades": 4917,
+      "variant_idx": 88,
+      "wr": 77.07952003254017
+    },
+    {
+      "final_balance": 189627195050708.8,
+      "max_dd": 5.11425036101743,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3664,
+      "raw_wr": 64.90174672489083,
+      "return_pct": 18962719504970.88,
+      "score": -122707199109.57831,
+      "skip_counts": {
+        "COOLDOWN": 562,
+        "CORRELATION_CAP": 42,
+        "MARGIN_INSUFFICIENT": 28,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 7
+      },
+      "status": "ok",
+      "trades": 4442,
+      "variant_idx": 21,
+      "wr": 75.32642953624493
+    },
+    {
+      "final_balance": 1650036223784671.5,
+      "max_dd": 7.570177826310472,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 1.0,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4181,
+      "raw_wr": 75.81918201387228,
+      "return_pct": 165003622378367.12,
+      "score": -1067733577993.3057,
+      "skip_counts": {
+        "COOLDOWN": 610,
+        "CORRELATION_CAP": 16,
+        "MARGIN_INSUFFICIENT": 49,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 7,
+        "SIZE_UNAVAILABLE": 8
+      },
+      "status": "ok",
+      "trades": 4565,
+      "variant_idx": 33,
+      "wr": 80.94194961664842
+    },
+    {
+      "final_balance": 1.7984616644845866e+17,
+      "max_dd": 3.876814272480046,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3752,
+      "raw_wr": 67.96375266524521,
+      "return_pct": 1.7984616644845766e+16,
+      "score": -116377924328677.31,
+      "skip_counts": {
+        "COOLDOWN": 737,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 11,
+        "SIZE_UNAVAILABLE": 1
+      },
+      "status": "ok",
+      "trades": 5242,
+      "variant_idx": 25,
+      "wr": 76.53567340709652
+    },
+    {
+      "final_balance": 6.739678709108957e+17,
+      "max_dd": 4.091363794616522,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3752,
+      "raw_wr": 67.96375266524521,
+      "return_pct": 6.739678709108947e+16,
+      "score": -436122623182567.56,
+      "skip_counts": {
+        "COOLDOWN": 758,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 4,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 12,
+        "SIZE_UNAVAILABLE": 1
+      },
+      "status": "ok",
+      "trades": 5318,
+      "variant_idx": 91,
+      "wr": 76.87100413689357
+    },
+    {
+      "final_balance": 2.295641654984838e+18,
+      "max_dd": 3.167193732665579,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.5,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 3684,
+      "raw_wr": 67.58957654723126,
+      "return_pct": 2.295641654984837e+17,
+      "score": -1485502950023460.5,
+      "skip_counts": {
+        "COOLDOWN": 779,
+        "CORRELATION_CAP": 48,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 13,
+        "SIZE_UNAVAILABLE": 2
+      },
+      "status": "ok",
+      "trades": 5274,
+      "variant_idx": 110,
+      "wr": 75.4835039817975
+    },
+    {
+      "final_balance": 4.427821144270387e+18,
+      "max_dd": 4.22170476921316,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.7,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": false
+      },
+      "raw_trades": 4170,
+      "raw_wr": 75.85131894484412,
+      "return_pct": 4.427821144270386e+17,
+      "score": -2865230014321799.0,
+      "skip_counts": {
+        "COOLDOWN": 709,
+        "CORRELATION_CAP": 19,
+        "MARGIN_INSUFFICIENT": 22,
+        "REPLACED_BY_HIGHER_QUALITY": 3,
+        "RISK_BUDGET_FULL": 6,
+        "SIZE_UNAVAILABLE": 6
+      },
+      "status": "ok",
+      "trades": 5147,
+      "variant_idx": 29,
+      "wr": 83.13580726636876
+    },
+    {
+      "final_balance": 7.836746077004077e+18,
+      "max_dd": 3.7669955955969496,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3871,
+      "raw_wr": 69.28442262981142,
+      "return_pct": 7.836746077004076e+17,
+      "score": -5071135292694997.0,
+      "skip_counts": {
+        "COOLDOWN": 775,
+        "CORRELATION_CAP": 32,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 10,
+        "SIZE_UNAVAILABLE": 3
+      },
+      "status": "ok",
+      "trades": 5669,
+      "variant_idx": 96,
+      "wr": 81.84865055565356
+    },
+    {
+      "final_balance": 7.874151048384211e+18,
+      "max_dd": 3.895398300212062,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.1,
+        "trailing_fixed_r": 0.35,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3684,
+      "raw_wr": 67.58957654723126,
+      "return_pct": 7.87415104838421e+17,
+      "score": -5095339939448152.0,
+      "skip_counts": {
+        "COOLDOWN": 785,
+        "CORRELATION_CAP": 49,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 2,
+        "RISK_BUDGET_FULL": 14,
+        "SIZE_UNAVAILABLE": 2
+      },
+      "status": "ok",
+      "trades": 5340,
+      "variant_idx": 74,
+      "wr": 75.78651685393258
+    },
+    {
+      "final_balance": 1.1143048799337069e+19,
+      "max_dd": 3.8087183441259205,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 0.6,
+        "trailing_fixed_r": 0.25,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3880,
+      "raw_wr": 69.22680412371133,
+      "return_pct": 1.1143048799337068e+18,
+      "score": -7210634041130416.0,
+      "skip_counts": {
+        "COOLDOWN": 727,
+        "CORRELATION_CAP": 30,
+        "MARGIN_INSUFFICIENT": 5,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 10,
+        "SIZE_UNAVAILABLE": 3
+      },
+      "status": "ok",
+      "trades": 5732,
+      "variant_idx": 98,
+      "wr": 81.82135380321004
+    },
+    {
+      "final_balance": 1.4202220655579832e+19,
+      "max_dd": 3.7230531074394433,
+      "overrides": {
+        "partial_close_enabled": true,
+        "partial_close_fraction": 0.8,
+        "partial_close_target_r": 0.8,
+        "trailing_activate_r": 1.0,
+        "trailing_fixed_r": 0.2,
+        "trailing_mode": "fixed_r",
+        "trailing_requires_partial": true
+      },
+      "raw_trades": 3755,
+      "raw_wr": 68.01597869507323,
+      "return_pct": 1.4202220655579832e+18,
+      "score": -9190215134377046.0,
+      "skip_counts": {
+        "COOLDOWN": 757,
+        "CORRELATION_CAP": 41,
+        "MARGIN_INSUFFICIENT": 4,
+        "REPLACED_BY_HIGHER_QUALITY": 1,
+        "RISK_BUDGET_FULL": 12,
+        "SIZE_UNAVAILABLE": 1
+      },
+      "status": "ok",
+      "trades": 5493,
+      "variant_idx": 79,
+      "wr": 77.58965956672128
+    }
+  ]
+}

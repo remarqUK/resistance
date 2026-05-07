@@ -147,6 +147,7 @@ _LAST_FALLBACK_OFFSET = 0  # remember highest successful offset so new threads s
 _IBKR_KEEPALIVE_SECONDS = max(10, _get_env_int('IBKR_KEEPALIVE_SECONDS', 60))
 _STALE_CANCEL_ORDER_TTL_SECONDS = max(60, _get_env_int('IBKR_STALE_CANCEL_ORDER_TTL_SECONDS', 3600))
 _STALE_CANCEL_ORDER_IDS: dict[int, float] = {}
+_FXCONV_QUALIFICATION_CACHE: dict[str, bool] = {}
 
 
 def _prune_stale_cancel_order_ids(now: float | None = None) -> None:
@@ -196,9 +197,46 @@ class _SuppressCancelNotFoundFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         return not (
-            'Error 10147' in message
-            and 'needs to be cancelled is not found' in message
+            (
+                'Error 10147' in message
+                and 'needs to be cancelled is not found' in message
+            )
+            or 'cancelOrder: Unknown orderId' in message
         )
+
+
+class _SuppressFxconvQualificationFilter(logging.Filter):
+    """Mute expected FXCONV qualification misses before IDEALPRO fallback."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "exchange='FXCONV'" not in message:
+            return True
+        return not (
+            (
+                'Error 200' in message
+                and 'destination or exchange selected is Invalid' in message
+            )
+            or 'Unknown contract:' in message
+        )
+
+
+@contextmanager
+def _suppress_fxconv_qualification_logs():
+    """Temporarily suppress expected ib_async logs while probing FXCONV."""
+
+    log_filter = _SuppressFxconvQualificationFilter()
+    loggers = (
+        logging.getLogger("ib_async.ib"),
+        logging.getLogger("ib_async.wrapper"),
+    )
+    for logger in loggers:
+        logger.addFilter(log_filter)
+    try:
+        yield
+    finally:
+        for logger in loggers:
+            logger.removeFilter(log_filter)
 
 
 def log_order_event(
@@ -2311,7 +2349,7 @@ def liquidate_fx_position(
             )
 
         try:
-            from ib_async import MarketOrder, Order
+            from ib_async import MarketOrder
 
             terminal_statuses = {'FILLED', 'CANCELLED', 'APICANCELLED', 'INACTIVE'}
 
@@ -2320,6 +2358,8 @@ def liquidate_fx_position(
                 for trade in ib.reqAllOpenOrders():
                     snapshot = _order_snapshot_from_trade(trade)
                     if snapshot is None or snapshot.get('pair') != pair:
+                        continue
+                    if _is_stale_cancel_order_id(snapshot.get('order_id')):
                         continue
                     status = str(snapshot.get('status') or '').upper()
                     if status in terminal_statuses:
@@ -2342,14 +2382,13 @@ def liquidate_fx_position(
                 }, error='Live position direction mismatch.')
 
             open_orders_before = _active_pair_orders()
-            cancelled_order_ids: list[int] = []
-            for snapshot in open_orders_before:
-                order_id = snapshot.get('order_id')
-                if order_id is None:
-                    continue
-                ib.cancelOrder(Order(orderId=int(order_id)))
-                cancelled_order_ids.append(int(order_id))
-            if cancelled_order_ids and hasattr(ib, 'sleep'):
+            cancel_candidate_ids = {
+                int(snapshot['order_id'])
+                for snapshot in open_orders_before
+                if snapshot.get('order_id') is not None
+            }
+            cancelled_order_ids = cancel_orders(cancel_candidate_ids, suppress_not_found=True)
+            if cancel_candidate_ids and hasattr(ib, 'sleep'):
                 ib.sleep(1)
 
             remaining_orders = _active_pair_orders()
@@ -2535,15 +2574,20 @@ def neutralize_currency_balance(
 
             # Phase 1: try FXCONV
             contract = None
-            for pair, try_action in attempts:
-                c = Contract(
-                    secType='CASH', symbol=pair[:3], currency=pair[3:],
-                    exchange='FXCONV',
-                )
-                if ib.qualifyContracts(c) and c.conId > 0:
-                    contract = c
-                    action = try_action
-                    break
+            with _suppress_fxconv_qualification_logs():
+                for pair, try_action in attempts:
+                    if _FXCONV_QUALIFICATION_CACHE.get(pair) is False:
+                        continue
+                    c = Contract(
+                        secType='CASH', symbol=pair[:3], currency=pair[3:],
+                        exchange='FXCONV',
+                    )
+                    if ib.qualifyContracts(c) and c.conId > 0:
+                        _FXCONV_QUALIFICATION_CACHE[pair] = True
+                        contract = c
+                        action = try_action
+                        break
+                    _FXCONV_QUALIFICATION_CACHE[pair] = False
 
             # Phase 2: fall back to IDEALPRO (Forex) if FXCONV not available.
             # IDEALPRO creates a "Virtual FX Position" but the cash converts.

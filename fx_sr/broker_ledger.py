@@ -392,57 +392,135 @@ def _fill_signed_units(fill: dict, signal_direction: str) -> float:
 
 
 def _signal_broker_fill_summary_conn(conn, signal_id: str, signal_direction: str) -> dict:
+    return _signal_broker_fill_summaries_conn(
+        conn,
+        signal_ids=[signal_id],
+        signal_directions={signal_id: signal_direction},
+    ).get(signal_id, _empty_signal_broker_fill_summary())
+
+
+def _empty_signal_broker_fill_summary() -> dict:
+    return {
+        'fills': [],
+        'net_units': 0.0,
+        'entry_units': 0.0,
+        'entry_avg_price': None,
+        'entry_count': 0,
+        'exit_units': 0.0,
+        'first_entry_at': None,
+        'last_fill_at': None,
+        'latest_exit': None,
+    }
+
+
+def _signal_broker_fill_summaries_conn(
+    conn,
+    *,
+    signal_ids: Iterable[str],
+    signal_directions: dict[str, str],
+) -> dict[str, dict]:
+    signal_ids = [str(signal_id) for signal_id in signal_ids if signal_id]
+    if not signal_ids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(signal_ids))
     cursor = conn.execute(
-        """
+        f"""
         SELECT *
         FROM broker_execution
-        WHERE signal_id=%s
-        ORDER BY fill_time ASC, recorded_at ASC, exec_id ASC
+        WHERE signal_id IN ({placeholders})
+        ORDER BY signal_id ASC, fill_time ASC, recorded_at ASC, exec_id ASC
         """,
-        (signal_id,),
+        signal_ids,
     )
-    fills = [signal_store.row_to_dict(cursor, row) for row in cursor.fetchall()]
-    net_units = 0.0
-    entry_units = 0.0
-    entry_weighted_sum = 0.0
-    entry_count = 0
-    exit_units = 0.0
-    first_entry_at = None
-    last_fill_at = None
-    latest_exit = None
-    for fill in fills:
-        signed_units = _fill_signed_units(fill, signal_direction)
-        net_units += signed_units
-        role = str(fill.get('role') or '').upper()
-        fill_units = float(fill.get('fill_units') or 0.0)
-        fill_time = fill.get('fill_time')
-        if fill_time is not None:
-            last_fill_at = fill_time
-        if role == ENTRY_ROLE:
-            entry_units += fill_units
-            entry_weighted_sum += fill_units * float(fill.get('fill_price') or 0.0)
-            entry_count += 1
-            if first_entry_at is None:
-                first_entry_at = fill_time
-        elif role in EXIT_ROLES or (
-            role == 'UNKNOWN'
-            and signed_units
-            and (signed_units > 0) != (str(signal_direction).upper() == 'LONG')
-        ):
-            exit_units += abs(signed_units or fill_units)
-            latest_exit = fill
-    entry_avg = entry_weighted_sum / entry_units if entry_units > 0 else None
-    return {
-        'fills': fills,
-        'net_units': net_units,
-        'entry_units': entry_units,
-        'entry_avg_price': entry_avg,
-        'entry_count': entry_count,
-        'exit_units': exit_units,
-        'first_entry_at': first_entry_at,
-        'last_fill_at': last_fill_at,
-        'latest_exit': latest_exit,
+    grouped_fills: dict[str, list[dict]] = {signal_id: [] for signal_id in signal_ids}
+    for row in cursor.fetchall():
+        fill = signal_store.row_to_dict(cursor, row)
+        fill_signal_id = str(fill.get('signal_id') or '')
+        if fill_signal_id:
+            grouped_fills.setdefault(fill_signal_id, []).append(fill)
+
+    summaries: dict[str, dict] = {}
+    for signal_id in signal_ids:
+        fills = grouped_fills.get(signal_id, [])
+        signal_direction = signal_directions.get(signal_id, '')
+        net_units = 0.0
+        entry_units = 0.0
+        entry_weighted_sum = 0.0
+        entry_count = 0
+        exit_units = 0.0
+        first_entry_at = None
+        last_fill_at = None
+        latest_exit = None
+        for fill in fills:
+            signed_units = _fill_signed_units(fill, signal_direction)
+            net_units += signed_units
+            role = str(fill.get('role') or '').upper()
+            fill_units = float(fill.get('fill_units') or 0.0)
+            fill_time = fill.get('fill_time')
+            if fill_time is not None:
+                last_fill_at = fill_time
+            if role == ENTRY_ROLE:
+                entry_units += fill_units
+                entry_weighted_sum += fill_units * float(fill.get('fill_price') or 0.0)
+                entry_count += 1
+                if first_entry_at is None:
+                    first_entry_at = fill_time
+            elif role in EXIT_ROLES or (
+                role == 'UNKNOWN'
+                and signed_units
+                and (signed_units > 0) != (str(signal_direction).upper() == 'LONG')
+            ):
+                exit_units += abs(signed_units or fill_units)
+                latest_exit = fill
+        entry_avg = entry_weighted_sum / entry_units if entry_units > 0 else None
+        summaries[signal_id] = {
+            'fills': fills,
+            'net_units': net_units,
+            'entry_units': entry_units,
+            'entry_avg_price': entry_avg,
+            'entry_count': entry_count,
+            'exit_units': exit_units,
+            'first_entry_at': first_entry_at,
+            'last_fill_at': last_fill_at,
+            'latest_exit': latest_exit,
+        }
+    return summaries
+
+
+def _load_broker_order_snapshots_conn(conn, *, order_ids: Iterable[int]) -> dict[int, dict]:
+    normalized_ids = sorted({int(order_id) for order_id in order_ids if order_id is not None})
+    if not normalized_ids:
+        return {}
+
+    placeholders = ",".join(["%s"] * len(normalized_ids))
+    cursor = conn.execute(
+        f"""
+        SELECT *
+        FROM broker_order_snapshot
+        WHERE order_id IN ({placeholders})
+        """,
+        normalized_ids,
+    )
+    snapshots: dict[int, dict] = {}
+    for row in cursor.fetchall():
+        row_dict = signal_store.row_to_dict(cursor, row)
+        if row_dict.get('order_id') is not None:
+            snapshots[int(row_dict['order_id'])] = row_dict
+    return snapshots
+
+
+def _build_signal_fill_summaries(rows: list[dict], conn) -> dict[str, dict]:
+    signal_directions = {
+        str(row['signal_id']): str(row.get('direction') or '')
+        for row in rows
+        if row.get('signal_id')
     }
+    return _signal_broker_fill_summaries_conn(
+        conn,
+        signal_ids=signal_directions.keys(),
+        signal_directions=signal_directions,
+    )
 
 
 def reconcile_broker_ledger(
@@ -554,19 +632,23 @@ def reconcile_detected_signal_orders(
     conn = _connect(db_path)
     try:
         rows = _signal_lookup_rows_conn(conn, signal_ids=signal_ids)
+        summaries = _build_signal_fill_summaries(rows, conn)
+        broker_snapshots_by_order = _load_broker_order_snapshots_conn(
+            conn,
+            order_ids=[
+                int(row['order_id'])
+                for row in rows
+                if row.get('order_id') is not None
+            ],
+        )
         updated_rows: list[dict] = []
         for existing in rows:
             direction = str(existing.get('direction') or '').upper()
-            summary = _signal_broker_fill_summary_conn(conn, existing['signal_id'], direction)
+            signal_id = str(existing['signal_id'])
+            summary = summaries.get(signal_id, _empty_signal_broker_fill_summary())
             broker_snapshot = {}
             if existing.get('order_id') is not None:
-                cursor = conn.execute(
-                    "SELECT * FROM broker_order_snapshot WHERE order_id=%s",
-                    (existing['order_id'],),
-                )
-                snap_row = cursor.fetchone()
-                if snap_row is not None:
-                    broker_snapshot = signal_store.row_to_dict(cursor, snap_row)
+                broker_snapshot = broker_snapshots_by_order.get(int(existing['order_id']), {})
 
             broker_order_status = broker_snapshot.get('status') or existing.get('broker_order_status')
             planned_units = signal_store.normalize_units(existing.get('planned_units'))
@@ -775,9 +857,10 @@ def load_open_broker_execution_positions(*, db_path: str | None = None) -> list[
             """
         )
         rows = [signal_store.row_to_dict(cursor, row) for row in cursor.fetchall()]
+        summaries = _build_signal_fill_summaries(rows, conn)
         positions: list[dict] = []
         for row in rows:
-            summary = _signal_broker_fill_summary_conn(conn, row['signal_id'], row['direction'])
+            summary = summaries.get(str(row['signal_id']), _empty_signal_broker_fill_summary())
             net_units = float(summary['net_units'] or 0.0)
             if abs(net_units) < 1.0 or summary['entry_units'] <= 0:
                 continue

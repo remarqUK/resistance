@@ -557,6 +557,30 @@ PROFILES = {
         'trailing_requires_partial': True,
     },
 
+    'high_volume_runner': {
+        'description': 'candidate 1 runner: 80% partial at +0.8R, fixed_r 0.35R trail after partial',
+        '_base': 'high_volume',
+        'partial_close_enabled': True,
+        'partial_close_fraction': 0.8,
+        'partial_close_target_r': 0.8,
+        'trailing_mode': 'fixed_r',
+        'trailing_activate_r': 0.6,
+        'trailing_fixed_r': 0.35,
+        'trailing_requires_partial': True,
+    },
+
+    'high_volume_runner_79': {
+        'description': 'runner sweep #79: 80% partial at +0.8R, fixed_r trail after partial',
+        '_base': 'high_volume',
+        'partial_close_enabled': True,
+        'partial_close_fraction': 0.8,
+        'partial_close_target_r': 0.8,
+        'trailing_mode': 'fixed_r',
+        'trailing_activate_r': 1.0,
+        'trailing_fixed_r': 0.2,
+        'trailing_requires_partial': True,
+    },
+
     'high_volume_corr5': {
         'description': (
             'high_volume with max_correlated_trades raised 4->5. Sweep on '

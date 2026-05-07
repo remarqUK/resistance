@@ -302,7 +302,7 @@ body::before {
 
 .left-side-section .metrics-grid {
   width: 100%;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .metric-card {
@@ -1034,6 +1034,10 @@ td.zone-near {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .left-side-section .metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .board {
     grid-template-columns: 1fr;
   }
@@ -1053,6 +1057,7 @@ td.zone-near {
 
   .hero,
   .metrics-grid,
+  .left-side-section .metrics-grid,
   .split-panel,
   .signal-meta,
   .position-meta,

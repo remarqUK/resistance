@@ -304,6 +304,45 @@ class PositionBarTrackingTests(unittest.TestCase):
         resubmit_mock.assert_not_called()
         cancel_pairs_mock.assert_not_called()
 
+    def test_sync_positions_does_not_repeat_broker_ledger_message_for_tracked_exposure(self):
+        broker_position = {
+            'pair': 'USDJPY',
+            'direction': 'LONG',
+            'size': 20802.0,
+            'avg_cost': 159.39,
+            'position_source': 'broker_execution',
+            'signal_id': 'sig-usdjpy',
+            'broker_fill_count': 1,
+        }
+        existing_trade = _trade()
+
+        with patch('fx_sr.positions.reconcile_broker_ledger', return_value=[]), \
+                patch('fx_sr.positions._load_trades', return_value={
+                    'USDJPY:LONG': {
+                        'pair': 'USDJPY',
+                        'trade': existing_trade,
+                        'signal_id': None,
+                        'ibkr_size': 20802.0,
+                        'ibkr_avg_cost': 159.39,
+                        'bars_monitored': 0,
+                        'signal_status': 'OPEN',
+                        'pending_exit_reason': None,
+                        'pending_exit_price': None,
+                        'pending_exit_detected_at': None,
+                        'last_processed_bar_time': None,
+                    }
+                }), \
+                patch('fx_sr.positions.ibkr.fetch_positions', return_value=[]), \
+                patch('fx_sr.positions.load_open_broker_execution_positions', return_value=[broker_position]), \
+                patch('fx_sr.positions.load_neutralization_positions', return_value=set()), \
+                patch('fx_sr.positions.ibkr.fetch_open_order_counts', return_value={}), \
+                patch('builtins.print') as print_mock:
+            tracked = sync_positions(StrategyParams())
+
+        self.assertIn('USDJPY:LONG', tracked)
+        messages = [str(call.args[0]) for call in print_mock.call_args_list if call.args]
+        self.assertFalse(any('Broker-ledger FX exposure detected' in msg for msg in messages))
+
     def test_resubmitted_brackets_keep_strategy_order_ref(self):
         signal_row = {
             'signal_id': 'sig-usdjpy',

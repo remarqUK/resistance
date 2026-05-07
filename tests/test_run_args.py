@@ -55,6 +55,76 @@ class RunArgumentTests(unittest.TestCase):
         parsed = cmd_backtest.call_args.args[0]
         self.assertEqual(parsed.execution_mode, 'intrabar')
 
+    def test_main_parses_backtest_partial_and_trailing_overrides(self):
+        argv = [
+            'run.py',
+            'backtest',
+            '--partial-close',
+            '--partial-close-fraction',
+            '0.8',
+            '--partial-close-target-r',
+            '0.8',
+            '--trailing-mode',
+            'fixed_r',
+            '--trailing-fixed-r',
+            '0.2',
+            '--trailing-activate-r',
+            '1.0',
+            '--trailing-requires-partial',
+        ]
+
+        with patch.object(sys, 'argv', argv), \
+                patch('run.cmd_backtest') as cmd_backtest:
+            run.main()
+
+        parsed = cmd_backtest.call_args.args[0]
+        self.assertTrue(parsed.partial_close_enabled)
+        self.assertEqual(parsed.partial_close_fraction, 0.8)
+        self.assertEqual(parsed.partial_close_target_r, 0.8)
+        self.assertEqual(parsed.trailing_mode, 'fixed_r')
+        self.assertEqual(parsed.trailing_fixed_r, 0.2)
+        self.assertEqual(parsed.trailing_activate_r, 1.0)
+        self.assertTrue(parsed.trailing_requires_partial)
+
+    def test_build_strategy_params_applies_partial_and_trailing_overrides(self):
+        args = SimpleNamespace(
+            profile='high_volume_runner',
+            preset=None,
+            rr_ratio=None,
+            sl_buffer=None,
+            early_exit=None,
+            cooldown_bars=None,
+            min_entry_body=None,
+            momentum_lookback=None,
+            max_correlated_trades=None,
+            spread_pips=None,
+            stop_slippage_pips=None,
+            no_time_filters=False,
+            no_pair_direction_filter=False,
+            blocked_hours=None,
+            blocked_days=None,
+            max_sl_pct=None,
+            partial_close_enabled=True,
+            partial_close_fraction=0.8,
+            partial_close_target_r=0.8,
+            trailing_mode='fixed_r',
+            trailing_fixed_r=0.35,
+            trailing_activate_r=0.6,
+            trailing_requires_partial=True,
+            no_margin=False,
+            no_l2=False,
+        )
+
+        params = run._build_strategy_params(args)
+
+        self.assertTrue(params.partial_close_enabled)
+        self.assertEqual(params.partial_close_fraction, 0.8)
+        self.assertEqual(params.partial_close_target_r, 0.8)
+        self.assertEqual(params.trailing_mode, 'fixed_r')
+        self.assertEqual(params.trailing_fixed_r, 0.35)
+        self.assertEqual(params.trailing_activate_r, 0.6)
+        self.assertTrue(params.trailing_requires_partial)
+
     def test_main_parses_backtest_default_days_and_workers(self):
         argv = ['run.py', 'backtest']
 

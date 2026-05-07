@@ -126,6 +126,24 @@ function formatTimestamp(isoString?: string | null) {
   });
 }
 
+function formatDurationSeconds(value?: number | null) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return '0s';
+  }
+  const seconds = Math.max(0, Math.round(Number(value)));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) {
+    return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const minuteRemainder = minutes % 60;
+  return minuteRemainder ? `${hours}h ${minuteRemainder}m` : `${hours}h`;
+}
+
 function formatDateOnly(isoString?: string | null) {
   if (!isoString) {
     return '–';
@@ -531,6 +549,38 @@ function scanProgressText(summary: SummaryState) {
   return `${summary.pairs_completed || 0} / ${summary.pairs_total || 0} pairs`;
 }
 
+function scanQueueTitle(summary: SummaryState) {
+  const backlog = summary.scan_backlog;
+  const busy = Number(backlog?.busy_count || 0);
+  const pending = Number(backlog?.pending_count || 0);
+  if (busy || pending) {
+    return `${busy + pending} active`;
+  }
+  return 'Idle';
+}
+
+function scanQueueDetail(summary: SummaryState) {
+  const backlog = summary.scan_backlog;
+  const busy = Number(backlog?.busy_count || 0);
+  const pending = Number(backlog?.pending_count || 0);
+  const coalesced = Number(backlog?.coalesced_recent_count ?? backlog?.coalesced_count ?? 0);
+  const coalescedWindow = Number(backlog?.coalesced_window_seconds || 60);
+  const failed = Number(backlog?.failed_count || 0);
+  const oldest = backlog?.oldest_pending_age_seconds;
+  const pairNames = [
+    ...(backlog?.busy_pairs || []).map((item) => item.pair),
+    ...(backlog?.pending_pairs || []).map((item) => item.pair),
+  ];
+  const uniquePairs = Array.from(new Set(pairNames)).slice(0, 4);
+  const pairText = uniquePairs.length ? ` • ${uniquePairs.join(', ')}` : '';
+  const lagText = pending > 0 ? ` • oldest ${formatDurationSeconds(oldest)}` : '';
+  const coalescedText = coalescedWindow === 60
+    ? ` • coalesced ${coalesced}/min`
+    : ` • coalesced ${coalesced}/${formatDurationSeconds(coalescedWindow)}`;
+  const failedText = failed > 0 ? ` • failed ${failed}` : '';
+  return `busy ${busy} • pending ${pending}${lagText}${coalescedText}${failedText}${pairText}`;
+}
+
 function nextTransactionText(now: number) {
   const nextHour = new Date(now);
   nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
@@ -613,7 +663,7 @@ const WatchlistRow = memo(function WatchlistRow({ row }: { row: PairRow }) {
     <tr>
       <td>
         <a
-          href={`/live-trade?pair=${encodeURIComponent(row.pair)}`}
+          href={`/chart?pair=${encodeURIComponent(row.pair)}`}
           target="_blank"
           rel="noreferrer"
           className="pair-main pair-link"
@@ -905,6 +955,7 @@ const PositionMiniChart = memo(function PositionMiniChart({
     }
 
     let active = true;
+    let resizeObserver: ResizeObserver | null = null;
 
     async function load() {
       try {
@@ -992,17 +1043,33 @@ const PositionMiniChart = memo(function PositionMiniChart({
         chart.timeScale().scrollToRealTime();
         setStatus('');
 
-        new ResizeObserver(() => {
+        resizeObserver = new ResizeObserver(() => {
+          if (!active || chartRef.current !== chart) {
+            return;
+          }
           chart.applyOptions({ width: container.clientWidth });
-        }).observe(container);
+        });
+        resizeObserver.observe(container);
       } catch {
         if (active) setStatus('Failed to load chart');
       }
     }
 
     void load();
-    return () => { active = false; if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; } };
-  }, [pair, entryPrice, slPrice, tpPrice]);
+    return () => {
+      active = false;
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
+      seriesRef.current = null;
+      lastBarRef.current = null;
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+      }
+    };
+  }, [pair, entryPrice, entryTime, direction, slPrice, tpPrice, decimals]);
 
   useEffect(() => {
     if (livePrice == null || !seriesRef.current) {
@@ -1781,6 +1848,13 @@ export function DashboardPage() {
               </span>
             </article>
             <article className="metric-card">
+              <span className="meta-label">Scan queue</span>
+              <strong id="scan-backlog-count">{scanQueueTitle(summary)}</strong>
+              <span id="scan-backlog-detail" className="metric-detail">
+                {scanQueueDetail(summary)}
+              </span>
+            </article>
+            <article className="metric-card">
               <span className="meta-label">
                 Signals
                 <DataHealthDot health={summary.data_health} />
@@ -1920,7 +1994,7 @@ export function DashboardPage() {
                               Hide
                             </button>
                             <a
-                              href={`/live-trade?pair=${encodeURIComponent(position.pair)}`}
+                              href={`/chart?pair=${encodeURIComponent(position.pair)}`}
                               style={{ background: 'none', border: '1px solid var(--line)', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '0.75rem', color: 'var(--accent)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
                             >
                               View Chart

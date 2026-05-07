@@ -28,6 +28,7 @@ from .live import (
     ExecutionResult,
     PairScanRow,
     _scan_pair,
+    _signal_lag_note,
     _tracked_pair_set_for_execution,
     _tracked_pair_state_for_scan,
     apply_startup_scan_artifacts,
@@ -235,6 +236,7 @@ class LiveDashboardHub:
         self._currency_balances: dict[str, float] = {}
         self._log: deque[dict] = deque(maxlen=LOG_LIMIT)
         self._active_signal_meta: dict[str, dict[str, str]] = {}
+        self._consumed_signal_ids: set[str] = set()
 
         self._clients: set[web.WebSocketResponse] = set()
         self._lock = asyncio.Lock()
@@ -267,10 +269,11 @@ class LiveDashboardHub:
         self._scan_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix='ibkr-scan',
         )
+        self._pair_scan_worker_count = self._resolve_pair_scan_worker_count(len(pairs))
         self._pair_scan_executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix='ibkr-pair-scan',
+            max_workers=self._pair_scan_worker_count,
+            thread_name_prefix='ibkr-pair-scan',
         )
-        self._pair_scan_slot = asyncio.Lock()
         self._scan_busy_pairs: set[str] = set()
         self._scan_busy_meta: dict[str, dict] = {}
         self._scan_pending_requests: dict[str, _PairScanRequest] = {}
@@ -280,6 +283,8 @@ class LiveDashboardHub:
         self._scan_failed_count = 0
         self._scan_skipped_count = 0
         self._scan_coalesced_count = 0
+        self._scan_coalesced_events: deque[pd.Timestamp] = deque()
+        self._scan_coalesced_window_seconds = 60
         self._scan_last_started_at: pd.Timestamp | None = None
         self._scan_last_completed_at: pd.Timestamp | None = None
         self._housekeeping_nudge = asyncio.Event()
@@ -324,6 +329,22 @@ class LiveDashboardHub:
     def _ws_url(self) -> str:
         return f'ws://127.0.0.1:{self.port}/ws'
 
+    @staticmethod
+    def _resolve_pair_scan_worker_count(pair_count: int) -> int:
+        """Bound live pair-scan parallelism while still serializing per pair."""
+
+        pair_count = max(1, int(pair_count or 1))
+        cpu_count = max(1, os.cpu_count() or 1)
+        default_workers = min(pair_count, cpu_count)
+        raw = os.getenv('FX_SR_SCAN_WORKERS') or os.getenv('FX_SR_PAIR_SCAN_WORKERS')
+        if raw is None:
+            return default_workers
+        try:
+            requested = int(raw.strip())
+        except ValueError:
+            return default_workers
+        return max(1, min(pair_count, requested))
+
     def _execution_enabled(self) -> bool:
         """Return True when the dashboard is allowed to submit new orders."""
 
@@ -352,10 +373,26 @@ class LiveDashboardHub:
         except Exception:
             return None
 
+    def _prune_scan_coalesced_events(self, now_ts: pd.Timestamp) -> None:
+        cutoff = now_ts - pd.Timedelta(seconds=self._scan_coalesced_window_seconds)
+        while self._scan_coalesced_events and self._scan_coalesced_events[0] < cutoff:
+            self._scan_coalesced_events.popleft()
+
+    def _record_scan_coalesced(self) -> None:
+        now_ts = pd.Timestamp.now(tz='UTC')
+        self._scan_coalesced_count += 1
+        self._scan_coalesced_events.append(now_ts)
+        self._prune_scan_coalesced_events(now_ts)
+
+    def _recent_scan_coalesced_count(self, now_ts: pd.Timestamp) -> int:
+        self._prune_scan_coalesced_events(now_ts)
+        return len(self._scan_coalesced_events)
+
     def _scan_backlog_summary(self) -> dict:
         """Return low-cost pair-scan scheduler telemetry for the dashboard."""
 
         now_ts = pd.Timestamp.now(tz='UTC')
+        recent_coalesced = self._recent_scan_coalesced_count(now_ts)
         pending = sorted(
             self._scan_pending_requests.values(),
             key=lambda request: (request.requested_at, request.pair),
@@ -392,7 +429,10 @@ class LiveDashboardHub:
             'pending_count': len(pending_pairs),
             'busy_count': len(busy_pairs),
             'oldest_pending_age_seconds': oldest_pending_age,
-            'coalesced_count': self._scan_coalesced_count,
+            'coalesced_count': recent_coalesced,
+            'coalesced_recent_count': recent_coalesced,
+            'coalesced_total_count': self._scan_coalesced_count,
+            'coalesced_window_seconds': self._scan_coalesced_window_seconds,
             'submitted_count': self._scan_submitted_count,
             'completed_count': self._scan_completed_count,
             'failed_count': self._scan_failed_count,
@@ -402,8 +442,8 @@ class LiveDashboardHub:
             'last_started_at': self._iso_or_none(self._scan_last_started_at),
             'last_completed_at': self._iso_or_none(self._scan_last_completed_at),
             'executor': {
-                'max_workers': 1,
-                'active_slots': 1 if self._pair_scan_slot.locked() else 0,
+                'max_workers': self._pair_scan_worker_count,
+                'active_slots': len(busy_pairs),
                 'tracked_async_tasks': len(self._pending_tasks),
             },
             'heartbeat_at': now_ts.isoformat(),
@@ -781,6 +821,17 @@ class LiveDashboardHub:
 
         self._active_signal_meta.pop(pair, None)
 
+    @staticmethod
+    def _skip_consumes_signal(note: str | None) -> bool:
+        """Return True when a skipped execution candidate should not replay later."""
+
+        normalized = str(note or '').strip().lower()
+        return normalized in {
+            'position/order exists',
+            'duplicate pair signal',
+            'orderref already has broker activity',
+        } or normalized.startswith('live signal lag exceeded')
+
     def _sync_active_signal_tracking(self, rows: list[PairScanRow], *, seen_at=None) -> None:
         """Refresh lifecycle metadata from the current authoritative pair rows."""
 
@@ -870,7 +921,7 @@ class LiveDashboardHub:
 
         self._scan_submitted_count += 1
         if request.pair in self._scan_busy_pairs:
-            self._scan_coalesced_count += 1
+            self._record_scan_coalesced()
             self._scan_pending_requests[request.pair] = request
             return False
 
@@ -960,25 +1011,24 @@ class LiveDashboardHub:
     async def _run_pair_scan_request(self, request: _PairScanRequest) -> _PairScanRequest | None:
         """Run one coalesced pair scan through the bounded scan slot."""
 
-        async with self._pair_scan_slot:
-            latest = self._scan_pending_requests.pop(request.pair, None)
-            if latest is not None:
-                self._scan_skipped_count += 1
-                return latest
+        latest = self._scan_pending_requests.pop(request.pair, None)
+        if latest is not None:
+            self._scan_skipped_count += 1
+            return latest
 
-            started_at = pd.Timestamp.now(tz='UTC')
-            self._scan_last_started_at = started_at
-            self._scan_busy_meta[request.pair] = {
-                'kind': request.kind,
-                'generation': request.generation,
-                'requested_at': request.requested_at,
-                'started_at': started_at,
-            }
-            if request.kind == 'hourly':
-                await self._run_hourly_pair_scan(request)
-            else:
-                await self._run_minute_pair_scan(request)
-            return None
+        started_at = pd.Timestamp.now(tz='UTC')
+        self._scan_last_started_at = started_at
+        self._scan_busy_meta[request.pair] = {
+            'kind': request.kind,
+            'generation': request.generation,
+            'requested_at': request.requested_at,
+            'started_at': started_at,
+        }
+        if request.kind == 'hourly':
+            await self._run_hourly_pair_scan(request)
+        else:
+            await self._run_minute_pair_scan(request)
+        return None
 
     async def _run_minute_pair_scan(self, request: _PairScanRequest) -> None:
         """Intrabar mode: evaluate signal at each completed minute bar."""
@@ -3321,8 +3371,19 @@ class LiveDashboardHub:
         if row_payload is not None:
             await self._broadcast({'type': 'pair_update', 'row': row_payload, 'summary': summary})
 
-    async def _handle_signal(self, signal, *, source: str) -> None:
+    async def _handle_signal(
+        self,
+        signal,
+        *,
+        source: str,
+        enforce_lag_check: bool = True,
+    ) -> None:
         """Process a streaming signal detected from the live bar feed."""
+
+        signal_id = self._signal_identity(signal)
+        async with self._lock:
+            if signal_id in self._consumed_signal_ids:
+                return
 
         async with self._lock:
             portfolio_state = self._portfolio_state
@@ -3373,6 +3434,11 @@ class LiveDashboardHub:
         risk_pct = self.risk_pct
         account_currency = self.account_currency
         params = self.params
+        live_lag_note = (
+            _signal_lag_note(signal, params)
+            if enforce_lag_check
+            else None
+        )
 
         def _size_and_execute():
             if execute_orders:
@@ -3401,7 +3467,23 @@ class LiveDashboardHub:
                 ibkr_account=ibkr_acct,
             )
             execution_results = []
-            if execute_orders:
+            if live_lag_note is not None:
+                plan = size_plans[0] if size_plans else None
+                execution_results = [
+                    ExecutionResult(
+                        pair=signal.pair,
+                        direction=signal.direction,
+                        units=int(plan.units) if plan is not None else 0,
+                        status='SKIPPED',
+                        note=live_lag_note,
+                    )
+                ]
+                record_execution_results(
+                    [signal], size_plans, execution_results,
+                    execution_mode=exec_mode,
+                    ibkr_account=ibkr_acct,
+                )
+            elif execute_orders:
                 execution_results = execute_signal_plans(
                     [signal],
                     size_plans,
@@ -3458,6 +3540,8 @@ class LiveDashboardHub:
                 self._tracked = refreshed_tracked
                 self._apply_live_quotes()
             for result in execution_results:
+                if result.status == 'SKIPPED' and self._skip_consumes_signal(result.note):
+                    self._consumed_signal_ids.add(signal_id)
                 self._execution_results.append(result)
                 level = 'success' if result.status.upper().endswith('SUBMITTED') else 'warning'
                 if result.status in {'PARTIAL', 'OPEN'}:
@@ -4362,6 +4446,9 @@ class LiveDashboardHub:
     async def _run_backfill(self) -> None:
         """Run backfill in executor and publish progress to clients."""
 
+        import time as _time
+
+        backfill_start = _time.monotonic()
         async with self._lock:
             self.summary = self._build_summary(status='backfilling')
             self._append_log('info', 'Starting startup backfill...')
@@ -4403,6 +4490,8 @@ class LiveDashboardHub:
                 self._backfill_data,
             )
         except Exception as exc:
+            backfill_elapsed = _time.monotonic() - backfill_start
+            print(f'  [backfill] Failed after {backfill_elapsed:.1f}s: {type(exc).__name__}: {exc}')
             progress_stop.set()
             await progress_task
             async with self._lock:
@@ -4416,8 +4505,13 @@ class LiveDashboardHub:
 
         self._backfill_progress.update(phase='done', current_pair=None)
         await self._broadcast_log(
-            'info',
-            f'Backfill data loaded for {len(self._accumulator.seeded_pairs)} pairs.',
+            'success',
+            f'Backfill completed: {len(self._accumulator.seeded_pairs)} pairs loaded into accumulator.',
+        )
+        backfill_elapsed = _time.monotonic() - backfill_start
+        print(
+            f'  [backfill] Pipeline complete in {backfill_elapsed:.1f}s; '
+            f'{len(self._accumulator.seeded_pairs)} pairs loaded into accumulator.'
         )
 
         if wf_signals:
@@ -4598,6 +4692,23 @@ class LiveDashboardHub:
 
         if stale_exits:
             self._housekeeping_nudge.set()
+
+        startup_signal_ids: set[str] = set()
+        startup_signals = []
+        for signal in signals:
+            signal_id = self._signal_identity(signal)
+            if signal_id in startup_signal_ids:
+                continue
+            startup_signal_ids.add(signal_id)
+            startup_signals.append(signal)
+
+        if startup_signals:
+            await self._broadcast_log(
+                'info',
+                f'Processing {len(startup_signals)} startup signal(s) through execution checks.',
+            )
+            for signal in startup_signals:
+                await self._handle_signal(signal, source='startup', enforce_lag_check=False)
 
     def _pair_ticker_map(self) -> dict[str, str]:
         """Return accumulator pair IDs mapped to cache ticker symbols."""
@@ -4892,7 +5003,10 @@ class LiveDashboardHub:
     async def start(self) -> None:
         """Start backfill, then streaming and housekeeping tasks."""
 
+        import time as _time
+
         self._loop = asyncio.get_running_loop()
+        startup_start = _time.monotonic()
         await self._broadcast_log('info', 'Live dashboard startup requested.')
         start_background_writer()
         from .live_history import record_system_event
@@ -4907,7 +5021,11 @@ class LiveDashboardHub:
             await self._broadcast_log('info', 'Live quote stream already running.')
 
         # Phase 1: backfill historical data with progress
+        backfill_started_at = _time.monotonic()
         await self._run_backfill()
+        backfill_duration = _time.monotonic() - backfill_started_at
+        await self._broadcast_log('info', 'Startup backfill complete; applying cached state and replaying buffered bars.')
+        print(f'  [startup] Backfill done in {backfill_duration:.1f}s; entering startup catch-up.')
 
         # Start persistence as soon as backfill has seeded the accumulator.
         # Startup replay and execution hydration can be slow; DB writes should
@@ -4937,8 +5055,14 @@ class LiveDashboardHub:
             state = self._export_state()
         await self._broadcast({'type': 'snapshot', 'state': state})
         if replayed_bars:
-            await self._broadcast_log('info', f'Replayed {replayed_bars} buffered live bars.')
-        await self._broadcast_log('info', 'Startup scans complete.')
+            await self._broadcast_log('success', f'Replayed {replayed_bars} buffered live bars for startup catch-up.')
+            print(f'  [startup] Replayed {replayed_bars} buffered live bars.')
+        else:
+            await self._broadcast_log('info', 'No buffered startup bars were captured while backfilling.')
+            print('  [startup] No buffered startup bars were captured while backfilling.')
+        await self._broadcast_log('success', 'Startup catch-up complete. Live forward scanning is now running on incoming data.')
+        total_startup_elapsed = _time.monotonic() - startup_start
+        print(f'  [startup] Live catch-up complete; switching to forward scanning in {total_startup_elapsed:.1f}s total.')
 
         # Phase 2: start low-frequency housekeeping
         self._scan_task = asyncio.create_task(self._housekeeping_loop())
@@ -5432,18 +5556,51 @@ def _spa_index_response() -> web.StreamResponse:
 
 
 async def _chart_data(request: web.Request) -> web.StreamResponse:
-    """Return OHLC data for a pair from the accumulator."""
+    """Return OHLC data for a pair from cache when a range is requested."""
 
     hub: LiveDashboardHub = request.app["hub"]
     pair = request.query.get('pair', '').upper()
     if not pair or pair not in hub.pairs:
         return web.json_response({'error': 'unknown pair'}, status=400)
 
-    tf = hub.chart_tf
-    if tf == '1m':
-        df = hub._accumulator.get_minute_df(pair, tail_n=1000)
-    else:
-        df = hub._accumulator.get_hourly_df(pair, tail_n=500)
+    def _parse_ts(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            ts = pd.Timestamp(raw)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize('UTC')
+            else:
+                ts = ts.tz_convert('UTC')
+            return ts.to_pydatetime()
+        except Exception:
+            return None
+
+    requested_tf = (request.query.get('tf') or hub.chart_tf or '1h').strip().lower()
+    tf = requested_tf if requested_tf in {'1m', '1h'} else hub.chart_tf
+    start = _parse_ts(request.query.get('start'))
+    end = _parse_ts(request.query.get('end'))
+    pair_info = hub.pairs.get(pair, {})
+    df = pd.DataFrame()
+
+    if start is not None or end is not None:
+        ticker = pair_info.get('ticker') or pair
+        try:
+            df = await asyncio.to_thread(load_ohlc, ticker, tf, start=start, end=end)
+        except Exception:
+            df = pd.DataFrame()
+
+    if df.empty:
+        try:
+            tail_n = int(request.query.get('tail') or (2000 if tf == '1m' else 500))
+        except (TypeError, ValueError):
+            tail_n = 2000 if tf == '1m' else 500
+        tail_n = max(1, min(tail_n, 50000))
+        if tf == '1m':
+            df = hub._accumulator.get_minute_df(pair, tail_n=tail_n)
+        else:
+            df = hub._accumulator.get_hourly_df(pair, tail_n=tail_n)
+
     bars = []
     if not df.empty:
         for ts, row in df.iterrows():
@@ -5455,7 +5612,6 @@ async def _chart_data(request: web.Request) -> web.StreamResponse:
                 'close': float(row['Close']),
             })
 
-    pair_info = hub.pairs.get(pair, {})
     zone_data = hub._scanner._zones.get(pair)
     support, resistance = (None, None)
     if zone_data:

@@ -1,5 +1,6 @@
 """Tests for neutralization position tracking."""
 
+import logging
 import os
 import pytest
 import psycopg
@@ -97,6 +98,26 @@ def test_neutralization_pair_direction_unknown_pair():
     assert result is None
 
 
+def test_fxconv_qualification_filter_suppresses_expected_probe_noise():
+    from fx_sr.ibkr import _SuppressFxconvQualificationFilter
+
+    filter_ = _SuppressFxconvQualificationFilter()
+
+    def record(message):
+        return logging.LogRecord('ib_async.wrapper', logging.ERROR, '', 0, message, (), None)
+
+    assert not filter_.filter(record(
+        "Error 200, reqId 12: The destination or exchange selected is Invalid. "
+        "contract: Contract(secType='CASH', symbol='EUR', exchange='FXCONV', currency='GBP')"
+    ))
+    assert not filter_.filter(record(
+        "Unknown contract: Contract(secType='CASH', symbol='EUR', exchange='FXCONV', currency='GBP')"
+    ))
+    assert filter_.filter(record(
+        "Error 200, reqId 99: unrelated contract: Contract(secType='CASH', exchange='IDEALPRO')"
+    ))
+
+
 import types
 from unittest.mock import patch, MagicMock
 from fx_sr.positions import sync_positions
@@ -175,8 +196,13 @@ def _mock_ib_for_neutralize(fill_status):
     from fx_sr.profiles import PAIRS
 
     ib = MagicMock()
+    ib.qualify_calls = []
 
     def qualify(c):
+        ib.qualify_calls.append((
+            getattr(c, 'exchange', ''),
+            getattr(c, 'symbol', '') + getattr(c, 'currency', ''),
+        ))
         if getattr(c, 'exchange', '') == 'FXCONV':
             c.conId = 0
             return [c]
@@ -198,6 +224,9 @@ def _mock_ib_for_neutralize(fill_status):
 
 def _run_neutralize(fill_status, currency='EUR', amount=17000.0, account_currency='GBP'):
     """Run neutralize_currency_balance with a fully-mocked IBKR connection."""
+    from fx_sr import ibkr as ibkr_module
+
+    ibkr_module._FXCONV_QUALIFICATION_CACHE.clear()
     ib = _mock_ib_for_neutralize(fill_status)
 
     fake_ib_async = types.ModuleType('ib_async')
@@ -211,6 +240,7 @@ def _run_neutralize(fill_status, currency='EUR', amount=17000.0, account_currenc
          patch.dict(sys.modules, {'ib_async': fake_ib_async}):
         from fx_sr.ibkr import neutralize_currency_balance
         neutralize_currency_balance(currency, amount, account_currency)
+    return ib
 
 
 def test_neutralize_records_on_filled():
@@ -218,6 +248,32 @@ def test_neutralize_records_on_filled():
     _run_neutralize('Filled')
     positions = load_neutralization_positions()
     assert ('EURGBP', 'SHORT') in positions
+
+
+def test_neutralize_caches_failed_fxconv_qualification():
+    """Repeated neutralization should not re-probe known-invalid FXCONV pairs."""
+    from fx_sr import ibkr as ibkr_module
+
+    ibkr_module._FXCONV_QUALIFICATION_CACHE.clear()
+    ib = _mock_ib_for_neutralize('Filled')
+
+    fake_ib_async = types.ModuleType('ib_async')
+    fake_ib_async.Contract = _FakeContract
+    fake_ib_async.MarketOrder = MagicMock(return_value=MagicMock())
+    fake_ib_async.Forex = _fake_forex
+
+    import sys
+    with patch('fx_sr.ibkr._get_connection', return_value=(ib, True)), \
+         patch('fx_sr.ibkr.log_order_event'), \
+         patch.dict(sys.modules, {'ib_async': fake_ib_async}):
+        from fx_sr.ibkr import neutralize_currency_balance
+        neutralize_currency_balance('EUR', 17000.0, 'GBP')
+        neutralize_currency_balance('EUR', 17000.0, 'GBP')
+
+    fxconv_calls = [call for call in ib.qualify_calls if call[0] == 'FXCONV']
+    idealpro_calls = [call for call in ib.qualify_calls if call[0] == 'IDEALPRO']
+    assert fxconv_calls == [('FXCONV', 'EURGBP'), ('FXCONV', 'GBPEUR')]
+    assert idealpro_calls == [('IDEALPRO', 'EURGBP'), ('IDEALPRO', 'EURGBP')]
 
 
 def test_neutralize_does_not_record_on_submitted():

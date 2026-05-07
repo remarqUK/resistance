@@ -156,6 +156,7 @@
   /* ---- Chart ---- */
   var chart = null;
   var candleSeries = null;
+  var chartBars = [];
 
   function initChart() {
     var container = document.getElementById('chart-container');
@@ -174,7 +175,26 @@
 
   function loadChartData() {
     if (!pair) return Promise.resolve();
-    return fetch('/api/chart-data?pair=' + encodeURIComponent(pair) + '&tf=1m')
+    var chartParams = new URLSearchParams();
+    chartParams.set('pair', pair);
+    chartParams.set('tf', '1m');
+    chartParams.set('tail', '20000');
+    if (entryTime) {
+      var startDate = new Date(entryTime);
+      if (!isNaN(startDate)) {
+        startDate = new Date(startDate.getTime() - 12 * 3600 * 1000);
+        chartParams.set('start', startDate.toISOString());
+      }
+      var endDate = exitTime ? new Date(exitTime) : new Date();
+      if (!isNaN(endDate)) {
+        if (exitTime) {
+          endDate = new Date(Math.min(Date.now(), endDate.getTime() + 7 * 24 * 3600 * 1000));
+        }
+        chartParams.set('end', endDate.toISOString());
+      }
+    }
+
+    return fetch('/api/chart-data?' + chartParams.toString())
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         if (data.error) {
@@ -185,12 +205,13 @@
           }
           return;
         }
-        if (data.bars && data.bars.length) {
-          candleSeries.setData(data.bars);
+        chartBars = data.bars || [];
+        if (chartBars.length) {
+          candleSeries.setData(chartBars);
         }
 
         // S/R zone bands
-        var zoneSeries = window.fxChartCore.addZoneBands(chart, data.support, data.resistance, data.bars || []);
+        var zoneSeries = window.fxChartCore.addZoneBands(chart, data.support, data.resistance, chartBars);
         for (var i = 0; i < zoneSeries.length; i++) {
           if (zoneSeries[i] && zoneSeries[i].applyOptions) {
             zoneSeries[i].applyOptions({ autoscaleInfoProvider: function () { return null; } });
@@ -317,27 +338,39 @@
       });
     }
 
-    // Scroll to trade — show ~60 bars of context around the trade
+    // Scroll to trade, but keep post-exit bars available for review.
     if (entryTime && candleSeries) {
       var entryTs = Math.floor(new Date(entryTime).getTime() / 1000);
       var exitTs = exitTime ? Math.floor(new Date(exitTime).getTime() / 1000) : entryTs;
 
       // Check if the trade falls within the loaded chart data range
-      var barData = candleSeries.data ? candleSeries.data() : null;
+      var barData = chartBars;
       var chartStart = barData && barData.length ? barData[0].time : null;
       var chartEnd = barData && barData.length ? barData[barData.length - 1].time : null;
       var tradeInRange = chartStart != null && chartEnd != null
         && entryTs >= chartStart - 3600 && entryTs <= chartEnd + 3600;
 
       if (tradeInRange) {
-        var tradeDuration = exitTs - entryTs;
+        var tradeDuration = Math.max(exitTs - entryTs, 0);
         var barWidth = 60; // 1-minute bars
         var minPad = 30 * barWidth;
-        var halfSpan = Math.max(tradeDuration / 2, minPad);
-        var midpoint = (entryTs + exitTs) / 2;
+        var leftPad = minPad;
+        var rightPad = exitTime
+          ? Math.max(minPad, Math.min(Math.max(tradeDuration * 0.25, minPad), 6 * 3600))
+          : minPad;
+        var visibleFrom = Math.max(chartStart, entryTs - leftPad);
+        var visibleTo = exitTime
+          ? Math.min(chartEnd, exitTs + rightPad)
+          : Math.min(chartEnd, entryTs + rightPad);
+        if (exitTime && chartEnd > exitTs && visibleTo <= exitTs) {
+          visibleTo = Math.min(chartEnd, exitTs + minPad);
+        }
+        if (visibleTo <= visibleFrom) {
+          visibleTo = Math.min(chartEnd, visibleFrom + minPad * 2);
+        }
         chart.timeScale().setVisibleRange({
-          from: midpoint - halfSpan,
-          to: midpoint + halfSpan,
+          from: visibleFrom,
+          to: visibleTo,
         });
       } else {
         chart.timeScale().fitContent();
@@ -471,7 +504,6 @@
     return loadChartData();
   }).then(function () {
     addTradeOverlay();
-    setYAxisToTradeTargets();
     fetchOtherTrades();
   });
 

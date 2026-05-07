@@ -19,6 +19,8 @@ env/
 
 # Trade diagnostic snapshots
 logs/
+position-diagnostics.json
+dashboard-bootstrap.json
 
 # Parameter-sweep outputs (regenerated per run)
 sweep_reports/

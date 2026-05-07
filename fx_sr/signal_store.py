@@ -24,6 +24,9 @@ ACTIVE_EXECUTION_STATUSES = {
     "OPEN",
     "EXIT_SIGNAL",
 }
+_VALIDATION_WARNING_STATUSES = {
+    "VALIDATIONERROR",
+}
 BROKER_EXECUTION_EVIDENCE_STATUSES = {
     "SUBMITTED",
     "PRESUBMITTED",
@@ -251,6 +254,27 @@ def ensure_signal_tables(db_path: str | None = None) -> str:
                 CREATE INDEX IF NOT EXISTS idx_detected_signal_reconcile
                 ON detected_signal (order_id, status, pair)
                 WHERE transacted = 1 AND closed_at IS NULL AND order_id IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_closed_at_desc
+                ON detected_signal (closed_at DESC)
+                WHERE closed_at IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_pair_dir_time_open
+                ON detected_signal (pair, direction, signal_time)
+                WHERE closed_at IS NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_detected_signal_executed_at_desc
+                ON detected_signal (executed_at DESC)
+                WHERE executed_at IS NOT NULL
                 """
             )
             conn.execute(
@@ -590,6 +614,11 @@ def normalize_status(status: str) -> str:
 
     normalized = (status or "").strip().upper()
     if not normalized:
+        return "SUBMITTED"
+    normalized_key = normalized.replace(" ", "").replace("-", "").replace("_", "")
+    if normalized_key in _VALIDATION_WARNING_STATUSES:
+        # IBKR emits these warnings as non-fatal broker messages (\"ValidationError\").
+        # Treat them as submitted while we wait for a hard terminal update.
         return "SUBMITTED"
     return normalized
 

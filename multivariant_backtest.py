@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import random
@@ -234,6 +235,83 @@ def _build_variant_space(seed: int, max_variants: int, base_profile: dict) -> li
     return variants
 
 
+def _build_runner_exit_variant_space(seed: int, max_variants: int, base_profile: dict) -> list[dict]:
+    """Build a focused search around high_volume_runner exit-management knobs."""
+
+    rng = random.Random(seed)
+    param_space = {
+        'partial_close_fraction': [0.70, 0.80, 0.90, 0.95, 0.98],
+        'partial_close_target_r': [0.80, 1.00, 1.10, 1.20],
+        'trailing_fixed_r': [0.15, 0.20, 0.25, 0.35, 0.50],
+        'trailing_activate_r': [0.60, 0.80, 1.00, 1.10],
+        'trailing_requires_partial': [False, True],
+    }
+
+    base_overrides = {
+        'partial_close_enabled': True,
+        'trailing_mode': 'fixed_r',
+    }
+    variants = [{}]
+
+    for key, values in param_space.items():
+        baseline_value = base_profile.get(key)
+        for value in values:
+            if baseline_value is not None and value == baseline_value:
+                continue
+            variants.append({**base_overrides, key: value})
+
+    all_combos = []
+    keys = list(param_space)
+    for values in itertools.product(*(param_space[key] for key in keys)):
+        combo = {**base_overrides}
+        combo.update(dict(zip(keys, values)))
+        if all(base_profile.get(key) == combo[key] for key in keys):
+            continue
+        all_combos.append(combo)
+
+    rng.shuffle(all_combos)
+    variants.extend(all_combos)
+    variants = _dedupe_variants(variants)
+    if len(variants) > max_variants:
+        variants = variants[:max_variants]
+    return variants
+
+
+def _build_runner_fraction_refine_variant_space(seed: int, max_variants: int, base_profile: dict) -> list[dict]:
+    """Refine the runner exit search around partial_close_fraction ~= 0.70."""
+
+    rng = random.Random(seed)
+    param_space = {
+        'partial_close_fraction': [0.68, 0.70, 0.72],
+        'partial_close_target_r': [0.80, 1.00, 1.10, 1.20],
+        'trailing_fixed_r': [0.20, 0.25, 0.30, 0.35],
+        'trailing_activate_r': [0.80, 1.00, 1.10],
+        'trailing_requires_partial': [True],
+    }
+
+    base_overrides = {
+        'partial_close_enabled': True,
+        'trailing_mode': 'fixed_r',
+    }
+    variants = [{}]
+
+    all_combos = []
+    keys = list(param_space)
+    for values in itertools.product(*(param_space[key] for key in keys)):
+        combo = {**base_overrides}
+        combo.update(dict(zip(keys, values)))
+        if all(base_profile.get(key) == combo[key] for key in keys):
+            continue
+        all_combos.append(combo)
+
+    rng.shuffle(all_combos)
+    variants.extend(all_combos)
+    variants = _dedupe_variants(variants)
+    if len(variants) > max_variants:
+        variants = variants[:max_variants]
+    return variants
+
+
 def _fill_cache_gaps(profile: dict) -> None:
     """Run the same gap-check and fill as `run.py fill`."""
     from fx_sr.data import download_single_interval
@@ -322,6 +400,40 @@ def _evaluate_in_parallel(
     pips = {pair: PAIRS[pair].get('pip', 0.0001) for pair in pair_order}
     tasks = list(enumerate(variants))
     results = []
+    total = len(tasks)
+    started_at = time.time()
+    best_result = None
+
+    def _record_result(result: dict, variant_idx: int) -> None:
+        nonlocal best_result
+        result['variant_idx'] = variant_idx
+        results.append(result)
+        if result.get('status') == 'ok':
+            if (
+                best_result is None
+                or float(result.get('final_balance', 0.0)) > float(best_result.get('final_balance', 0.0))
+            ):
+                best_result = result
+        completed = len(results)
+        if completed == 1 or completed == total or completed % 10 == 0:
+            elapsed = time.time() - started_at
+            rate = completed / elapsed if elapsed > 0 else 0.0
+            best_text = 'none yet'
+            if best_result is not None:
+                overrides = ', '.join(
+                    f'{k}={v}' for k, v in sorted(best_result.get('overrides', {}).items())
+                ) or 'baseline'
+                best_text = (
+                    f"GBP {float(best_result.get('final_balance', 0.0)):,.2g}, "
+                    f"DD={float(best_result.get('max_dd', 0.0)):.2f}%, "
+                    f"WR={float(best_result.get('wr', 0.0)):.1f}%, "
+                    f"{overrides}"
+                )
+            _log(
+                f'  Progress: {completed}/{total} variants '
+                f'({rate:.2f}/s, {elapsed:.0f}s elapsed); best={best_text}'
+            )
+
     init_args = (hourly_data, zone_cache, pips, profile, pair_order,
                  starting_balance, risk_pct, minute_data, execution_mode)
     try:
@@ -347,8 +459,7 @@ def _evaluate_in_parallel(
                         'raw_wr': 0.0,
                         'skip_counts': {},
                     }
-                result['variant_idx'] = variant_idx
-                results.append(result)
+                _record_result(result, variant_idx)
     except (OSError, ValueError, PermissionError, RuntimeError) as exc:
         print(f'Process pool unavailable ({exc}); falling back to thread pool for evaluation.')
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -369,8 +480,7 @@ def _evaluate_in_parallel(
                         'raw_wr': 0.0,
                         'skip_counts': {},
                     }
-                result['variant_idx'] = variant_idx
-                results.append(result)
+                _record_result(result, variant_idx)
 
     return results
 
@@ -421,6 +531,16 @@ def _parse_args():
         type=int,
         default=600,
         help='Upper bound for generated candidate variants',
+    )
+    parser.add_argument(
+        '--runner-exit-sweep',
+        action='store_true',
+        help='Only sweep high_volume_runner partial/trailing exit-management knobs',
+    )
+    parser.add_argument(
+        '--runner-fraction-refine',
+        action='store_true',
+        help='Refine runner exits around partial_close_fraction 0.68/0.70/0.72',
     )
     parser.add_argument(
         '--seed',
@@ -522,7 +642,20 @@ def main():
     zone_cache = precompute_zone_cache_parallel(data, profile['zone_history_days'], max_workers=zone_workers)
     _log(f'Zone cache built: {len(zone_cache)} entries in {time.time() - t0:.1f}s')
 
-    variants = _build_variant_space(seed=args.seed, max_variants=args.max_variants, base_profile=profile)
+    if args.runner_fraction_refine:
+        variants = _build_runner_fraction_refine_variant_space(
+            seed=args.seed,
+            max_variants=args.max_variants,
+            base_profile=profile,
+        )
+    elif args.runner_exit_sweep:
+        variants = _build_runner_exit_variant_space(
+            seed=args.seed,
+            max_variants=args.max_variants,
+            base_profile=profile,
+        )
+    else:
+        variants = _build_variant_space(seed=args.seed, max_variants=args.max_variants, base_profile=profile)
     _log(f'Generated {len(variants)} candidate variants')
 
     # Score baseline in-process for normalization. We share the same evaluator path
@@ -611,6 +744,8 @@ def main():
             'search': {
                 'seed': args.seed,
                 'max_variants': args.max_variants,
+                'runner_exit_sweep': args.runner_exit_sweep,
+                'runner_fraction_refine': args.runner_fraction_refine,
                 'max_workers': args.max_workers,
                 'target_dd': args.target_dd,
                 'target_wr': args.target_wr,

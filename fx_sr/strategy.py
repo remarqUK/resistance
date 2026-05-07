@@ -161,6 +161,7 @@ class StrategyParams:
     correlation_prefer_quality: bool = False    # prefer higher-quality trades in correlation filter
     # Submit-time live execution guards
     max_submit_quote_age_seconds: float = 2.0  # reject stale submit-time quotes
+    max_live_signal_lag_seconds: float = 90.0  # reject live signals rediscovered too late for backtest-equivalent execution
     max_submit_spread_pips: float = 2.0        # reject wide spreads at submit time
     max_submit_entry_drift_r: float = 0.25     # reject entries drifting too far from planned R
     prefer_l2_submit_quote: bool = True        # prefer L2 top-of-book over L1 when available
@@ -258,6 +259,7 @@ def params_from_profile(profile: dict, **overrides) -> 'StrategyParams':
         quality_risk_max=merged.get('quality_risk_max', 1.5),
         correlation_prefer_quality=merged.get('correlation_prefer_quality', False),
         max_submit_quote_age_seconds=merged.get('max_submit_quote_age_seconds', 2.0),
+        max_live_signal_lag_seconds=merged.get('max_live_signal_lag_seconds', 90.0),
         max_submit_spread_pips=merged.get('max_submit_spread_pips', 2.0),
         max_submit_entry_drift_r=merged.get('max_submit_entry_drift_r', 0.25),
         prefer_l2_submit_quote=merged.get('prefer_l2_submit_quote', True),
